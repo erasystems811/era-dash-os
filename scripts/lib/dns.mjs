@@ -19,10 +19,15 @@ export async function addARecord({ host, username, loginKey }, domain, name, ip)
   return data;
 }
 
+// DirectAdmin deletes by "select"-ing records via arecs0=name=X&value=Y
+// (URL-encoded as one param), not by passing name/value directly — verified
+// live 2026-07-31 against a throwaway record.
 export async function deleteARecord({ host, username, loginKey }, domain, name, ip) {
-  const url = `https://${host}/CMD_API_DNS_CONTROL?domain=${encodeURIComponent(domain)}&action=select&type=A&name=${encodeURIComponent(name)}&value=${encodeURIComponent(ip)}&json=yes`;
+  const combined = `name=${name}&value=${ip}`;
+  const url = `https://${host}/CMD_API_DNS_CONTROL?domain=${encodeURIComponent(domain)}&type=A&arecs0=${encodeURIComponent(combined)}&action=select&json=yes`;
   const res = await fetch(url, { headers: authHeader(username, loginKey) });
-  if (!res.ok && res.status !== 404) throw new Error(`DirectAdmin delete DNS record failed: ${res.status} ${await res.text()}`);
+  const text = await res.text();
+  if (!res.ok && res.status !== 404) throw new Error(`DirectAdmin delete DNS record failed: ${res.status} ${text}`);
 }
 
 export function manualInstructions(domain, name, ip) {
