@@ -9,6 +9,9 @@ import { loadRegistry, saveRegistry, findClient, removeClient } from './lib/regi
 import { loadSecrets } from './lib/secrets.mjs';
 import * as digitalocean from './lib/digitalocean.mjs';
 import * as github from './lib/github.mjs';
+import * as dns from './lib/dns.mjs';
+
+const ROOT_DOMAIN = process.env.ERA_ROOT_DOMAIN || 'erasystems.com.ng';
 
 function parseArgs(argv) {
   const args = {};
@@ -37,7 +40,12 @@ async function main() {
     await github.deleteRepo(secrets.GITHUB_TOKEN, repoMatch[1], repoMatch[2]);
   }
 
-  console.log('NOTE: the DNS A record was not auto-removed (delete it manually in the Go54 panel if it was added).');
+  try {
+    await dns.deleteARecord({ host: secrets.DA_HOST, username: secrets.DA_USERNAME, loginKey: secrets.DA_LOGIN_KEY }, ROOT_DOMAIN, client.name, client.ip);
+    console.log('Removed the DNS A record.');
+  } catch (err) {
+    console.log(`NOTE: DNS A record removal failed (${err.message}) — delete "${client.name}" manually at da17.host-ww.net:2222 > DNS Management if it's still there.`);
+  }
 
   removeClient(registry, client.name);
   saveRegistry(registry);

@@ -12,7 +12,7 @@ your behalf) until it's proven, then a form gets built on top of it.
 
 1. Copy `secrets.env.example` to `/opt/era-control/secrets.env` on the control
    server (currently the same droplet Bali runs on: `143.198.179.150`) and
-   fill in the 5 keys. `chmod 600` it.
+   fill in the 7 keys. `chmod 600` it.
 2. Copy this whole repo to `/opt/era-control/era-dash-os` on that server.
 3. Run everything below **from that server** (`ssh root@143.198.179.150`,
    then `cd /opt/era-control/era-dash-os`) — the scripts read secrets and the
@@ -48,10 +48,12 @@ node scripts/teardown-client.mjs --client=slug
 Deletes the droplet and GitHub repo. Use for cleaning up test clients while
 verifying this automation, not for casual real-client offboarding.
 
-## Known gap to verify before real use
+## DNS
 
-`scripts/lib/dns.mjs` — the exact Go54/WhoGoHost DNS API endpoint shape
-wasn't fully confirmed from their public docs while building this. It's
-wrapped so a failure there doesn't block the rest of setup (falls back to
-printing the manual DNS record to add), but confirm/fix the real endpoint the
-first time this runs with a real `GO54_API_KEY`.
+erasystems.com.ng's DNS lives on a DirectAdmin server behind Go54's panel
+(`da17.host-ww.net:2222`). DNS automation uses a DirectAdmin "Login Key"
+(Account menu > Login Keys), scoped to `CMD_API_DNS_CONTROL` only and locked
+to the control server's IP — confirmed working live 2026-07-31. If DNS setup
+ever fails for the wrong reason (e.g. the login key gets removed/regenerated),
+it falls back to printing the manual record to paste in instead of blocking
+the rest of setup.

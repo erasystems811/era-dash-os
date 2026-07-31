@@ -86,7 +86,7 @@ async function main() {
   console.log(`Setting up "${args.name}" -> https://${subdomain}`);
 
   const secrets = loadSecrets();
-  requireSecrets(secrets, ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DIGITALOCEAN_TOKEN', 'GITHUB_TOKEN', 'GO54_API_KEY']);
+  requireSecrets(secrets, ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DIGITALOCEAN_TOKEN', 'GITHUB_TOKEN', 'DA_USERNAME', 'DA_LOGIN_KEY', 'DA_HOST']);
 
   const registry = loadRegistry();
   if (findClient(registry, args.slug)) {
@@ -170,7 +170,7 @@ async function main() {
   console.log('Adding DNS record...');
   let dnsOk = true;
   try {
-    await dns.addARecord(secrets.GO54_API_KEY, ROOT_DOMAIN, args.slug, ip);
+    await dns.addARecord({ host: secrets.DA_HOST, username: secrets.DA_USERNAME, loginKey: secrets.DA_LOGIN_KEY }, ROOT_DOMAIN, args.slug, ip);
   } catch (err) {
     dnsOk = false;
     console.log(`  ${dns.manualInstructions(ROOT_DOMAIN, args.slug, ip)}`);
