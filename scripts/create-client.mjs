@@ -152,27 +152,42 @@ async function main() {
   const remoteDir = `/opt/${args.slug}`;
   await runRemote(ip, `mkdir -p ${remoteDir}/dashboard`);
   const tmpDir = path.join(os.tmpdir(), `era-${args.slug}`);
+  // PostgREST connects as its own "authenticator" role (not "app"), so that
+  // role must be created with the real generated password, and given access
+  // to whatever schema.sql creates — none of that can live in the static
+  // schema.sql template since the password is per-client.
+  const initSql = [
+    `CREATE ROLE authenticator WITH LOGIN PASSWORD '${vars.AUTHENTICATOR_PASSWORD.replace(/'/g, "''")}' NOINHERIT;`,
+    `GRANT USAGE ON SCHEMA public TO authenticator;`,
+    schema,
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticator;`,
+    `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticator;`,
+  ].join('\n');
   writeLocalTemp(tmpDir, {
     'docker-compose.yml': dockerComposeReal,
     Caddyfile: caddyfile,
     '.env': envReal,
-    'schema.sql': schema,
+    'init.sql': initSql,
   });
   await copyToRemote(ip, `${tmpDir}/docker-compose.yml`, `${remoteDir}/docker-compose.yml`);
   await copyToRemote(ip, `${tmpDir}/Caddyfile`, `${remoteDir}/Caddyfile`);
   await copyToRemote(ip, `${tmpDir}/.env`, `${remoteDir}/.env`);
-  await copyToRemote(ip, `${tmpDir}/schema.sql`, `${remoteDir}/schema.sql`);
+  await copyToRemote(ip, `${tmpDir}/init.sql`, `${remoteDir}/init.sql`);
   await copyToRemote(ip, path.join(TEMPLATES_DIR, 'dashboard'), `${remoteDir}/`, { recursive: true });
   await runRemote(ip, `chmod 600 ${remoteDir}/.env`);
 
   console.log('Starting the app (docker compose up)...');
   await runRemote(ip, `cd ${remoteDir} && docker compose up -d --build`);
 
-  console.log('Applying starting database schema...');
+  console.log('Waiting for the database to be ready...');
   await runRemote(
     ip,
-    `sleep 8 && docker exec ${args.slug}-postgres-1 psql -U app -d ${args.slug} -f - < ${remoteDir}/schema.sql || cat ${remoteDir}/schema.sql | docker exec -i ${args.slug}-postgres-1 psql -U app -d ${args.slug}`
+    `for i in $(seq 1 30); do docker exec ${args.slug}-postgres-1 pg_isready -U app > /dev/null 2>&1 && break; sleep 2; done`
   );
+
+  console.log('Applying starting database schema...');
+  await runRemote(ip, `docker exec -i ${args.slug}-postgres-1 psql -U app -d ${args.slug} -v ON_ERROR_STOP=1 < ${remoteDir}/init.sql`);
+  await runRemote(ip, `cd ${remoteDir} && docker compose restart postgrest`);
 
   // 4. DNS
   console.log('Adding DNS record...');
