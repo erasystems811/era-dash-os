@@ -27,10 +27,11 @@ const TEMPLATES_DIR = path.join(__dirname, '..', 'templates');
 const ROOT_DOMAIN = process.env.ERA_ROOT_DOMAIN || 'erasystems.com.ng';
 
 function parseArgs(argv) {
-  const args = { whatsapp: false, payment: null, pdf: false };
+  const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false };
   for (const arg of argv) {
     if (arg === '--whatsapp') args.whatsapp = true;
     else if (arg === '--pdf') args.pdf = true;
+    else if (arg === '--skip-github') args.skipGithub = true;
     else if (arg.startsWith('--payment=')) args.payment = arg.split('=')[1];
     else if (arg.startsWith('--name=')) args.name = arg.slice('--name='.length);
     else if (arg.startsWith('--subdomain=')) args.subdomain = arg.slice('--subdomain='.length);
@@ -86,7 +87,9 @@ async function main() {
   console.log(`Setting up "${args.name}" -> https://${subdomain}`);
 
   const secrets = loadSecrets();
-  requireSecrets(secrets, ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DIGITALOCEAN_TOKEN', 'GITHUB_TOKEN', 'DA_USERNAME', 'DA_LOGIN_KEY', 'DA_HOST']);
+  const requiredSecrets = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DIGITALOCEAN_TOKEN', 'DA_USERNAME', 'DA_LOGIN_KEY', 'DA_HOST'];
+  if (!args.skipGithub) requiredSecrets.push('GITHUB_TOKEN');
+  requireSecrets(secrets, requiredSecrets);
 
   const registry = loadRegistry();
   if (findClient(registry, args.slug)) {
@@ -117,19 +120,24 @@ async function main() {
   const schema = readFileSync(path.join(TEMPLATES_DIR, 'schema.sql'), 'utf8');
 
   // 1. GitHub repo (code only — no real secrets ever get committed)
-  console.log('Creating GitHub repo...');
-  const owner = await github.getAuthenticatedUser(secrets.GITHUB_TOKEN);
-  const repo = await github.createRepo(secrets.GITHUB_TOKEN, `era-${args.slug}`);
-  await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'docker-compose.yml', dockerComposeReal, 'Initial setup');
-  await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'Caddyfile', caddyfile, 'Initial setup');
-  await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'schema.sql', schema, 'Initial setup');
-  const envExample = envReal.replace(/=(.+)$/gm, (m, v) => (v.trim() ? '=<set on server, not in git>' : '='));
-  await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, '.env.example', envExample, 'Initial setup');
-  for (const file of ['package.json', 'Dockerfile', 'server.js']) {
-    const content = readFileSync(path.join(TEMPLATES_DIR, 'dashboard', file), 'utf8');
-    await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, `dashboard/${file}`, content, 'Initial setup');
+  let repo = null;
+  if (!args.skipGithub) {
+    console.log('Creating GitHub repo...');
+    const owner = await github.getAuthenticatedUser(secrets.GITHUB_TOKEN);
+    repo = await github.createRepo(secrets.GITHUB_TOKEN, `era-${args.slug}`);
+    await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'docker-compose.yml', dockerComposeReal, 'Initial setup');
+    await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'Caddyfile', caddyfile, 'Initial setup');
+    await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'schema.sql', schema, 'Initial setup');
+    const envExample = envReal.replace(/=(.+)$/gm, (m, v) => (v.trim() ? '=<set on server, not in git>' : '='));
+    await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, '.env.example', envExample, 'Initial setup');
+    for (const file of ['package.json', 'Dockerfile', 'server.js']) {
+      const content = readFileSync(path.join(TEMPLATES_DIR, 'dashboard', file), 'utf8');
+      await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, `dashboard/${file}`, content, 'Initial setup');
+    }
+    console.log(`  Repo: ${repo.htmlUrl}`);
+  } else {
+    console.log('Skipping GitHub repo creation (--skip-github).');
   }
-  console.log(`  Repo: ${repo.htmlUrl}`);
 
   // 2. Droplet
   console.log('Creating DigitalOcean droplet (this takes a few minutes)...');
@@ -184,7 +192,7 @@ async function main() {
     subdomain,
     dropletId,
     ip,
-    repo: repo.htmlUrl,
+    repo: repo ? repo.htmlUrl : null,
     needsWhatsapp: args.whatsapp,
     needsPayment: Boolean(args.payment),
     paymentProvider: args.payment,
@@ -195,7 +203,7 @@ async function main() {
 
   console.log('\nDone.');
   console.log(`  App:      https://${subdomain} ${dnsOk ? '(DNS added automatically)' : '(DNS needs the manual step above)'}`);
-  console.log(`  Repo:     ${repo.htmlUrl}`);
+  console.log(`  Repo:     ${repo ? repo.htmlUrl : '(skipped, --skip-github)'}`);
   console.log(`  Server:   ${ip}`);
   console.log(`  Dashboard login: admin / ${vars.DASHBOARD_PASSWORD}`);
   console.log(`  WhatsApp: ${args.whatsapp ? 'slot ready, run add-whatsapp.mjs with real Meta credentials' : 'not requested'}`);

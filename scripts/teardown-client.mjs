@@ -34,7 +34,7 @@ async function main() {
   console.log(`Deleting droplet ${client.dropletId} (${client.ip})...`);
   await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, client.dropletId);
 
-  const repoMatch = client.repo.match(/github\.com\/([^/]+)\/([^/]+)/);
+  const repoMatch = client.repo ? client.repo.match(/github\.com\/([^/]+)\/([^/]+)/) : null;
   if (repoMatch) {
     console.log(`Deleting GitHub repo ${repoMatch[1]}/${repoMatch[2]}...`);
     await github.deleteRepo(secrets.GITHUB_TOKEN, repoMatch[1], repoMatch[2]);
