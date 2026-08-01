@@ -36,10 +36,13 @@ export async function listSshKeyIds(hetznerToken) {
 }
 
 // size: 'small' | 'medium' | 'large' — matches the form's tucked-away size field
+// Confirmed live 2026-08-01: the older cpx11/21/31/41 line is deprecated in
+// EU locations (nbg1/fsn1/hel1/sin) as of end of 2025 — only available in
+// US locations (ash/hil) now. The cpx*2 line replaces it for EU.
 const SERVER_TYPE_BY_SIZE = {
-  small: 'cpx21', // 3 vCPU / 4GB — comfortable default (2GB was too tight on Bali's real droplet)
-  medium: 'cpx31', // 4 vCPU / 8GB
-  large: 'cpx41', // 8 vCPU / 16GB
+  small: 'cpx22', // 2 vCPU / 4GB — comfortable default (2GB was too tight on Bali's real droplet)
+  medium: 'cpx32', // 4 vCPU / 8GB
+  large: 'cpx42', // 8 vCPU / 16GB
 };
 
 export async function createServer(hetznerToken, { name, location = 'nbg1', size = 'small' }) {
