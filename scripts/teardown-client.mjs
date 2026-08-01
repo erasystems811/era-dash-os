@@ -8,6 +8,7 @@
 import { loadRegistry, saveRegistry, findClient, removeClient } from './lib/registry.mjs';
 import { loadSecrets } from './lib/secrets.mjs';
 import * as digitalocean from './lib/digitalocean.mjs';
+import * as hetzner from './lib/hetzner.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
 
@@ -31,8 +32,14 @@ async function main() {
 
   const secrets = loadSecrets();
 
-  console.log(`Deleting droplet ${client.dropletId} (${client.ip})...`);
-  await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, client.dropletId);
+  const provider = client.provider || 'digitalocean'; // older registry entries predate the provider field
+  const serverId = client.serverId ?? client.dropletId;
+  console.log(`Deleting ${provider} server ${serverId} (${client.ip})...`);
+  if (provider === 'hetzner') {
+    await hetzner.deleteServer(secrets.HETZNER_TOKEN, serverId);
+  } else {
+    await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, serverId);
+  }
 
   const repoMatch = client.repo ? client.repo.match(/github\.com\/([^/]+)\/([^/]+)/) : null;
   if (repoMatch) {
