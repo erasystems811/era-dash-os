@@ -61,6 +61,9 @@ function clientRow(c) {
       <td>${c.needsPayment ? esc(c.paymentProvider) : 'no'}</td>
       <td>${c.hasBotEngine ? 'yes' : 'no'}</td>
       <td>
+        <code class="claude-hint" title="One-time: clone this business's repo into a folder named ${esc(c.name)}, open Claude Code there once, then /rename ${esc(c.displayName || c.name)}. After that, this command works from anywhere.">claude --resume ${esc(c.displayName || c.name)}</code>
+      </td>
+      <td>
         <button onclick="showPanel('${esc(c.name)}')">Manage</button>
       </td>
     </tr>`;
@@ -83,6 +86,7 @@ function page(clients) {
   #log { background: #111; color: #0f0; padding: 10px; height: 220px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; font-size: 12px; }
   .hidden { display: none; }
   .danger { color: #b00; }
+  .claude-hint { font-family: monospace; font-size: 12px; background: #f0f0f0; padding: 2px 4px; border-radius: 3px; cursor: help; }
 </style>
 </head>
 <body>
@@ -90,8 +94,8 @@ function page(clients) {
 
   <h2>Clients</h2>
   <table>
-    <tr><th>Name</th><th>URL</th><th>Provider</th><th>IP</th><th>WhatsApp</th><th>Payment</th><th>Bot engine</th><th></th></tr>
-    ${clients.map(clientRow).join('') || '<tr><td colspan="8">No clients yet.</td></tr>'}
+    <tr><th>Name</th><th>URL</th><th>Provider</th><th>IP</th><th>WhatsApp</th><th>Payment</th><th>Bot engine</th><th>Claude session</th><th></th></tr>
+    ${clients.map(clientRow).join('') || '<tr><td colspan="9">No clients yet.</td></tr>'}
   </table>
 
   <fieldset>
