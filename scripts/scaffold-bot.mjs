@@ -46,6 +46,47 @@ import * as botEngine from '../bot-engine/index.js';
 // TODO: write the actual message-handling flow.
 `;
 
+function claudeMdStarter(displayName) {
+  return `# ${displayName} -- WhatsApp Bot Build Status
+
+Source of truth for this business's bot. **Read this before every task.**
+
+## Before trusting anything below
+
+This file only stays accurate if every session updates it before finishing.
+Quickly check the "What's actually built" section against the real code
+(\`flow/index.js\`, the live database) before relying on it -- if what you
+find doesn't match what's written here, trust the code, then fix this file.
+
+## What this business needs
+
+<!-- Fill this in once the owner has described the actual flow -- states,
+     fields, business rules. Not filled in yet. -->
+
+## What's actually built (verify against flow/index.js, don't just read this)
+
+- [ ] Flow not started yet -- \`flow/index.js\` is still the unfilled starter.
+
+## Building blocks available
+
+See \`bot-engine/README.md\` for what's ready to use (extraction, state
+tracking, sending, swipe-reply, handoff, wake-template) -- all already
+enforcing ERA's standing bot rules, see \`bot-conversation-rules.md\`.
+
+## Last updated
+
+${new Date().toISOString().slice(0, 10)} -- initial scaffold, no flow built yet.
+
+## Standing instruction for every session
+
+**Before you stop working**, update "What's actually built" and "Last
+updated" above to reflect exactly what you did -- not what you planned. The
+next session working on this business's bot may be a completely fresh
+Claude session with no memory of this one, and will rely on this being
+accurate, not aspirational.
+`;
+}
+
 function parseArgs(argv) {
   const args = {};
   for (const arg of argv) {
@@ -89,6 +130,19 @@ async function main() {
       await github.putFile(secrets.GITHUB_TOKEN, repoInfo.owner, repoInfo.repo, 'flow/index.js', FLOW_STARTER, 'Add flow starter pointing at bot-engine');
     } else {
       console.log('flow/index.js already exists -- leaving it untouched.');
+    }
+
+    // Root CLAUDE.md so any Claude Code session opened on this business's
+    // repo automatically reads its build status -- no need for Chidera to
+    // repeat context to a fresh session. Never overwritten once it exists,
+    // same idempotency as flow/index.js: this file gets updated by hand as
+    // real work happens, a re-run of this script must never clobber that.
+    const claudeMdExists = await github.fileExists(secrets.GITHUB_TOKEN, repoInfo.owner, repoInfo.repo, 'CLAUDE.md');
+    if (!claudeMdExists) {
+      console.log('Adding starter CLAUDE.md (none existed yet)...');
+      await github.putFile(secrets.GITHUB_TOKEN, repoInfo.owner, repoInfo.repo, 'CLAUDE.md', claudeMdStarter(client.displayName || client.name), 'Add build-status doc for future Claude sessions');
+    } else {
+      console.log('CLAUDE.md already exists -- leaving it untouched.');
     }
   } else {
     console.log('Client has no GitHub repo (created with --skip-github) -- skipping the repo push.');
