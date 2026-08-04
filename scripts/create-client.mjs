@@ -2,7 +2,7 @@
 // Usage:
 //   node create-client.mjs --name="Client Name" [--subdomain=custom-slug] [--whatsapp] [--payment=flutterwave|paystack] [--pdf]
 //
-// Creates a new client app end to end: DigitalOcean droplet, GitHub repo,
+// Creates a new client app end to end: Hetzner server, GitHub repo,
 // DNS record, the standard docker-compose stack deployed and running.
 // WhatsApp/payment env slots are left blank even when toggled on — actually
 // filling them in (and the manual Meta/provider verification that requires)
@@ -17,18 +17,18 @@ import { loadSecrets, requireSecrets } from './lib/secrets.mjs';
 import { loadRegistry, saveRegistry, upsertClient, findClient } from './lib/registry.mjs';
 import { randomSecret, randomPassword, randomEncryptionKey, slugify } from './lib/random.mjs';
 import { render } from './lib/render-template.mjs';
-import * as digitalocean from './lib/digitalocean.mjs';
 import * as hetzner from './lib/hetzner.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
 import { waitForSsh, waitForCloudInit, runRemote, copyToRemote } from './lib/ssh.mjs';
+import { runScaffoldBot } from './lib/scaffold-runner.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = path.join(__dirname, '..', 'templates');
 const ROOT_DOMAIN = process.env.ERA_ROOT_DOMAIN || 'erasystems.com.ng';
 
 function parseArgs(argv) {
-  const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false, provider: 'hetzner', size: 'small' };
+  const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false, size: 'small' };
   for (const arg of argv) {
     if (arg === '--whatsapp') args.whatsapp = true;
     else if (arg === '--pdf') args.pdf = true;
@@ -36,11 +36,9 @@ function parseArgs(argv) {
     else if (arg.startsWith('--payment=')) args.payment = arg.split('=')[1];
     else if (arg.startsWith('--name=')) args.name = arg.slice('--name='.length);
     else if (arg.startsWith('--subdomain=')) args.subdomain = arg.slice('--subdomain='.length);
-    else if (arg.startsWith('--provider=')) args.provider = arg.slice('--provider='.length);
     else if (arg.startsWith('--size=')) args.size = arg.slice('--size='.length);
   }
-  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--provider=hetzner|digitalocean] [--size=small|medium|large]');
-  if (!['hetzner', 'digitalocean'].includes(args.provider)) throw new Error('--provider must be "hetzner" or "digitalocean"');
+  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large]');
   args.slug = slugify(args.subdomain || args.name);
   return args;
 }
@@ -91,8 +89,7 @@ async function main() {
   console.log(`Setting up "${args.name}" -> https://${subdomain}`);
 
   const secrets = loadSecrets();
-  const requiredSecrets = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DA_USERNAME', 'DA_LOGIN_KEY', 'DA_HOST'];
-  requiredSecrets.push(args.provider === 'hetzner' ? 'HETZNER_TOKEN' : 'DIGITALOCEAN_TOKEN');
+  const requiredSecrets = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DA_USERNAME', 'DA_LOGIN_KEY', 'DA_HOST', 'HETZNER_TOKEN'];
   if (!args.skipGithub) requiredSecrets.push('GITHUB_TOKEN');
   requireSecrets(secrets, requiredSecrets);
 
@@ -145,15 +142,9 @@ async function main() {
   }
 
   // 2. Server
-  console.log(`Creating ${args.provider} server (this takes a few minutes)...`);
-  let serverId, ip;
-  if (args.provider === 'hetzner') {
-    serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
-    ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
-  } else {
-    serverId = await digitalocean.createDroplet(secrets.DIGITALOCEAN_TOKEN, { name: dropletName });
-    ip = await digitalocean.waitForDropletActive(secrets.DIGITALOCEAN_TOKEN, serverId);
-  }
+  console.log(`Creating Hetzner server (this takes a few minutes)...`);
+  const serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
+  const ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
   console.log(`  Server IP: ${ip}, waiting for it to finish booting + installing Docker...`);
   await waitForSsh(ip);
   await waitForCloudInit(ip);
@@ -216,7 +207,7 @@ async function main() {
     name: args.slug,
     displayName: args.name,
     subdomain,
-    provider: args.provider,
+    provider: 'hetzner',
     serverId,
     ip,
     repo: repo ? repo.htmlUrl : null,
@@ -227,6 +218,11 @@ async function main() {
     createdAt: new Date().toISOString(),
   });
   saveRegistry(registry);
+
+  if (args.whatsapp) {
+    console.log('Setting up bot-engine (WhatsApp was requested)...');
+    await runScaffoldBot(args.slug);
+  }
 
   console.log('\nDone.');
   console.log(`  App:      https://${subdomain} ${dnsOk ? '(DNS added automatically)' : '(DNS needs the manual step above)'}`);

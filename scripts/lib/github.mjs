@@ -26,6 +26,11 @@ export async function createRepo(ghToken, name, { private: isPrivate = true } = 
   return { owner: data.owner.login, repo: data.name, htmlUrl: data.html_url, defaultBranch: data.default_branch };
 }
 
+export async function fileExists(ghToken, owner, repo, path, branch = 'main') {
+  const res = await fetch(`${API_BASE}/repos/${owner}/${repo}/contents/${path}?ref=${branch}`, { headers: headers(ghToken) });
+  return res.ok;
+}
+
 export async function putFile(ghToken, owner, repo, path, content, message, branch = 'main') {
   // Need the current file SHA if it already exists (auto_init creates a README on main).
   let sha;

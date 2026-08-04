@@ -1,6 +1,13 @@
 import { spawn } from 'node:child_process';
 
-const SSH_OPTS = ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10'];
+// These are short-lived, automation-created servers (Hetzner/DO reuse IPs
+// from a pool once an old one is deleted) -- a stale known_hosts entry from
+// a previous server at the same IP would otherwise hard-fail every
+// connection with "REMOTE HOST IDENTIFICATION HAS CHANGED", which looks
+// exactly like "SSH not ready" from waitForSsh and never resolves no matter
+// how long you wait. Skip host-key pinning for this reason; the DO/Hetzner
+// API token is already the real trust boundary for which IP we talk to.
+const SSH_OPTS = ['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'ConnectTimeout=10'];
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {

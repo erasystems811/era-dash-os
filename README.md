@@ -1,9 +1,11 @@
 # era-dash-os
 
 The automation "engine" behind ERA Dash OS — turns a client's answers into a
-fully running app: a new DigitalOcean droplet, a GitHub repo, a DNS subdomain,
+fully running app: a new Hetzner server, a GitHub repo, a DNS subdomain,
 and the standard stack (n8n + Postgres + PostgREST + a starter dashboard,
 fronted by Caddy) deployed and running.
+
+**Fixing a bug on any live ERA system? Read [`FIX-PROTOCOL.md`](FIX-PROTOCOL.md) first.**
 
 No form/UI yet — this phase is just the engine, run by hand (or by Claude on
 your behalf) until it's proven, then a form gets built on top of it.
@@ -21,7 +23,7 @@ your behalf) until it's proven, then a form gets built on top of it.
 ## Create a new client
 
 ```
-node scripts/create-client.mjs --name="Client Name" [--whatsapp] [--payment=flutterwave|paystack] [--pdf]
+node scripts/create-client.mjs --name="Client Name" [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large]
 ```
 
 Creates the droplet, repo, DNS record, deploys and starts the app. Prints the

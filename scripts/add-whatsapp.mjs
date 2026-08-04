@@ -12,6 +12,7 @@
 import { loadRegistry, saveRegistry, findClient, upsertClient } from './lib/registry.mjs';
 import { readRemote, runRemote, copyToRemote } from './lib/ssh.mjs';
 import { patchEnv } from './lib/env-patch.mjs';
+import { runScaffoldBot } from './lib/scaffold-runner.mjs';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -50,6 +51,11 @@ async function main() {
 
   upsertClient(registry, { name: client.name, needsWhatsapp: true });
   saveRegistry(registry);
+
+  if (!client.hasBotEngine) {
+    console.log('Setting up bot-engine (first time WhatsApp has been enabled for this client)...');
+    await runScaffoldBot(client.name);
+  }
 
   console.log(`WhatsApp env vars set for "${client.name}" and containers restarted.`);
   console.log(`Webhook URL for Meta: https://${client.subdomain}/webhook/whatsapp-inbound (adjust if this client's n8n workflow uses a different path)`);
