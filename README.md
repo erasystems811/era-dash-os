@@ -7,6 +7,8 @@ fronted by Caddy) deployed and running.
 
 **Fixing a bug on any live ERA system? Read [`FIX-PROTOCOL.md`](FIX-PROTOCOL.md) first.**
 
+**Want the panel's "Open terminal" links to work on this computer? See [`local-setup/README.md`](local-setup/README.md).**
+
 No form/UI yet — this phase is just the engine, run by hand (or by Claude on
 your behalf) until it's proven, then a form gets built on top of it.
 
