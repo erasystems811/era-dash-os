@@ -61,7 +61,8 @@ function clientRow(c) {
       <td>${c.needsPayment ? esc(c.paymentProvider) : 'no'}</td>
       <td>${c.hasBotEngine ? 'yes' : 'no'}</td>
       <td>
-        <code class="claude-hint" title="One-time: clone this business's repo into a folder named ${esc(c.name)}, open Claude Code there once, then /rename ${esc(c.displayName || c.name)}. After that, this command works from anywhere.">claude --resume ${esc(c.displayName || c.name)}</code>
+        <a class="claude-hint" href="eraterm://${esc(c.name)}" title="Opens a real terminal on this computer, already in this business's folder (C:\\Users\\user\\${esc(c.name)}). One-time setup needed first: that folder must exist locally, and the eraterm:// link handler must be registered on this machine.">Open terminal</a><br>
+        <code class="claude-hint" style="margin-top:4px;display:inline-block;" title="Type this once you're in the terminal, or after /rename once to start.">claude --resume ${esc(c.displayName || c.name)}</code>
       </td>
       <td>
         <button onclick="showPanel('${esc(c.name)}')">Manage</button>
