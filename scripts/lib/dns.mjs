@@ -39,3 +39,17 @@ export function manualInstructions(domain, name, ip) {
     `  TTL: 3600 (or default)`,
   ].join('\n');
 }
+
+// For a business's own domain — DNS lives on whatever registrar/host they
+// use, never automatable from here. This is always what to hand the client,
+// not a fallback for when automation failed.
+export function customDomainInstructions(hostname, ip) {
+  return [
+    `"${hostname}" is not on the erasystems.com.ng DNS account, so this step is always manual — give this to whoever manages that domain's DNS:`,
+    `  Type: A`,
+    `  Name/Host: ${hostname.split('.').length > 2 ? hostname.split('.')[0] : '@'} (or the full host "${hostname}", depending on their DNS panel)`,
+    `  Points to: ${ip}`,
+    `  TTL: 3600 (or default)`,
+    `The app won't be reachable at https://${hostname} and TLS won't issue until that record resolves.`,
+  ].join('\n');
+}

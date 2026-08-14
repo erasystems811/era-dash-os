@@ -1,0 +1,11 @@
+{{SUBDOMAIN}} {
+    handle_path /rest/v1/* {
+        reverse_proxy postgrest:3000
+    }
+    handle_path /n8n/* {
+        reverse_proxy n8n:5678
+    }
+    handle {
+        reverse_proxy dashboard:3000
+    }
+}

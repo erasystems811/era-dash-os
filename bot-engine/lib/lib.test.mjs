@@ -16,6 +16,7 @@ import {
   detectExplicitRoleRequest,
   sendWakeTemplateIfNeeded,
   shouldFlushQueuedMessage,
+  escalateAndWait,
 } from './index.js';
 
 let passed = 0;
@@ -123,5 +124,33 @@ const res2 = await sendWakeTemplateIfNeeded({
 check('no template needed inside the window', () => assert.equal(res2.sentTemplate, false));
 
 check('any reply flushes queued content, not just "ok"', () => assert.equal(shouldFlushQueuedMessage({ hasQueuedMessage: true }), true));
+
+// escalate.js
+let ownerMessage = null;
+let customerHeldMessage = null;
+const ownerReply = await escalateAndWait({
+  summary: 'Customer asked about a 22k necklace buy-back price.',
+  questionOrAmount: 'Customer wants 45000 for a 12g 22k necklace, ok to proceed?',
+  hasPhoto: true,
+  sendToOwner: async (msg) => { ownerMessage = msg; },
+  waitForOwnerReply: async () => 'yes, go ahead',
+  holdingMessage: 'let me confirm that for you, one moment',
+  sendToCustomer: async (msg) => { customerHeldMessage = msg; },
+});
+check('escalation sends the owner the summary and question, not the raw conversation', () =>
+  assert.deepEqual(ownerMessage, {
+    summary: 'Customer asked about a 22k necklace buy-back price.',
+    questionOrAmount: 'Customer wants 45000 for a 12g 22k necklace, ok to proceed?',
+    hasPhoto: true,
+  })
+);
+check('customer gets a holding message while waiting, not silence', () => assert.equal(customerHeldMessage, 'let me confirm that for you, one moment'));
+check('owner reply is returned to resume the conversation', () => assert.equal(ownerReply, 'yes, go ahead'));
+
+let threwMissingSummary = false;
+try {
+  await escalateAndWait({ questionOrAmount: 'x', sendToOwner: async () => {}, waitForOwnerReply: async () => 'y' });
+} catch { threwMissingSummary = true; }
+check('escalation requires a summary, not just the raw question', () => assert.equal(threwMissingSummary, true));
 
 console.log(`\n${passed} checks passed.`);

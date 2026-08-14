@@ -85,6 +85,35 @@ export async function waitForServerActive(hetznerToken, id, { timeoutMs = 5 * 60
   throw new Error(`Hetzner server ${id} did not become running with a public IP within ${timeoutMs}ms`);
 }
 
+// Reinstalls the OS from scratch, same server, same IP -- used to recover
+// a server that came up broken (e.g. the account's SSH key never got
+// attached at creation). Re-passes the account's current SSH keys, same as
+// createServer, since a rebuild otherwise resets to no keys at all.
+export async function rebuildServer(hetznerToken, id, { image = 'ubuntu-24.04' } = {}) {
+  const sshKeyIds = await listSshKeyIds(hetznerToken);
+  const res = await fetch(`${API_BASE}/servers/${id}/actions/rebuild`, {
+    method: 'POST',
+    headers: headers(hetznerToken),
+    body: JSON.stringify({ image, ssh_keys: sshKeyIds }),
+  });
+  if (!res.ok) throw new Error(`Hetzner rebuild server failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  return waitForAction(hetznerToken, data.action.id);
+}
+
+async function waitForAction(hetznerToken, actionId, { timeoutMs = 5 * 60 * 1000, intervalMs = 5000 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await fetch(`${API_BASE}/actions/${actionId}`, { headers: headers(hetznerToken) });
+    if (!res.ok) throw new Error(`Hetzner get action failed: ${res.status} ${await res.text()}`);
+    const data = await res.json();
+    if (data.action.status === 'success') return;
+    if (data.action.status === 'error') throw new Error(`Hetzner action failed: ${data.action.error?.message || 'unknown error'}`);
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`Hetzner action ${actionId} did not finish within ${timeoutMs}ms`);
+}
+
 export async function deleteServer(hetznerToken, id) {
   const res = await fetch(`${API_BASE}/servers/${id}`, { method: 'DELETE', headers: headers(hetznerToken) });
   if (!res.ok && res.status !== 404) throw new Error(`Hetzner delete server failed: ${res.status} ${await res.text()}`);

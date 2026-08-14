@@ -2,8 +2,8 @@ import express from 'express';
 import basicAuth from 'express-basic-auth';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadRegistry } from '../scripts/lib/registry.mjs';
-import { startJob, getJob } from './jobs.mjs';
+import { loadRegistry, saveRegistry, findClient, upsertClient } from '../scripts/lib/registry.mjs';
+import { startJob, getJob, runScript } from './jobs.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -50,7 +50,39 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// EBOS is the one deployment marked isEbos: true in the registry (see
+// create-client.mjs's --template=ebos path) -- it's provisioned once, not
+// once-per-business, so "find the EBOS client" is just this lookup, never a
+// picker.
+function getEbosClient(registry) {
+  return registry.clients.find((c) => c.isEbos) || null;
+}
+
+async function ebosAdminFetch(ebosClient, urlPath, options = {}) {
+  const res = await fetch(`https://${ebosClient.subdomain}/admin/api${urlPath}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${ebosClient.ebosAdminToken}`,
+      ...(options.headers || {}),
+    },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `EBOS admin API ${urlPath} failed (${res.status})`);
+  return data;
+}
+
 function clientRow(c) {
+  const dnsRow = c.dnsPending
+    ? `
+    <tr>
+      <td colspan="9" style="background:#fff3cd;border-top:none;">
+        <strong>DNS not confirmed for ${esc(c.displayName || c.name)}</strong> — add this, then confirm:
+        <pre style="white-space:pre-wrap;margin:6px 0;">${esc(c.dnsPendingInstructions || '')}</pre>
+        <button onclick="confirmDns('${esc(c.name)}')">Mark DNS confirmed</button>
+      </td>
+    </tr>`
+    : '';
   return `
     <tr>
       <td>${esc(c.displayName || c.name)}</td>
@@ -67,10 +99,42 @@ function clientRow(c) {
       <td>
         <button onclick="showPanel('${esc(c.name)}')">Manage</button>
       </td>
-    </tr>`;
+    </tr>${dnsRow}`;
 }
 
-function page(clients) {
+function businessesSection(ebosClient) {
+  if (!ebosClient) {
+    return `<h2>Businesses (EBOS)</h2><p>No EBOS deployment registered yet. Provision it once from the control server: <code>node scripts/create-client.mjs --name="EBOS" --subdomain=ebos --template=ebos</code>.</p>`;
+  }
+  return `
+  <h2>Businesses (EBOS)</h2>
+  <p class="muted">Onboarding a business here is a database write against the one EBOS deployment (${esc(ebosClient.subdomain)}) -- no server, no DNS, seconds not minutes.</p>
+  <table>
+    <tr><th>Name</th><th>Type</th><th>Owner email</th></tr>
+    <tbody id="businessRows"><tr><td colspan="3">Loading...</td></tr></tbody>
+  </table>
+  <fieldset>
+    <legend>Onboard new business</legend>
+    <form id="createBusinessForm">
+      <label>Business name</label><input name="name" required>
+      <label>Type</label>
+      <select name="type">
+        <option value="restaurant">Restaurant / food</option>
+        <option value="apartment">Shortlet / apartment</option>
+        <option value="car_rental">Car rental</option>
+        <option value="lashes_nails">Lashes, nails and installation</option>
+      </select>
+      <label>Address</label><input name="address">
+      <label>Business phone number</label><input name="phoneNumber">
+      <label>Owner name</label><input name="ownerName" required>
+      <label>Owner email (their login)</label><input name="ownerEmail" type="email" required>
+      <button type="submit">Onboard business</button>
+    </form>
+  </fieldset>
+  <div id="ownerLoginResult"></div>`;
+}
+
+function page(clients, ebosClient) {
   return `<!doctype html>
 <html>
 <head>
@@ -99,6 +163,8 @@ function page(clients) {
     ${clients.map(clientRow).join('') || '<tr><td colspan="9">No clients yet.</td></tr>'}
   </table>
 
+  ${businessesSection(ebosClient)}
+
   <fieldset>
     <legend>Create new client</legend>
     <form id="createForm">
@@ -106,6 +172,8 @@ function page(clients) {
       <input name="name" required placeholder="e.g. Sunset Catering">
       <label>Subdomain (optional, auto-generated from name if blank)</label>
       <input name="subdomain" placeholder="e.g. sunset-catering">
+      <label>Custom domain instead (they own their own domain -- leave Subdomain blank if using this)</label>
+      <input name="customDomain" placeholder="e.g. goldshop.com">
       <label><input type="checkbox" name="whatsapp" style="width:auto"> Needs WhatsApp</label>
       <label><input type="checkbox" name="pdf" style="width:auto"> Needs PDF documents</label>
       <label>Needs payment?</label>
@@ -142,6 +210,15 @@ function page(clients) {
       <label>Secret key</label><input name="secretKey" required>
       <label>Public key</label><input name="publicKey" required>
       <button type="submit">Add payment</button>
+    </form>
+
+    <h4>Environment variables</h4>
+    <button type="button" onclick="loadEnv()">Load current</button>
+    <div id="envList" style="margin:10px 0;font-family:monospace;font-size:12px;"></div>
+    <form id="envForm">
+      <label>Add / update (one KEY=value per line)</label>
+      <textarea name="vars" rows="5" style="width:100%;font-family:monospace;font-size:13px;" placeholder="OPENAI_API_KEY=sk-...&#10;SOME_OTHER_VAR=value" required></textarea>
+      <button type="submit">Set env vars</button>
     </form>
 
     <h4 class="danger">Tear down (deletes the server + repo, permanent)</h4>
@@ -192,6 +269,7 @@ document.getElementById('createForm').addEventListener('submit', (e) => {
   submitJson('/api/create', {
     name: f.get('name'),
     subdomain: f.get('subdomain') || undefined,
+    customDomain: f.get('customDomain') || undefined,
     whatsapp: f.get('whatsapp') === 'on',
     pdf: f.get('pdf') === 'on',
     payment: f.get('payment') || undefined,
@@ -211,11 +289,84 @@ document.getElementById('paymentForm').addEventListener('submit', (e) => {
   submitJson('/api/add-payment', { client: currentClient, provider: f.get('provider'), secretKey: f.get('secretKey'), publicKey: f.get('publicKey') });
 });
 
+async function loadEnv() {
+  const el = document.getElementById('envList');
+  el.textContent = 'Loading...';
+  const res = await fetch('/api/env/' + currentClient);
+  const data = await res.json();
+  if (!res.ok) { el.textContent = 'Error: ' + (data.error || 'failed to load'); return; }
+  el.innerHTML = data.length
+    ? data.map((e) => '<div>' + e.key + '=' + e.value + '</div>').join('')
+    : '(no .env found or it is empty)';
+}
+
+document.getElementById('envForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const raw = new FormData(e.target).get('vars');
+  const updates = {};
+  for (const line of raw.split('\\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    updates[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1);
+  }
+  if (Object.keys(updates).length === 0) { alert('No valid KEY=value lines found.'); return; }
+  submitJson('/api/set-env', { client: currentClient, updates });
+});
+
+async function confirmDns(name) {
+  const res = await fetch('/api/confirm-dns', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name }) });
+  if (!res.ok) { alert('Failed to confirm'); return; }
+  location.reload();
+}
+
 document.getElementById('teardownForm').addEventListener('submit', (e) => {
   e.preventDefault();
   if (!confirm('Really tear down ' + currentClient + '? This deletes the server and cannot be undone.')) return;
   submitJson('/api/teardown', { client: currentClient, confirm: true });
 });
+
+function escClient(value) {
+  const div = document.createElement('div');
+  div.textContent = value ?? '';
+  return div.innerHTML;
+}
+
+async function loadBusinesses() {
+  const el = document.getElementById('businessRows');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/ebos/businesses');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed to load');
+    el.innerHTML = data.length
+      ? data.map((b) => '<tr><td>' + escClient(b.name) + '</td><td>' + escClient(b.type) + '</td><td>' + escClient(b.owner_email || '') + '</td></tr>').join('')
+      : '<tr><td colspan="3">No businesses yet.</td></tr>';
+  } catch (err) {
+    el.innerHTML = '<tr><td colspan="3">Error: ' + escClient(err.message) + '</td></tr>';
+  }
+}
+loadBusinesses();
+
+const createBusinessForm = document.getElementById('createBusinessForm');
+if (createBusinessForm) {
+  createBusinessForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const body = Object.fromEntries(f.entries());
+    const resultEl = document.getElementById('ownerLoginResult');
+    resultEl.textContent = 'Onboarding...';
+    const res = await fetch('/api/ebos/businesses', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) { resultEl.innerHTML = '<p class="danger">' + escClient(data.error || 'Failed') + '</p>'; return; }
+    resultEl.innerHTML = '<p><strong>' + escClient(data.business.name) + '</strong> is ready. Owner login (shown once, save it now):<br>'
+      + 'Email: <code>' + escClient(data.ownerLogin.email) + '</code><br>'
+      + 'Password: <code>' + escClient(data.ownerLogin.password) + '</code></p>';
+    e.target.reset();
+    loadBusinesses();
+  });
+}
 </script>
 </body>
 </html>`;
@@ -223,7 +374,28 @@ document.getElementById('teardownForm').addEventListener('submit', (e) => {
 
 app.get('/', (req, res) => {
   const registry = loadRegistry();
-  res.send(page(registry.clients));
+  res.send(page(registry.clients, getEbosClient(registry)));
+});
+
+app.get('/api/ebos/businesses', async (req, res) => {
+  const ebosClient = getEbosClient(loadRegistry());
+  if (!ebosClient) return res.status(404).json({ error: 'No EBOS deployment registered yet.' });
+  try {
+    res.json(await ebosAdminFetch(ebosClient, '/businesses'));
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/ebos/businesses', async (req, res) => {
+  const ebosClient = getEbosClient(loadRegistry());
+  if (!ebosClient) return res.status(404).json({ error: 'No EBOS deployment registered yet.' });
+  try {
+    const data = await ebosAdminFetch(ebosClient, '/businesses', { method: 'POST', body: JSON.stringify(req.body) });
+    res.status(201).json(data);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
 });
 
 app.get('/api/clients', (req, res) => {
@@ -231,10 +403,12 @@ app.get('/api/clients', (req, res) => {
 });
 
 app.post('/api/create', (req, res) => {
-  const { name, subdomain, whatsapp, pdf, payment, size } = req.body;
+  const { name, subdomain, customDomain, whatsapp, pdf, payment, size } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
+  if (subdomain && customDomain) return res.status(400).json({ error: 'Use either Subdomain or Custom domain, not both.' });
   const args = [`--name=${name}`];
-  if (subdomain) args.push(`--subdomain=${subdomain}`);
+  if (customDomain) args.push(`--custom-domain=${customDomain}`);
+  else if (subdomain) args.push(`--subdomain=${subdomain}`);
   if (whatsapp) args.push('--whatsapp');
   if (pdf) args.push('--pdf');
   if (payment) args.push(`--payment=${payment}`);
@@ -255,6 +429,37 @@ app.post('/api/add-payment', (req, res) => {
   if (!client || !provider || !secretKey || !publicKey) return res.status(400).json({ error: 'missing fields' });
   const jobId = startJob('add-payment.mjs', [`--client=${client}`, `--provider=${provider}`, `--secret-key=${secretKey}`, `--public-key=${publicKey}`]);
   res.json({ jobId });
+});
+
+app.get('/api/env/:client', async (req, res) => {
+  try {
+    const stdout = await runScript('get-env.mjs', [`--client=${req.params.client}`]);
+    res.json(JSON.parse(stdout));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/set-env', (req, res) => {
+  const { client, updates } = req.body;
+  if (!client || !updates || typeof updates !== 'object' || Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'client and at least one env var update are required' });
+  }
+  const args = [`--client=${client}`, ...Object.entries(updates).map(([k, v]) => `--${k}=${v}`)];
+  const jobId = startJob('set-env.mjs', args);
+  res.json({ jobId });
+});
+
+app.post('/api/confirm-dns', (req, res) => {
+  // Not a script job -- just clears the persisted "still needs DNS" flag,
+  // so it's a direct registry write, synchronous, no job polling needed.
+  const { client } = req.body;
+  if (!client) return res.status(400).json({ error: 'client is required' });
+  const registry = loadRegistry();
+  if (!findClient(registry, client)) return res.status(404).json({ error: `No client "${client}" in the registry.` });
+  upsertClient(registry, { name: client, dnsPending: false, dnsPendingInstructions: null });
+  saveRegistry(registry);
+  res.json({ ok: true });
 });
 
 app.post('/api/teardown', (req, res) => {

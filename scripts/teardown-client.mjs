@@ -29,6 +29,7 @@ async function main() {
   const registry = loadRegistry();
   const client = findClient(registry, args.client);
   if (!client) throw new Error(`No client "${args.client}" in the registry.`);
+  if (client.customDeploy) throw new Error(`${args.client} runs a custom app deploy, not the standard template -- this script would overwrite it. See the client's own repo/deploy setup instead.`);
 
   const secrets = loadSecrets();
 

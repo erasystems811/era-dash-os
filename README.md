@@ -52,6 +52,29 @@ node scripts/teardown-client.mjs --client=slug
 Deletes the droplet and GitHub repo. Use for cleaning up test clients while
 verifying this automation, not for casual real-client offboarding.
 
+## EBOS (ERA Business Order System)
+
+EBOS is a shared, multi-tenant ordering/booking platform (restaurant, shortlet/apartment,
+car rental, lashes and nails) — one deployment serving many small businesses, not one
+deployment per business. Spec: `ERA-Business-Order-System-Build-Schema-v1.1.md`.
+
+It's provisioned exactly like any other client, just from a different template set
+(`ebos-templates/` instead of `templates/`) — a one-time (or rare) action:
+
+```
+node scripts/create-client.mjs --name="EBOS" --subdomain=ebos --template=ebos --size=small
+```
+
+**Onboarding an individual business is NOT another `create-client.mjs` run.** Once EBOS
+is provisioned, new businesses are onboarded from the panel's "Businesses (EBOS)"
+section — a database write against the running EBOS deployment (owner login generated
+and shown once), no server, no DNS, no SSH. See `ebos-templates/dashboard/routes/admin-api.js`
+for the API the panel calls.
+
+Phases 4 (order/booking engine), 6 (AI layer) and 7 (WhatsApp) are not built yet — this
+covers the doc's Phase 1–3 (database, business configuration, catalogue) plus the
+onboarding screen.
+
 ## DNS
 
 erasystems.com.ng's DNS lives on a DirectAdmin server behind Go54's panel

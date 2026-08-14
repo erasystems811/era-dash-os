@@ -31,3 +31,20 @@ export function startJob(scriptName, args) {
 export function getJob(id) {
   return jobs.get(id) || null;
 }
+
+// For quick, read-only scripts (e.g. get-env.mjs) where the caller wants the
+// result immediately rather than polling a job -- resolves with stdout, or
+// rejects with stderr on a non-zero exit.
+export function runScript(scriptName, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(SCRIPTS_DIR, scriptName), ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('close', (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(stderr || stdout || `exited ${code}`));
+    });
+  });
+}
