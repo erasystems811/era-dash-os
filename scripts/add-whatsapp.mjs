@@ -49,7 +49,14 @@ async function main() {
   await copyToRemote(client.ip, tmpFile, `${remoteDir}/.env`);
   await runRemote(client.ip, `chmod 600 ${remoteDir}/.env && cd ${remoteDir} && docker compose up -d`);
 
-  upsertClient(registry, { name: client.name, needsWhatsapp: true });
+  // whatsappPhoneNumberId is what panel/server.js's shared WhatsApp router
+  // (/webhook/whatsapp) matches an inbound message's phone_number_id
+  // against to know which client it belongs to -- without this, a client
+  // added through this script is invisible to that router and any message
+  // for their number falls through to its Nexa fallback instead of ever
+  // reaching them. Confirmed missing here (this call used to only set
+  // needsWhatsapp) while building that router's Instagram counterpart.
+  upsertClient(registry, { name: client.name, needsWhatsapp: true, whatsappPhoneNumberId: args['phone-id'] });
   saveRegistry(registry);
 
   if (!client.hasBotEngine) {

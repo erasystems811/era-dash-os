@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { patchEnv } from './env-patch.mjs';
 
 const SECRETS_PATH = process.env.ERA_SECRETS_PATH || '/opt/era-control/secrets.env';
 
@@ -25,4 +26,13 @@ export function requireSecrets(secrets, keys) {
   if (missing.length) {
     throw new Error(`Missing required secrets in ${SECRETS_PATH}: ${missing.join(', ')}`);
   }
+}
+
+// Surgical, single-key-at-a-time updates (same patchEnv used for a live
+// client's .env) -- the panel's job here is narrow (e.g. just the two
+// Chowdeck keys), never a free-form editor over the whole file, since
+// secrets.env also holds HETZNER_TOKEN/GITHUB_TOKEN/etc.
+export function patchSecrets(updates, path = SECRETS_PATH) {
+  const current = readFileSync(path, 'utf8');
+  writeFileSync(path, patchEnv(current, updates));
 }

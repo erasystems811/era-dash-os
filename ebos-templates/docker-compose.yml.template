@@ -2,7 +2,13 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    mem_limit: 250m
+    # Raised alongside lib/db.js's DB_POOL_MAX (default 200) -- Postgres's
+    # own unconfigured default (100) was the real ceiling on how many
+    # customers this business could have messaging at once, not anything in
+    # the app. mem_limit raised to match: each open connection costs real
+    # memory, and 250m left no headroom for a much bigger pool.
+    mem_limit: 1536m
+    command: postgres -c max_connections=500
     environment:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -80,10 +86,27 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Renders the invoice/receipt HTML (routes/documents.js) to a real PDF --
+  # internal-only, no port published, dashboard reaches it by service name.
+  # Same tool already used elsewhere in ERA's stack (Nexa/Bali) for this
+  # exact job.
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   dashboard:
     build: ./dashboard
     restart: unless-stopped
-    mem_limit: 150m
+    # Raised alongside the bigger DB pool (lib/db.js's DB_POOL_MAX) -- more
+    # concurrent in-flight requests/timers held in memory at once, 150m was
+    # thin headroom for that.
+    mem_limit: 768m
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -93,10 +116,28 @@ services:
       - SESSION_SECRET=${DASHBOARD_SESSION_SECRET}
       - EBOS_ADMIN_TOKEN=${EBOS_ADMIN_TOKEN}
       - PAYMENT_ENCRYPTION_KEY=${PAYMENT_ENCRYPTION_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - META_ACCESS_TOKEN=${META_ACCESS_TOKEN}
+      - META_PHONE_NUMBER_ID=${META_PHONE_NUMBER_ID}
+      - META_WEBHOOK_VERIFY_TOKEN=${META_WEBHOOK_VERIFY_TOKEN}
+      - INSTAGRAM_USER_ID=${INSTAGRAM_USER_ID}
+      - INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN}
+      - INSTAGRAM_WEBHOOK_VERIFY_TOKEN=${INSTAGRAM_WEBHOOK_VERIFY_TOKEN}
+      - PAYMENT_PROVIDER=${PAYMENT_PROVIDER}
+      - PAYMENT_SECRET_KEY=${PAYMENT_SECRET_KEY}
+      - PAYMENT_PUBLIC_KEY=${PAYMENT_PUBLIC_KEY}
+      - DELIVERY_PROVIDER=${DELIVERY_PROVIDER}
+      - CHOWDECK_API_BASE=${CHOWDECK_API_BASE}
+      - CHOWDECK_SECRET_KEY=${CHOWDECK_SECRET_KEY}
+      - CHOWDECK_MERCHANT_REFERENCE=${CHOWDECK_MERCHANT_REFERENCE}
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+      - PUBLIC_URL=${PUBLIC_URL}
       - PORT=3000
     depends_on:
       postgres:
         condition: service_healthy
+      gotenberg:
+        condition: service_started
     logging:
       driver: json-file
       options:

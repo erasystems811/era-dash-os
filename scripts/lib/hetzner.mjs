@@ -73,6 +73,17 @@ export async function getServer(hetznerToken, id) {
   return data.server;
 }
 
+// getServer()'s own response already embeds its server_type's full price
+// list (one entry per location Hetzner offers that type in) -- confirmed
+// against the real API 2026-08-20, no separate /pricing call needed. Real,
+// current pricing, not a hardcoded table that would silently go stale.
+// Used by ERA Dash OS's monitoring panel to show each business's actual
+// server cost.
+export function monthlyPriceForServer(server) {
+  const priceAtLocation = server.server_type.prices.find((p) => p.location === server.location.name);
+  return priceAtLocation ? Number(priceAtLocation.price_monthly.gross) : null;
+}
+
 export async function waitForServerActive(hetznerToken, id, { timeoutMs = 5 * 60 * 1000, intervalMs = 8000 } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {

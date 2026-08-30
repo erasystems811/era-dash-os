@@ -9,7 +9,10 @@ import path from 'node:path';
 const jobs = new Map();
 const SCRIPTS_DIR = path.join(process.cwd(), '..', 'scripts');
 
-export function startJob(scriptName, args) {
+// onDone(job), if given, fires once after status/exitCode are set -- lets a
+// route do something (e.g. a registry write) only once a job actually
+// succeeded, instead of guessing at request time whether it will.
+export function startJob(scriptName, args, onDone) {
   const id = randomUUID();
   const job = { id, script: scriptName, args, status: 'running', log: '', exitCode: null };
   jobs.set(id, job);
@@ -23,6 +26,7 @@ export function startJob(scriptName, args) {
   child.on('close', (code) => {
     job.exitCode = code;
     job.status = code === 0 ? 'done' : 'failed';
+    if (onDone) onDone(job);
   });
 
   return id;

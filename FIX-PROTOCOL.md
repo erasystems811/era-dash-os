@@ -45,3 +45,31 @@ a real failure the first time it was used (2026-08-04, fixing Bali's
 See also `templates/bot-conversation-rules.md` for the conversation-logic
 lessons distilled from building Bali, and `bot-engine/README.md` for the
 reusable building blocks those lessons turned into.
+
+## Known regression checks (step 7, in practice)
+
+- **`scripts/verify-panel-script.mjs`** — run before deploying any change to
+  `panel/server.js`. That file's `page()` function is one giant template
+  literal containing the client-side `<script>` as literal text; a single
+  `\'` anywhere in it (should be `\\'`) gets silently consumed by the
+  *outer* template literal's own escape processing before the browser ever
+  sees it, breaking every `onclick` handler on the page with no visible
+  error on load — this exact bug shipped live 2026-08-30 (every "Manage"
+  button dead, EBOS totals stuck on "Loading..."). `node --check
+  panel/server.js` does **not** catch this class of bug, because the outer
+  file is valid syntax — only the runtime STRING it produces is broken.
+  This script runs the real server locally (dummy registry/secrets, no
+  auth, scratch port — `PANEL_DISABLE_AUTH=1`/`ERA_REGISTRY_PATH`/
+  `ERA_SECRETS_PATH`/`PORT` all exist for exactly this), fetches its real
+  rendered HTML, and syntax-checks the actual `<script>` text a browser
+  would receive.
+
+## Restarting the panel
+
+Always `systemctl restart era-dash-panel.service` on the control server —
+never start it by hand (`node server.js &`, `nohup node server.js &`,
+etc.). A manually-started instance isn't tracked by systemd, so the next
+`systemctl restart` starts a fresh copy on top of it without killing it —
+the old one just sits there orphaned, holding no port, doing nothing,
+silently eating memory until someone notices and kills it by PID (as
+happened 2026-08-30, root cause of the leftover-process cleanup that day).

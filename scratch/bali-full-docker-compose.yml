@@ -1,0 +1,215 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: 300m
+    environment:
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: n8n
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgrest:
+    image: postgrest/postgrest
+    restart: unless-stopped
+    mem_limit: 100m
+    environment:
+      - PGRST_DB_URI=postgres://authenticator:${AUTHENTICATOR_PASSWORD}@postgres:5432/bali
+      - PGRST_DB_SCHEMA=public
+      - PGRST_JWT_SECRET=${PGRST_JWT_SECRET}
+      - PGRST_DB_USE_LEGACY_GUCS=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped
+    mem_limit: 300m
+    command:
+      - "gotenberg"
+      - "--chromium-disable-routes=false"
+      - "--libreoffice-disable-routes=true"
+      - "--chromium-max-queue-size=1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    mem_limit: 700m
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_HOST=n8n.erasystems.com.ng
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_EDITOR_BASE_URL=https://n8n.erasystems.com.ng/
+      - WEBHOOK_URL=https://n8n.erasystems.com.ng/
+      - N8N_BASE_URL=https://n8n.erasystems.com.ng
+      - N8N_PROXY_HOPS=1
+      - GENERIC_TIMEZONE=Africa/Lagos
+      - SUPABASE_URL=https://bali.erasystems.com.ng
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - META_ACCESS_TOKEN=${META_ACCESS_TOKEN}
+      - META_PHONE_NUMBER_ID=${META_PHONE_NUMBER_ID}
+      - META_WEBHOOK_VERIFY_TOKEN=${META_WEBHOOK_VERIFY_TOKEN}
+      - BALI_FORWARD_SECRET=${BALI_FORWARD_SECRET}
+      - GOTENBERG_URL=http://gotenberg:3000
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  bali-dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    mem_limit: 150m
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=bali
+      - DB_USER=n8n
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - SESSION_SECRET=${DASHBOARD_SESSION_SECRET}
+      - PORT=3000
+      - UPLOAD_DIR=/data/sop-uploads
+    volumes:
+      - ./sop-uploads:/data/sop-uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    mem_limit: 100m
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - n8n
+      - postgrest
+      - bali-dashboard
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  sandbox-postgrest:
+    image: postgrest/postgrest
+    restart: unless-stopped
+    mem_limit: 80m
+    environment:
+      - PGRST_DB_URI=postgres://authenticator:${AUTHENTICATOR_PASSWORD}@postgres:5432/bali_sandbox
+      - PGRST_DB_SCHEMA=public
+      - PGRST_JWT_SECRET=${PGRST_JWT_SECRET}
+      - PGRST_DB_USE_LEGACY_GUCS=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  sandbox-n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    mem_limit: 900m
+    ports:
+      - "127.0.0.1:5679:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${SANDBOX_N8N_BASIC_AUTH_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${SANDBOX_N8N_ENCRYPTION_KEY}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n_sandbox
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_HOST=bali.erasystems.com.ng
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_EDITOR_BASE_URL=https://bali.erasystems.com.ng/sandbox/
+      - WEBHOOK_URL=https://bali.erasystems.com.ng/sandbox/
+      - N8N_BASE_URL=http://localhost:5678
+      - N8N_PROXY_HOPS=1
+      - GENERIC_TIMEZONE=Africa/Lagos
+      - SUPABASE_URL=http://caddy:8080
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOTENBERG_URL=http://gotenberg:3000
+      - BALI_FORWARD_SECRET=${SANDBOX_FORWARD_SECRET}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+    volumes:
+      - sandbox_n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+  n8n_data:
+  caddy_data:
+  caddy_config:
+  sandbox_n8n_data:

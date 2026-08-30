@@ -1,0 +1,143 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: 250m
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: {{APP_SLUG}}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgrest:
+    image: postgrest/postgrest
+    restart: unless-stopped
+    mem_limit: 100m
+    environment:
+      - PGRST_DB_URI=postgres://authenticator:${AUTHENTICATOR_PASSWORD}@postgres:5432/{{APP_SLUG}}
+      - PGRST_DB_SCHEMA=public
+      - PGRST_JWT_SECRET=${PGRST_JWT_SECRET}
+      - PGRST_DB_USE_LEGACY_GUCS=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # n8n is part of the standard stack every era-dash-os client gets, and
+  # stays available here for the owner's own ad hoc automations -- but
+  # ESF's own core loop (task scheduling, missing-detection, alert dispatch,
+  # sheet sync) runs as plain scheduled jobs inside the dashboard process
+  # instead (dashboard/engine/scheduler.js), matching how EBOS's own
+  # background work runs today. See build schema v2.0 section 2.4 for why:
+  # no proven n8n-workflow-import convention exists anywhere in this repo
+  # yet to build that path on.
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    mem_limit: 600m
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE={{APP_SLUG}}
+      - DB_POSTGRESDB_USER=app
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_HOST={{SUBDOMAIN}}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_EDITOR_BASE_URL=https://{{SUBDOMAIN}}/
+      - WEBHOOK_URL=https://{{SUBDOMAIN}}/
+      - N8N_BASE_URL=https://{{SUBDOMAIN}}
+      - N8N_PROXY_HOPS=1
+      - GENERIC_TIMEZONE=Africa/Lagos
+      - SUPABASE_URL=https://{{SUBDOMAIN}}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+{{WHATSAPP_N8N_ENV}}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    mem_limit: 200m
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME={{APP_SLUG}}
+      - DB_USER=app
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - SESSION_SECRET=${DASHBOARD_SESSION_SECRET}
+      - ESF_ADMIN_TOKEN=${ESF_ADMIN_TOKEN}
+      - PUBLIC_URL=${PUBLIC_URL}
+      - META_ACCESS_TOKEN=${META_ACCESS_TOKEN}
+      - META_PHONE_NUMBER_ID=${META_PHONE_NUMBER_ID}
+      - META_WEBHOOK_VERIFY_TOKEN=${META_WEBHOOK_VERIFY_TOKEN}
+      - GOOGLE_SERVICE_ACCOUNT_JSON=${GOOGLE_SERVICE_ACCOUNT_JSON}
+      - PORT=3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    mem_limit: 100m
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - n8n
+      - postgrest
+      - dashboard
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+  n8n_data:
+  caddy_data:
+  caddy_config:

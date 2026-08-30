@@ -75,6 +75,73 @@ Phases 4 (order/booking engine), 6 (AI layer) and 7 (WhatsApp) are not built yet
 covers the doc's Phase 1–3 (database, business configuration, catalogue) plus the
 onboarding screen.
 
+## ESF (ERA StaffFlow)
+
+ESF is a config-driven staff workflow/checklist engine over WhatsApp (opening/closing
+checklists, restock, attendance, proof-of-task) for any staffed business — retail,
+cosmetics, boutique, restaurant, salon. Spec: `ERA-StaffFlow-Build-Schema-v2.0.md`.
+
+**Unlike EBOS, ESF is NOT multi-tenant.** Every business gets its own dedicated
+deployment — own server, own database, own subdomain, own WhatsApp number — same
+physical-isolation model EBOS itself uses. It's provisioned exactly like any other
+client, just from a different template set (`esf-templates/` instead of
+`ebos-templates/` or `templates/`):
+
+```
+node scripts/create-client.mjs --name="Grace Stores" --template=esf [--whatsapp]
+```
+
+`--esf-seed=path/to/config.json` bakes a real business (business details, staff, tasks
+and their steps, alert routing) straight into the new database at provision time —
+`scripts/lib/esf-seed.mjs` turns the JSON into SQL, same mechanism as
+`scripts/lib/ebos-seed.mjs` does for EBOS. The owner logs in with real per-business
+credentials (`owner_user`, bcrypt — `esf-templates/dashboard/lib/auth.js`), not the
+generic Basic Auth pair. If `GOOGLE_SERVICE_ACCOUNT_JSON` is set in the control
+server's `secrets.env`, the same run also creates and shares this business's Google
+Sheet (`scripts/lib/esf-sheet.mjs`) — optional, same as `--whatsapp`/`--payment`.
+
+What's built so far (build order stages 1–10 of the v2.0 spec): the schema, the
+generic run/entry engine covering all nine proof types including a real `step_override`
+(with its reason actually shown to the staff member, not applied silently —
+`esf-templates/dashboard/engine/`), the WhatsApp channel (webhook, wake-template
+handling for the 24h window, sandbox mode via `ESF_SANDBOX=1`), missing-detection and
+alert dispatch (dedup + quiet hours), Google Sheet creation and its 15-minute re-sync
+job, and the daily summary. A regression suite covers all of it —
+`ESF_TEST_PGLITE=1 ESF_SANDBOX=1 node sandbox/test-engine.mjs` (and
+`test-proof-types.mjs`, `test-scheduler.mjs`, `ESF_TEST_PGLITE=1 node
+sandbox/test-sheet-sync.mjs` — no server or Docker needed for any of them) plus
+`node scripts/lib/google-auth.test.mjs` and `node scripts/lib/esf-sheet.test.mjs` for
+the Google integration's JWT signing and request shapes (mocked — no real Google
+account exists in this environment to test the actual API calls against).
+
+Not yet built: the dashboard beyond a bare login + today's-runs page (the rest of
+stage 9 — task/step CRUD, override log, alert_route editor), the ERA Dash OS
+workstation for click-to-provision onboarding (stage 14, deliberately last, waiting
+on a real pilot business), and cross-staff `countersign` routing (recorded as
+self-reported for now, flagged inline rather than silently wrong) — see the build
+schema's section 14 for the full list of flagged gaps. Also worth knowing: the v2.0
+doc's section 2.4 assumed n8n workflow imports for the scheduled jobs; there is no
+n8n-workflow-import convention anywhere in this repo, so they run as plain
+`setInterval` jobs inside the dashboard process instead, matching how EBOS's own
+background work already runs — a deliberate deviation from the doc, not an oversight.
+
+## Bot Monitoring (across every EBOS business)
+
+Once a business is handed over, its dashboard is theirs to run — but the panel's "Bot
+Monitoring" section (below "EBOS Businesses") gives a central view across every business at
+once: a per-business concern count for the last hour (bot didn't understand, forced
+handover, Claude/API error) plus one merged, chronological feed of real recent
+conversations across all businesses — not gated behind a flag, since not everything worth
+noticing registers as a system error. Backed by `/api/monitor/summary` and
+`/api/monitor/feed` on each business's own dashboard (`ebos-templates/dashboard/routes/api.js`),
+reusing signals each business already logs for itself (`message.trigger`,
+`customers.handover_reason`, `ai_errors`) rather than a second logging path.
+
+`scripts/check-bot-health.mjs`, run on a schedule (cron on the control server), is the
+proactive half — sends a WhatsApp alert when a business crosses a concern threshold in the
+trailing hour. Needs `ALERT_WA_TOKEN`/`ALERT_WA_PHONE_NUMBER_ID`/`ALERT_RECIPIENT_PHONE` in
+`secrets.env` (see `secrets.env.example`) before it can actually send anything.
+
 ## DNS
 
 erasystems.com.ng's DNS lives on a DirectAdmin server behind Go54's panel

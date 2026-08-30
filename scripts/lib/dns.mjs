@@ -9,8 +9,13 @@ function authHeader(username, loginKey) {
 }
 
 // name: the subdomain host part only, e.g. "client-name" (not the full FQDN)
-export async function addARecord({ host, username, loginKey }, domain, name, ip) {
-  const url = `https://${host}/CMD_API_DNS_CONTROL?domain=${encodeURIComponent(domain)}&action=add&type=A&name=${encodeURIComponent(name)}&value=${encodeURIComponent(ip)}&ttl=3600&json=yes`;
+// ttl defaults to 3600 (DirectAdmin's own default) -- a hostname that might
+// ever need a fast DNS-based failover (scripts/failover-standby.mjs) should
+// pass a short one instead, since a cached resolver won't see a change
+// until its copy of the OLD ttl expires, however fast the record itself
+// updates.
+export async function addARecord({ host, username, loginKey }, domain, name, ip, ttl = 3600) {
+  const url = `https://${host}/CMD_API_DNS_CONTROL?domain=${encodeURIComponent(domain)}&action=add&type=A&name=${encodeURIComponent(name)}&value=${encodeURIComponent(ip)}&ttl=${ttl}&json=yes`;
   const res = await fetch(url, { headers: authHeader(username, loginKey) });
   const text = await res.text();
   if (!res.ok) throw new Error(`DirectAdmin add DNS record failed: ${res.status} ${text}`);

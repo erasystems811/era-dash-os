@@ -1,0 +1,19 @@
+{
+  "name": "esf-dashboard",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "express-async-errors": "^3.1.1",
+    "pg": "^8.12.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-session": "^2.1.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.5"
+  }
+}

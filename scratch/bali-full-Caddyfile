@@ -1,0 +1,35 @@
+bali.erasystems.com.ng {
+    handle_path /rest/v1/* {
+        reverse_proxy postgrest:3000
+    }
+    handle /dashboard* {
+        reverse_proxy bali-dashboard:3000
+    }
+    handle_path /sandbox/* {
+        reverse_proxy sandbox-n8n:5678
+    }
+    handle /sandbox-sync-trigger {
+        reverse_proxy host.docker.internal:8090
+    }
+    handle {
+        reverse_proxy bali-dashboard:3000
+    }
+}
+
+n8n.erasystems.com.ng {
+    reverse_proxy n8n:5678
+}
+
+# Internal-only (not published to the host) -- lets the sandbox n8n instance
+# reach sandbox-postgrest using the exact same /rest/v1/* URL shape the real
+# app's code expects (SUPABASE_URL + '/rest/v1/' + path), the same way the
+# public site above does it for the live app. Container-network-only.
+:8080 {
+    handle_path /rest/v1/* {
+        reverse_proxy sandbox-postgrest:3000
+    }
+}
+
+erasystemsltd.com, www.erasystemsltd.com {
+    redir https://erasystems.com.ng{uri}
+}

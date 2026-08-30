@@ -19,12 +19,20 @@
 //
 // --template=<name> selects which template set gets stamped onto the server
 // (default: 'default', the generic single-client starter in templates/).
-// EBOS (the shared multi-tenant ordering/booking platform) is provisioned
-// the same way any other client is, just with --template=ebos, which reads
-// from ebos-templates/ instead -- its own schema.sql and dashboard/, same
-// pipeline otherwise. EBOS is provisioned once; individual businesses are
-// onboarded afterward as rows inside it (see ebos-templates/dashboard's
-// admin API), never as separate create-client.mjs runs.
+// EBOS (the ordering/booking product) and ESF (ERA StaffFlow) are both
+// fixed templates, not a shared deployment -- every business gets its own
+// dedicated run of this script (--template=ebos / --template=esf, reading
+// from ebos-templates/ / esf-templates/ instead), same as any other client.
+//
+// --ebos-seed=path/to/config.json (only meaningful with --template=ebos) /
+// --esf-seed=path/to/config.json (only meaningful with --template=esf)
+// bake a real business straight into the new database at provision time --
+// business details plus (EBOS) catalogue/bot training/knowledge base or
+// (ESF) staff/task/step rows -- so a working business exists the moment the
+// server comes up, instead of an empty template. This is what the ERA Dash
+// OS workstation calls behind its "Build" button
+// (panel/routes/workstation.js writes the JSON, scripts/lib/ebos-seed.mjs /
+// scripts/lib/esf-seed.mjs turn it into SQL).
 
 import { readFileSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -34,7 +42,11 @@ import os from 'node:os';
 import { loadSecrets, requireSecrets } from './lib/secrets.mjs';
 import { loadRegistry, saveRegistry, upsertClient, findClient } from './lib/registry.mjs';
 import { randomSecret, randomPassword, randomEncryptionKey, slugify } from './lib/random.mjs';
+import { buildEbosSeedSql } from './lib/ebos-seed.mjs';
+import { buildEsfSeedSql } from './lib/esf-seed.mjs';
+import { provisionSheet } from './lib/esf-sheet.mjs';
 import { render } from './lib/render-template.mjs';
+import { templatesDirFor } from './lib/templates-dir.mjs';
 import * as hetzner from './lib/hetzner.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
@@ -43,16 +55,6 @@ import { runScaffoldBot } from './lib/scaffold-runner.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = process.env.ERA_ROOT_DOMAIN || 'erasystems.com.ng';
-
-// 'default' is the generic single-client starter (templates/). Any other
-// name (e.g. 'ebos') reads from a sibling '<name>-templates/' folder instead
-// -- same pipeline, different schema.sql/dashboard baked onto the server.
-// Every existing call site (no --template passed) resolves to 'default' and
-// behaves exactly as before.
-function templatesDirFor(template) {
-  const folder = template === 'default' ? 'templates' : `${template}-templates`;
-  return path.join(__dirname, '..', folder);
-}
 
 function parseArgs(argv) {
   const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false, size: 'small', template: 'default' };
@@ -66,8 +68,10 @@ function parseArgs(argv) {
     else if (arg.startsWith('--custom-domain=')) args.customDomain = arg.slice('--custom-domain='.length).toLowerCase();
     else if (arg.startsWith('--size=')) args.size = arg.slice('--size='.length);
     else if (arg.startsWith('--template=')) args.template = arg.slice('--template='.length);
+    else if (arg.startsWith('--ebos-seed=')) args.ebosSeed = arg.slice('--ebos-seed='.length);
+    else if (arg.startsWith('--esf-seed=')) args.esfSeed = arg.slice('--esf-seed='.length);
   }
-  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--template=default|ebos]');
+  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json]');
   if (args.subdomain && args.customDomain) throw new Error('Pass either --subdomain or --custom-domain, not both.');
   // slug is only for internal naming (droplet, remote dir, db role) — for a
   // custom domain it's derived from the domain itself, since there's no
@@ -138,6 +142,7 @@ async function main() {
   const vars = {
     APP_SLUG: args.slug,
     SUBDOMAIN: subdomain,
+    PUBLIC_URL: `https://${subdomain}`,
     OPENAI_API_KEY: secrets.OPENAI_API_KEY,
     ANTHROPIC_API_KEY: secrets.ANTHROPIC_API_KEY,
     POSTGRES_PASSWORD: randomPassword(),
@@ -157,6 +162,16 @@ async function main() {
     // args.template here.
     EBOS_ADMIN_TOKEN: randomSecret(32),
     PAYMENT_ENCRYPTION_KEY: randomSecret(32),
+    // Same reasoning, for esf-templates/ instead.
+    ESF_ADMIN_TOKEN: randomSecret(32),
+    // Passed through to this deployment's own .env only if configured on
+    // the control server -- engine/sheet-sync.js's periodic re-sync (inside
+    // the running dashboard) needs its own copy of the same credential
+    // scripts/lib/esf-sheet.mjs just used to create the Sheet in the first
+    // place. Empty string (not undefined) so render()'s {{VAR}} substitution
+    // still produces a real, present-but-blank line rather than leaving the
+    // literal token in the file.
+    GOOGLE_SERVICE_ACCOUNT_JSON: secrets.GOOGLE_SERVICE_ACCOUNT_JSON || '',
   };
 
   const dockerComposeReal = render(readFileSync(path.join(TEMPLATES_DIR, 'docker-compose.yml.template'), 'utf8'), vars);
@@ -203,10 +218,45 @@ async function main() {
   // role must be created with the real generated password, and given access
   // to whatever schema.sql creates — none of that can live in the static
   // schema.sql template since the password is per-client.
+  // Generated even when --ebos-seed isn't used, since it's cheap and keeps
+  // the variable available unconditionally for the final summary below.
+  const ownerPassword = randomPassword(12);
+  let ebosSeedSql = '';
+  if (args.ebosSeed) {
+    const seedConfig = JSON.parse(readFileSync(args.ebosSeed, 'utf8'));
+    ebosSeedSql = buildEbosSeedSql({ ...seedConfig, ownerPassword });
+  }
+  let esfSeedSql = '';
+  if (args.esfSeed) {
+    const seedConfig = JSON.parse(readFileSync(args.esfSeed, 'utf8'));
+    esfSeedSql = buildEsfSeedSql({ ...seedConfig, ownerPassword });
+
+    // Sheet provisioning (build schema v2.0 section 9.4) -- optional, same
+    // as --whatsapp/--payment: runs only if a Google service account is
+    // configured on the control server. spreadsheetId is baked straight
+    // into the seed SQL (sheet_link is a singleton table, same trick as
+    // business) rather than a second remote step after the server is up,
+    // since the Sheet itself lives entirely outside this server anyway.
+    if (secrets.GOOGLE_SERVICE_ACCOUNT_JSON) {
+      console.log('Provisioning Google Sheet...');
+      const spreadsheetId = await provisionSheet({
+        businessName: seedConfig.business.name,
+        ownerEmail: seedConfig.owner.email,
+        serviceAccountJson: JSON.parse(secrets.GOOGLE_SERVICE_ACCOUNT_JSON),
+      });
+      if (spreadsheetId) {
+        esfSeedSql += `\ninsert into sheet_link (spreadsheet_id) values ('${spreadsheetId.replace(/'/g, "''")}');`;
+        console.log(`  Sheet: https://docs.google.com/spreadsheets/d/${spreadsheetId}`);
+      }
+    }
+  }
+
   const initSql = [
     `CREATE ROLE authenticator WITH LOGIN PASSWORD '${vars.AUTHENTICATOR_PASSWORD.replace(/'/g, "''")}' NOINHERIT;`,
     `GRANT USAGE ON SCHEMA public TO authenticator;`,
     schema,
+    ebosSeedSql,
+    esfSeedSql,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticator;`,
     `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticator;`,
   ].join('\n');
@@ -287,6 +337,12 @@ async function main() {
     // never committed to git, same as secrets.env, so storing this one
     // secret here follows the existing pattern rather than a new one.
     ...(args.template === 'ebos' ? { isEbos: true, ebosAdminToken: vars.EBOS_ADMIN_TOKEN } : {}),
+    // isEsf: unlike EBOS, ESF is physically isolated per business (build
+    // schema v2.0 section 1) -- every ESF client IS a normal one-business
+    // client, same as Bali or HostelSure. This flag exists only so the
+    // panel can optionally group them under an "ESF" label later; it does
+    // not change how this deployment is provisioned or run.
+    ...(args.template === 'esf' ? { isEsf: true, esfAdminToken: vars.ESF_ADMIN_TOKEN } : {}),
   });
   saveRegistry(registry);
 
@@ -299,14 +355,27 @@ async function main() {
   console.log(`  App:      https://${subdomain} ${dnsOk ? '(DNS added automatically)' : '(DNS needs the manual step above)'}`);
   console.log(`  Repo:     ${repo ? repo.htmlUrl : '(skipped, --skip-github)'}`);
   console.log(`  Server:   ${ip}`);
-  console.log(`  Dashboard login: admin / ${vars.DASHBOARD_PASSWORD}`);
+  if (args.ebosSeed || args.esfSeed) {
+    // The generic DASHBOARD_USER/DASHBOARD_PASSWORD Basic Auth login this
+    // template set doesn't use -- both EBOS and ESF have real per-owner
+    // accounts instead (ebos-templates/dashboard/lib/auth.js's staff table,
+    // esf-templates/dashboard/lib/auth.js's owner_user table) -- print the
+    // real one.
+    const seedConfig = JSON.parse(readFileSync(args.ebosSeed || args.esfSeed, 'utf8'));
+    console.log(`  Owner login: ${String(seedConfig.owner.email).trim().toLowerCase()} / ${ownerPassword}`);
+  } else {
+    console.log(`  Dashboard login: admin / ${vars.DASHBOARD_PASSWORD}`);
+  }
   console.log(`  WhatsApp: ${args.whatsapp ? 'slot ready, run add-whatsapp.mjs with real Meta credentials' : 'not requested'}`);
   console.log(`  Payment:  ${args.payment ? `slot ready (${args.payment}), run add-payment.mjs with real keys` : 'not requested'}`);
 }
 
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.git']);
+
 function listFilesRecursive(dir, baseDir = dir) {
   let results = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) results = results.concat(listFilesRecursive(full, baseDir));
     else results.push(path.relative(baseDir, full));

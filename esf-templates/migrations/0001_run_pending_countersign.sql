@@ -1,0 +1,13 @@
+-- Adds real cross-staff countersign routing (build schema v2.0's own
+-- flagged gap, closed 2026-08-30) -- a run now tracks which staff member
+-- (if any) it's waiting on to confirm the current countersign step, so her
+-- reply routes correctly instead of her own run silently self-answering it.
+-- Additive only (safe to run against a live database with existing runs) --
+-- new businesses provisioned after this migration was added get the same
+-- column straight from schema.sql, so this file only matters for
+-- businesses that already existed before it (esf-demo, provisioned
+-- 2026-08-30 before this column existed).
+--
+-- Apply to a live business with:
+--   node scripts/migrate.mjs --client=slug --file=esf-templates/migrations/0001_run_pending_countersign.sql
+alter table run add column if not exists pending_countersign_staff_id uuid references staff (id);

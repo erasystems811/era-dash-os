@@ -1,0 +1,130 @@
+import React, { useEffect, useState } from 'react';
+import { useParams, Link } from 'react-router-dom';
+import { api } from '../api.js';
+
+export default function ConversationDetail() {
+  const { id } = useParams();
+  const [data, setData] = useState(null);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState(null);
+  const [takingOver, setTakingOver] = useState(false);
+  const [returningToBot, setReturningToBot] = useState(false);
+
+  function load() {
+    api.get(`/conversations/${id}`).then(setData);
+  }
+  useEffect(load, [id]);
+
+  if (!data) return null;
+  const { customer, messages } = data;
+
+  async function returnToBot() {
+    setReturningToBot(true);
+    try {
+      await api.post(`/conversations/${id}/return-to-bot`);
+      load();
+    } finally {
+      setReturningToBot(false);
+    }
+  }
+
+  async function takeOver() {
+    setTakingOver(true);
+    try {
+      await api.post(`/conversations/${id}/take-over`);
+      load();
+    } finally {
+      setTakingOver(false);
+    }
+  }
+
+  async function send(e) {
+    e.preventDefault();
+    if (!draft.trim()) return;
+    setSendError(null);
+    setSending(true);
+    try {
+      await api.post(`/conversations/${id}/send`, { text: draft.trim() });
+      setDraft('');
+      load();
+    } catch (err) {
+      setSendError(err.message);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1 style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {customer.name || customer.phone_number || customer.channel_id}
+            <span className={`badge ${customer.channel}`}>{customer.channel}</span>
+          </h1>
+          <p className="subtitle">
+            Handled by <strong>{customer.handled_by}</strong>
+            {customer.handover_reason ? ` — ${customer.handover_reason}` : ''}
+          </p>
+        </div>
+        <Link to="/conversations" className="btn secondary" style={{ padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8 }}>
+          Back
+        </Link>
+      </div>
+
+      {customer.handled_by === 'staff' && (
+        <div className="card">
+          <button onClick={returnToBot} disabled={returningToBot}>
+            {returningToBot ? 'Returning to bot...' : 'Return to bot'}
+          </button>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="thread">
+          {messages.map((m) => (
+            <div key={m.id} className={`bubble ${m.sender === 'customer' ? 'customer' : m.sender === 'bot' ? 'bot' : 'staff'}`}>
+              {m.body}
+              <div className="meta">
+                {m.sender} &middot; {new Date(m.created_at).toLocaleString()}
+              </div>
+            </div>
+          ))}
+          {!messages.length && <div className="empty-state">No messages yet.</div>}
+        </div>
+      </div>
+
+      <div className="card">
+        {customer.handled_by === 'bot' ? (
+          <>
+            <p className="hint" style={{ marginTop: 0 }}>
+              The bot is still handling this conversation. Take over first so it goes quiet and doesn't reply to the
+              customer while you're typing.
+            </p>
+            <button onClick={takeOver} disabled={takingOver}>
+              {takingOver ? 'Taking over...' : 'Take over from bot'}
+            </button>
+          </>
+        ) : (
+          <>
+            {sendError && <div className="error-banner">{sendError}</div>}
+            <form onSubmit={send} className="reply-form" style={{ display: 'flex', gap: 10 }}>
+              <textarea
+                rows={2}
+                style={{ flex: 1 }}
+                placeholder={`Type a reply to send on ${customer.channel === 'instagram' ? 'Instagram' : 'WhatsApp'}...`}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                disabled={sending}
+              />
+              <button type="submit" disabled={sending || !draft.trim()}>
+                {sending ? 'Sending...' : 'Send'}
+              </button>
+            </form>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
