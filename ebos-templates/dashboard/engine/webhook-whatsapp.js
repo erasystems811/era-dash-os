@@ -4,6 +4,30 @@ import { menuRowKind, handleMenuNavigation, productNameForRowId } from './menu-m
 
 export const router = express.Router();
 
+// Meta genuinely delivers the same webhook event more than once sometimes
+// (confirmed live: identical message id, milliseconds apart) -- normal
+// typed messages happened to be shielded from this by the debounce queue
+// batching them together, but a List Message tap is deliberately NOT
+// debounced (see below, a tap should feel instant), so a duplicate tap
+// delivery produced two real replies. Every inbound message gets this same
+// guard now, keyed on WhatsApp's own message id, so a repeat delivery of
+// anything is silently dropped regardless of which path handles it.
+// In-memory and time-bounded on purpose -- this only needs to catch
+// duplicates arriving within the same delivery burst (milliseconds to a
+// few seconds apart), not survive a server restart.
+const seenMessageIds = new Map();
+const DEDUP_TTL_MS = 5 * 60 * 1000;
+function isDuplicateMessage(id) {
+  if (!id) return false;
+  const now = Date.now();
+  for (const [seenId, seenAt] of seenMessageIds) {
+    if (now - seenAt > DEDUP_TTL_MS) seenMessageIds.delete(seenId);
+  }
+  if (seenMessageIds.has(id)) return true;
+  seenMessageIds.set(id, now);
+  return false;
+}
+
 router.get('/', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -38,6 +62,7 @@ router.post('/', async (req, res) => {
           continue;
         }
         for (const message of change.value?.messages || []) {
+          if (isDuplicateMessage(message.id)) continue;
           if (message.type === 'image') {
             await handleInboundMedia({ phoneNumber: message.from, mediaId: message.image.id, kind: 'image', channel: 'whatsapp' });
             continue;

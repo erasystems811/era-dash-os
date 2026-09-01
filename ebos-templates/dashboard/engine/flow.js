@@ -316,6 +316,27 @@ async function getOpenOrder(customerId) {
   return order;
 }
 
+// An order a customer never confirmed or actively walked away from just
+// ages out on its own -- there's no customer-facing "cancel" anymore (see
+// handleConfirmOrder), so without this an abandoned order would sit open
+// forever, exactly the zombie-order confusion a real customer hit live
+// (an old, long-abandoned order from a previous day resurfaced once a
+// newer one was closed out from under it). Silent on purpose -- a
+// day-old, never-confirmed order closing quietly is normal, not something
+// worth messaging a customer about out of nowhere. Reuses the existing
+// 'cancelled' terminal state rather than adding a new one -- everywhere
+// that already excludes cancelled orders (getOpenOrder, the panel's order
+// list, etc.) handles this correctly with no other change needed.
+const STALE_ORDER_HOURS = 24;
+export async function closeStaleOrders() {
+  const { rowCount } = await pool.query(
+    `update "order" set status = 'cancelled', engine_state = 'cancelled'
+     where engine_state not in ('completed', 'cancelled') and updated_at < now() - make_interval(hours => $1)`,
+    [STALE_ORDER_HOURS]
+  );
+  if (rowCount) console.log(`Closed ${rowCount} order(s) abandoned for over ${STALE_ORDER_HOURS}h.`);
+}
+
 async function createDraftOrder(customerId) {
   const { rows } = await pool.query(`insert into "order" (customer_id, reference) values ($1, $2) returning *`, [customerId, newReference('ORD')]);
   return rows[0];
@@ -423,7 +444,7 @@ async function buildBusinessKnowledgeContext() {
 async function answerFromKnowledgeBase(message) {
   const { businessContext, menuContext, kbContext } = await buildBusinessKnowledgeContext();
 
-  const system = `You are a strict lookup, not a conversationalist. Your only source of truth is the DATA block at the end of this prompt. You have no other knowledge about this business, its history, its facilities, or anything about it beyond what's printed in DATA -- treat yourself as knowing literally nothing else, the way a brand-new hire reading only this sheet would. Do not use general assumptions about what a typical business like this "usually" has (multiple locations, certain hours, certain policies) -- assume nothing beyond DATA.\n\nRule: if the customer's question is about a fact that is not written in DATA word-for-word or as a clear paraphrase of it, that is a miss. A miss means: reply with exactly this one word and nothing else: ${NO_KB_MATCH}. Silence on a topic in DATA always means "not covered", never "safe to guess." This applies to every kind of fact equally -- physical addresses, number of locations, opening hours, delivery areas, policies -- there is no topic where guessing a plausible-sounding answer is acceptable.\n\nException: a direct, unambiguous logical consequence of a stated fact is not a guess, and IS answerable -- e.g. "open 24/7" directly means "never closes", so "when do you close?" has a real answer (we don't close) even though the word "close" isn't in DATA. The menu/catalogue listed is stated as the FULL, exhaustive list of what's available right now -- so asked about any item NOT on it ("is there white rice?", "do you have suya sauce?"), the direct answer is "no, we don't have that" (naming what's actually available instead), not a miss -- absence from an exhaustive list is itself the answer, not an unknown. Only treat something as a genuine miss if DATA doesn't address the topic at all, not merely because the question is phrased differently from how DATA states it.\n\nSame rule for an unclear question: do not write your own clarifying question, and never describe what topics you're able to help with or list examples of what you can answer -- that is not this business's voice, a staff member doesn't announce their own job description. Just output ${NO_KB_MATCH}.\n\nIf listing more than one item, put each on its own line (no dashes, bullets, or comma-separated runs) -- e.g. one item name per line.\n\nPricing rule: a general "what do you have" / "what's available" style question gets item names only, no prices -- price only matters once they've actually chosen something. But if they ask specifically about the price of a particular item ("how much is X", "is it 1500?"), answer that directly with the real number.\n\nSeparately from the text you reply with, also decide: is this a BROAD browse question naming no specific item ("what do you have", "what's on the menu", "what's available", "can I see the menu/catalogue")? If so, end your reply on its own new line with exactly: ISGENERALAVAILABILITY. Do not add this line for a question naming or implying a specific item ("do you have jollof", "how much is suya"), or for anything else.\n\nDATA:\n${businessContext}\n\n${menuContext}\n\n${kbContext}`;
+  const system = `You are a strict lookup, not a conversationalist. Your only source of truth is the DATA block at the end of this prompt. You have no other knowledge about this business, its history, its facilities, or anything about it beyond what's printed in DATA -- treat yourself as knowing literally nothing else, the way a brand-new hire reading only this sheet would. Do not use general assumptions about what a typical business like this "usually" has (multiple locations, certain hours, certain policies) -- assume nothing beyond DATA.\n\nRule: if the customer's question is about a fact that is not written in DATA word-for-word or as a clear paraphrase of it, that is a miss. A miss means: reply with exactly this one word and nothing else: ${NO_KB_MATCH}. Silence on a topic in DATA always means "not covered", never "safe to guess." This applies to every kind of fact equally -- physical addresses, number of locations, opening hours, delivery areas, policies -- there is no topic where guessing a plausible-sounding answer is acceptable.\n\nException: a direct, unambiguous logical consequence of a stated fact is not a guess, and IS answerable -- e.g. "open 24/7" directly means "never closes", so "when do you close?" has a real answer (we don't close) even though the word "close" isn't in DATA. The menu/catalogue listed is stated as the FULL, exhaustive list of what's available right now -- so asked about any item NOT on it ("is there white rice?", "do you have suya sauce?"), the direct answer is a short "no, we don't have that" (that clause only -- do NOT also name what's actually available, a real, always-current menu with photos and prices is shown separately as a button right after, that's what covers "here's what we do have," never write that part out yourself), not a miss -- absence from an exhaustive list is itself the answer, not an unknown. Only treat something as a genuine miss if DATA doesn't address the topic at all, not merely because the question is phrased differently from how DATA states it.\n\nSame rule for an unclear question: do not write your own clarifying question, and never describe what topics you're able to help with or list examples of what you can answer -- that is not this business's voice, a staff member doesn't announce their own job description. Just output ${NO_KB_MATCH}.\n\nNever write out more than one or two item names in a row yourself, for any reason -- a menu can be large, and a real always-current menu with photos and prices is always shown separately as a button (see ISGENERALAVAILABILITY below) whenever the full list matters. If they ask specifically about the price of a particular item ("how much is X", "is it 1500?"), answer that directly with the real number instead.\n\nSeparately from the text you reply with, also decide: does answering this properly involve the full list of what's available -- either a BROAD browse question naming no specific item ("what do you have", "what's on the menu", "what's available", "can I see the menu/catalogue"), OR a specific item that's NOT available (where "here's what we do have" would be the natural next thing to say)? If either, end your reply on its own new line with exactly: ISGENERALAVAILABILITY -- for the broad case leave the rest of your reply empty, for the not-available case keep only the short "no" clause before it. Do not add this line for a question about a specific item that IS available (name it and its price, if asked, as normal), or for anything else.\n\nDATA:\n${businessContext}\n\n${menuContext}\n\n${kbContext}`;
   const raw = await askText(system, message);
   const isGeneralAvailability = /ISGENERALAVAILABILITY\s*$/i.test(raw.trim());
   const cleaned = raw.replace(/ISGENERALAVAILABILITY\s*$/i, '').trim();
@@ -594,6 +615,12 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
               console.error('sendMenuList failed:', err.message);
               return false;
             });
+            // sendMenuList sends straight via the Graph API, not through
+            // reply() -- logged here so it actually shows up in the
+            // conversation history instead of leaving a gap that makes a
+            // real "did it send twice" question impossible to answer from
+            // the transcript alone.
+            if (catalogShown) await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[interactive menu button sent]', trigger: 'menu_shown' });
           }
           // A real menu photo beats a text list once a catalogue is more
           // than a handful of items -- "We have: X, Y, Z... [300 names]" is
@@ -610,7 +637,16 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
               }
             }
           }
-          await send(await fieldPrompt('items', 'What would you like to order?'), 'items_menu_shown');
+          // Found live: this used to call fieldPrompt('items', ...)
+          // unconditionally, which -- whenever there's no menu photo either
+          // -- falls back to naming every item as text. That ran even when
+          // the button above had just succeeded, so a customer got the
+          // button AND a full text list of the same items in the same
+          // turn. The button already covers "here's what's available"
+          // once it's actually sent; only fall back to fieldPrompt's own
+          // (photo, or as a last resort, text-list) behaviour when it
+          // didn't.
+          await send(catalogShown ? 'What would you like to order?' : await fieldPrompt('items', 'What would you like to order?'), 'items_menu_shown');
         }
         return;
       }
@@ -624,12 +660,28 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         prefix = `${prefix}${ambiguous.map((a) => `We have ${a.options.join(' and ')}, which do you mean? `).join('')}`;
       }
     } else {
-      const fields = await loadBotFields();
-      const field = fields.find((f) => f.key === outstanding[0]);
-      const extracted = await extractAndApply({ fieldKey: outstanding[0], message: text, contextQuestion: field?.question, order });
-      if (extracted === null) {
-        await send(await fieldPrompt(outstanding[0], field?.question));
-        return;
+      // Before assuming this message answers the CURRENT outstanding field
+      // (branch, delivery address, whatever's next), check whether it's
+      // actually asking to add/change items instead -- found live: "I also
+      // want suya and rice" while still being asked for a branch was
+      // silently dropped, since this branch only ever looked for the one
+      // specific field it expected next, never for a new item mention.
+      const { rows: currentItemsForMod } = await pool.query(
+        `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+        [order.id]
+      );
+      const mods = await extractOrderModifications(text, currentItemsForMod);
+      if (mods) {
+        const { lines } = await applyOrderModifications(order, mods, { allowRemovals: true });
+        prefix = `${prefix}Got it, added that on, your order's now ${lines}. `;
+      } else {
+        const fields = await loadBotFields();
+        const field = fields.find((f) => f.key === outstanding[0]);
+        const extracted = await extractAndApply({ fieldKey: outstanding[0], message: text, contextQuestion: field?.question, order });
+        if (extracted === null) {
+          await send(await fieldPrompt(outstanding[0], field?.question));
+          return;
+        }
       }
     }
     // extractAndApply/the items insert above just wrote straight to the
@@ -653,7 +705,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
   const { lines, total } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
   await transitionOrder(order, 'confirm_order');
-  await send(`To confirm: ${lines}, total NGN ${total}. Reply yes to confirm or no to cancel.`);
+  await send(`To confirm: ${lines}, total NGN ${total}. Reply yes to confirm, or let me know if you would like to change anything.`);
 }
 
 // "Confirmed" (order.status) and "engine_state = confirm_order" are not the
@@ -665,7 +717,15 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
 // gets to them" -- asking for an address is not the same step as agreeing
 // to buy.
 async function handleConfirmOrder(customer, order, text) {
-  const confirmQuestion = 'Are they confirming yes, or cancelling no?';
+  // A plain "no" doesn't reliably mean "cancel this entirely" -- they may
+  // just want to change something, or hesitate for a reason unrelated to
+  // wanting out. So "no" never cancels here: it just asks what to change,
+  // and leaves the order exactly as it is (still open, nothing lost). A
+  // real modification ("remove the suya wrap") is already caught earlier
+  // in dispatch(), before this function is even reached. There's no
+  // customer-facing way to actively cancel anymore -- an order that's
+  // genuinely abandoned just ages out on its own (see closeStaleOrders).
+  const confirmQuestion = 'Are they confirming yes, ready to go ahead with this order as it is?';
   const confirmedField = botEngine.defineField({
     key: 'confirmed',
     label: 'confirmation',
@@ -673,17 +733,12 @@ async function handleConfirmOrder(customer, order, text) {
     description: describeForExtraction(confirmQuestion, { type: 'boolean' }),
   });
   const value = await botEngine.extractField(confirmedField, text, { askJson });
-  if (value === null) {
-    // Not a plain yes/no doesn't mean nothing was actually said -- a real
+  if (value === null || value === false) {
+    // Not a plain yes doesn't mean nothing was actually said -- a real
     // question ("does that include delivery?") deserves a real answer, not
     // a rigid repeat of the same prompt regardless of what they asked.
-    const answer = await answerOrThenShowMenu(customer, order, text, `Waiting on them to confirm yes or cancel no.`);
-    await reply(customer, answer ? `${answer} Just let me know, yes to confirm or no to cancel.` : 'Sorry, is that a yes or a no?');
-    return;
-  }
-  if (value === false) {
-    await transitionOrder(order, 'cancelled');
-    await reply(customer, 'No problem, order cancelled. Message me again any time to start a new one.');
+    const answer = await answerOrThenShowMenu(customer, order, text, `Waiting on them to confirm yes, or say what they would like to change.`);
+    await reply(customer, answer ? `${answer} Just let me know, yes to confirm, or what you would like to change.` : 'No problem, just let me know what you would like to change, or reply yes to confirm as is.');
     return;
   }
 
@@ -702,7 +757,10 @@ async function handleConfirmOrder(customer, order, text) {
 // confirm_payment -> confirm_payment transition in transitionOrder. A plain
 // yes here just re-sends payment instructions for the new total.
 async function handleReconfirmAfterEdit(customer, order, text) {
-  const confirmQuestion = 'Are they confirming yes, or cancelling no, on the updated order?';
+  // Same reasoning as handleConfirmOrder above -- "no" never cancels, it
+  // just asks what to change and leaves the order (and the edit already
+  // made) exactly as it is.
+  const confirmQuestion = 'Are they confirming yes, ready to go ahead with the updated order as it is?';
   const confirmedField = botEngine.defineField({
     key: 'confirmed',
     label: 'confirmation',
@@ -710,14 +768,9 @@ async function handleReconfirmAfterEdit(customer, order, text) {
     description: describeForExtraction(confirmQuestion, { type: 'boolean' }),
   });
   const value = await botEngine.extractField(confirmedField, text, { askJson });
-  if (value === null) {
-    const answer = await answerOrThenShowMenu(customer, order, text, `Waiting on them to confirm yes or cancel no on the updated order.`);
-    await reply(customer, answer ? `${answer} Just let me know, yes to confirm or no to cancel.` : 'Sorry, is that a yes or a no?');
-    return;
-  }
-  if (value === false) {
-    await transitionOrder(order, 'cancelled');
-    await reply(customer, 'No problem, order cancelled. Message me again any time to start a new one.');
+  if (value === null || value === false) {
+    const answer = await answerOrThenShowMenu(customer, order, text, `Waiting on them to confirm yes, or say what they would like to change, on the updated order.`);
+    await reply(customer, answer ? `${answer} Just let me know, yes to confirm, or what you would like to change.` : 'No problem, just let me know what you would like to change, or reply yes to confirm as is.');
     return;
   }
 
@@ -862,7 +915,7 @@ async function answerOrderQuestion(order, text, statusLine) {
   // base) got replaced with a made-up "let me check with the team."
   const { businessContext, menuContext, kbContext } = await buildBusinessKnowledgeContext();
   const orderLine = lines ? `their order so far: ${lines}${deliveryFee > 0 ? `, plus NGN ${deliveryFee} delivery fee` : ''}, total NGN ${total}` : `nothing added to their order yet`;
-  const system = `You're a staff member replying MID-CONVERSATION to an existing customer you're already talking to -- ${orderLine}. ${statusLine}\n\nThis is not an opening message. Never use first-contact phrases like "thanks for reaching out" or any greeting -- reply exactly like someone already in the middle of a conversation would.\n\n${businessContext}\n\n${menuContext}\n\n${kbContext}\n\nDoes this message ask a real question (their order, the menu, business hours/location, delivery, payment, anything covered above) that deserves a direct answer? If yes, answer it directly and warmly using ONLY the real details given here. A direct, unambiguous consequence of a stated fact counts as answerable too -- e.g. "open 24/7" directly means "we don't close", and the menu above is the FULL list of what's available, so asked about anything not on it, the real answer is "no, we don't have that" (naming what's actually available) rather than a non-answer. Never invent a fact that isn't supported by what's given, and never claim you're checking with the team or will follow up unless that's real (nothing here authorizes that) -- if it's genuinely not covered, just say plainly you don't have that info right now. Answer ONLY what was actually asked -- never ask your own follow-up question about delivery vs pickup, or which branch, even in passing. Those are asked separately, once, at the right point in the flow by a different fixed step -- asking about them here creates a second, fake version that doesn't actually get saved anywhere, so when the real fixed step asks for real later, it looks like a broken repeat of something they already answered. If the message isn't actually asking anything (small talk, "ok", "thanks"), reply with exactly {"answer": null, "isGeneralAvailability": false}.\n\nSpecial case -- a BROAD browse question naming no specific item ("what do you have", "what's on the menu", "what's available", "can I see the menu/catalogue"): set "isGeneralAvailability": true, and for "answer" still list the item names only, no prices (a real, always-current menu with photos and prices is shown separately as an interactive button right after this reply where possible -- this text answer only serves as a fallback for whenever that button isn't available). This is different from a question naming or clearly implying a specific item ("do you have jollof", "how much is suya", "any rice dish?", "is there something spicy") -- that's answerable, not general, so answer it directly as usual with real semantic matching against the actual menu (meaning, not exact wording), isGeneralAvailability false.\n\nReply ONLY with JSON: {"answer": "<direct answer text>" or null, "isGeneralAvailability": true or false}.`;
+  const system = `You're a staff member replying MID-CONVERSATION to an existing customer you're already talking to -- ${orderLine}. ${statusLine}\n\nThis is not an opening message. Never use first-contact phrases like "thanks for reaching out" or any greeting -- reply exactly like someone already in the middle of a conversation would.\n\n${businessContext}\n\n${menuContext}\n\n${kbContext}\n\nDoes this message ask a real question (their order, the menu, business hours/location, delivery, payment, anything covered above) that deserves a direct answer? If yes, answer it directly and warmly using ONLY the real details given here. A direct, unambiguous consequence of a stated fact counts as answerable too -- e.g. "open 24/7" directly means "we don't close", and the menu above is the FULL list of what's available, so asked about anything not on it, the real answer is a short "no, we don't have that" (that clause only -- never also name what's actually available yourself, see the special case below for how that part is handled) rather than a non-answer. Never invent a fact that isn't supported by what's given, and never claim you're checking with the team or will follow up unless that's real (nothing here authorizes that) -- if it's genuinely not covered, just say plainly you don't have that info right now. Answer ONLY what was actually asked -- never ask your own follow-up question about delivery vs pickup, or which branch, even in passing. Those are asked separately, once, at the right point in the flow by a different fixed step -- asking about them here creates a second, fake version that doesn't actually get saved anywhere, so when the real fixed step asks for real later, it looks like a broken repeat of something they already answered. If the message isn't actually asking anything (small talk, "ok", "thanks"), reply with exactly {"answer": null, "isGeneralAvailability": false}.\n\nSpecial case -- does answering properly involve the full list of what's available? Either a BROAD browse question naming no specific item ("what do you have", "what's on the menu", "what's available", "can I see the menu/catalogue"), OR a specific item that's NOT available (where "here's what we do have" would be the natural next thing to say). For either, set "isGeneralAvailability": true -- for the broad case leave "answer" null, for the not-available case "answer" is only the short "no" clause. Never write out the item list yourself in either case -- a real, always-current menu with photos and prices is shown separately as an interactive button right after (this JSON's "answer" is only a fallback for whenever that button truly can't be shown). This is different from a question naming or clearly implying a specific item that IS available ("do you have jollof", "how much is suya", "any rice dish?", "is there something spicy") -- that's answerable, not general, so answer it directly as usual with real semantic matching against the actual menu (meaning, not exact wording), isGeneralAvailability false.\n\nReply ONLY with JSON: {"answer": "<direct answer text>" or null, "isGeneralAvailability": true or false}.`;
   const result = await askJson(system, text);
   return {
     answer: typeof result?.answer === 'string' && result.answer.trim() ? result.answer.trim() : null,
@@ -903,14 +956,24 @@ function looksLikeBrowseQuestion(text) {
 // is never left with silence just because of a transient WhatsApp error.
 async function resolveGeneralAvailability(customer, isGeneralAvailability, answer, rawText) {
   const shouldShowMenu = isGeneralAvailability || looksLikeBrowseQuestion(rawText);
-  if (shouldShowMenu && customer.channel !== 'instagram' && process.env.EBOS_SANDBOX !== '1') {
-    const shown = await sendMenuList(recipientFor(customer), "Here's our menu, tap below to see everything we have.").catch((err) => {
-      console.error('sendMenuList failed:', err.message);
-      return false;
-    });
-    if (shown) return null; // Card sent -- nothing left to say as text.
-  }
-  return answer;
+  if (!shouldShowMenu || customer.channel === 'instagram' || process.env.EBOS_SANDBOX === '1') return answer;
+
+  const shown = await sendMenuList(recipientFor(customer), "Here's our menu, tap below to see everything we have.").catch((err) => {
+    console.error('sendMenuList failed:', err.message);
+    return false;
+  });
+  // sendMenuList sends straight via the Graph API, not through reply() --
+  // logged here so it actually shows up in the conversation history.
+  if (shown) await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[interactive menu button sent]', trigger: 'menu_shown' });
+  // Whether the button sent or not, `answer` is returned unchanged here --
+  // it's either null (a pure browse question, nothing else to say) or a
+  // short factual clause ("no, we don't have that") that's genuinely worth
+  // saying on its own, alongside the button when it sent, and by itself if
+  // it didn't. Never falls back to writing the full item list as text on
+  // failure -- that's exactly the wall-of-text problem this button exists
+  // to avoid, worse the bigger the menu. A short generic nudge instead.
+  if (shown || answer) return answer;
+  return 'Sorry, having a little trouble showing the menu right now. Let me know what you would like, or ask about a specific item.';
 }
 
 // Wraps answerOrderQuestion so every mid-order call site gets the above for
@@ -955,14 +1018,13 @@ async function handleWaitingOnPayment(customer, order, text) {
 // or changing what's already paid for is refused (that money's real,
 // already moving), but adding more is still fine -- it just means extra to
 // collect, flagged to staff rather than assumed handled.
-async function handleOrderModification(customer, order, mods) {
-  const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
-
-  if (paid && (mods.removes.length || mods.sets.length)) {
-    await reply(customer, `Your order's already paid for, so I can't remove or change what's in it now, but I can add more if you'd like.`);
-    if (!mods.adds.length) return;
-  }
-
+// The real DB mutation behind an "add X" / "remove Y" / "make it 3 Z"
+// request -- shared between handleOrderModification (confirm_order onward,
+// its own "reply yes to confirm" messaging) and the earlier collect_info
+// stage (handleCollectInfo, a different, softer acknowledgment since the
+// order hasn't reached that gate yet). Same mutation either way, just
+// different words wrapped around it per stage.
+async function applyOrderModifications(order, mods, { allowRemovals }) {
   const { rows: existingItems } = await pool.query('select id, product_id, quantity from order_item where order_id = $1', [order.id]);
   let addedValue = 0;
 
@@ -976,7 +1038,7 @@ async function handleOrderModification(customer, order, mods) {
     addedValue += item.quantity * Number(item.price);
   }
 
-  if (!paid) {
+  if (allowRemovals) {
     for (const item of mods.removes) {
       await pool.query('delete from order_item where order_id = $1 and product_id = $2', [order.id, item.productId]);
     }
@@ -987,6 +1049,18 @@ async function handleOrderModification(customer, order, mods) {
 
   const { lines, total } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
+  return { lines, total, addedValue };
+}
+
+async function handleOrderModification(customer, order, mods) {
+  const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
+
+  if (paid && (mods.removes.length || mods.sets.length)) {
+    await reply(customer, `Your order's already paid for, so I can't remove or change what's in it now, but I can add more if you'd like.`);
+    if (!mods.adds.length) return;
+  }
+
+  const { lines, total, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid });
 
   if (paid) {
     await reply(customer, `Got it, added that on. Your order's now ${lines}, new total NGN ${total} (NGN ${addedValue} more than what's already paid). Our team will confirm the extra payment with you.`);
@@ -1006,7 +1080,7 @@ async function handleOrderModification(customer, order, mods) {
   // would be an illegal confirm_payment -> confirm_payment move).
   await pool.query(`update "order" set confirmed_at = null where id = $1`, [order.id]);
   order.confirmed_at = null;
-  await reply(customer, `Got it, your order's now ${lines}, new total NGN ${total}. Reply yes to confirm or no to cancel.`);
+  await reply(customer, `Got it, your order's now ${lines}, new total NGN ${total}. Reply yes to confirm, or let me know if you would like to change anything else.`);
 }
 
 // Switching delivery<->pickup after it was already set (dispatch() only
@@ -1520,7 +1594,7 @@ async function handlePendingBatch(customer, text) {
 export async function acknowledgeMenuTap({ phoneNumber, channelId, itemName, channel = 'whatsapp' }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${itemName}]` });
-  await reply(customer, `Want some ${itemName}? Just tell me what you would like and how many, and I will get it sorted.`, 'menu_tap_ack');
+  await reply(customer, `${itemName} is available. Please let me know how many and anything else you would like, and I will take your order.`, 'menu_tap_ack');
 }
 
 export async function handleInboundMessage({ phoneNumber, channelId, text, channel = 'whatsapp', messageId }) {

@@ -17,7 +17,7 @@ import { router as documentRoutes } from './routes/documents.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
-import { recoverPendingMessages } from './engine/flow.js';
+import { recoverPendingMessages, closeStaleOrders } from './engine/flow.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
@@ -93,4 +93,11 @@ if (process.env.EBOS_TEST_PGLITE === '1') {
 app.listen(port, () => {
   console.log(`EBOS dashboard listening on ${port}`);
   recoverPendingMessages().catch((err) => console.error('Startup recovery failed:', err));
+  // Checked hourly, not on every message -- a 24h threshold doesn't need
+  // tighter polling than that. Runs once immediately too, so a long-running
+  // server doesn't wait a full hour after startup before the first sweep.
+  closeStaleOrders().catch((err) => console.error('closeStaleOrders failed:', err));
+  setInterval(() => {
+    closeStaleOrders().catch((err) => console.error('closeStaleOrders failed:', err));
+  }, 60 * 60 * 1000);
 });

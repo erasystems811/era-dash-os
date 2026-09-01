@@ -230,23 +230,13 @@ function businessesSection(ebosClients) {
     <tbody id="ebosStatusRows"><tr><td colspan="7">Loading...</td></tr></tbody>
   </table>
 
-  <h2>Bot Monitoring</h2>
-  <p class="muted">Recent real conversations across every EBOS business, merged into one feed -- not filtered to only flagged moments, so you can actually watch, not just wait to be told something's wrong. Rows highlighted in red are real code errors (the bot hit an exception, or a Claude/API call failed) -- the thing you're responsible for. Handovers and "bot didn't know that" are normal business activity, shown for context but not flagged.</p>
-  <div style="margin:6px 0;">
-    <label style="display:inline;">Window: </label>
-    <select id="monitorHours" style="width:auto;display:inline;padding:4px;" onchange="loadMonitorFeed()">
-      <option value="1">Last 1 hour</option>
-      <option value="3" selected>Last 3 hours</option>
-      <option value="12">Last 12 hours</option>
-      <option value="24">Last 24 hours</option>
-    </select>
-    <button type="button" style="margin:0 0 0 8px;padding:4px 10px;" onclick="loadMonitorFeed()">Refresh now</button>
-    <span id="monitorFeedStatus" class="muted" style="margin-left:8px;"></span>
-  </div>
-  <table>
-    <tr><th>Time</th><th>Business</th><th>Customer</th><th>Dir</th><th>Trigger</th><th>Message</th></tr>
-    <tbody id="monitorFeedRows"><tr><td colspan="6">Loading...</td></tr></tbody>
-  </table>
+  <p><a href="/monitoring">Open Bot Monitoring &rarr;</a> &mdash; the full live feed across every business, on its own page so this one stays fast as you add more businesses. "Code errors (1h)" above is still the quick at-a-glance number.</p>
+
+  <fieldset>
+    <legend>Fix-bot (WhatsApp-triggered investigation agent)</legend>
+    <p class="muted">Texting "fix" (or replying to a Bot Monitoring alert) on Bali's WhatsApp number triggers this. If it seems stuck or unresponsive, restart it here -- no SSH, no asking Claude.</p>
+    <button type="button" onclick="restartFixbot()">Restart fix-bot</button>
+  </fieldset>
 
   <fieldset>
     <legend>Central Chowdeck account</legend>
@@ -618,6 +608,14 @@ async function pushUpdate(name, allEbos) {
   pollJob(data.jobId, () => setTimeout(() => location.reload(), 1500));
 }
 
+async function restartFixbot() {
+  if (!confirm('Restart the fix-bot service? Any investigation currently in progress will be interrupted.')) return;
+  const res = await fetch('/api/fixbot/restart', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  pollJob(data.jobId);
+}
+
 async function confirmDns(name) {
   const res = await fetch('/api/confirm-dns', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name }) });
   if (!res.ok) { alert('Failed to confirm'); return; }
@@ -698,47 +696,6 @@ async function loadEbosStatus() {
 loadEbosStatus();
 setInterval(loadEbosStatus, 60000);
 
-// Real code errors only, matching ebos-templates/dashboard/routes/api.js's
-// codeErrorCount definition -- kb_miss/field_reprompt/handovers are normal
-// business activity, not flagged here (see /monitor/summary's comment for
-// why). ai_errors aren't tied to a specific message row, so they can't be
-// highlighted in this per-message feed -- they still count toward the
-// "Code errors" column and the WhatsApp alert threshold above.
-const MONITOR_CONCERN_TRIGGERS = ['error_recovery'];
-
-async function loadMonitorFeed() {
-  const el = document.getElementById('monitorFeedRows');
-  const statusEl = document.getElementById('monitorFeedStatus');
-  if (!el) return;
-  const hours = document.getElementById('monitorHours').value;
-  try {
-    const res = await fetch('/api/ebos/monitor-feed?hours=' + hours);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'failed to load');
-    if (statusEl) statusEl.textContent = data.length + ' messages, updated ' + new Date().toLocaleTimeString();
-    el.innerHTML = data.length
-      ? data.map((m) => {
-          const flagged = MONITOR_CONCERN_TRIGGERS.includes(m.trigger);
-          return '<tr' + (flagged ? ' style="background:#fff3cd;"' : '') + '>'
-            + '<td>' + new Date(m.created_at).toLocaleString() + '</td>'
-            + '<td>' + escClient(m.businessName) + '</td>'
-            + '<td>' + escClient(m.customer_name || m.phone_number || '(unknown)') + '</td>'
-            + '<td>' + escClient(m.direction) + '</td>'
-            + '<td>' + escClient(m.trigger || '') + (flagged ? ' &#9888;' : '') + '</td>'
-            + '<td style="white-space:pre-wrap;">' + escClient(m.body) + '</td>'
-            + '</tr>';
-        }).join('')
-      : '<tr><td colspan="6">No messages in this window.</td></tr>';
-  } catch (err) {
-    el.innerHTML = '<tr><td colspan="6">Error: ' + escClient(err.message) + '</td></tr>';
-    if (statusEl) statusEl.textContent = '';
-  }
-}
-if (document.getElementById('monitorFeedRows')) {
-  loadMonitorFeed();
-  setInterval(loadMonitorFeed, 20000);
-}
-
 async function loadChowdeckSecretStatus() {
   const el = document.getElementById('chowdeckSecretStatus');
   if (!el) return;
@@ -806,6 +763,123 @@ if (migrateForm) {
 </html>`;
 }
 
+// Its own page, deliberately separate from the main dashboard -- the raw
+// feed merges every EBOS business's recent messages, which stops being
+// "quick to glance at" the moment there are enough businesses/volume for
+// it to matter (Chidera's own example: 20 restaurants at ~200 messages
+// each). The main page keeps only the lightweight per-business count
+// ("Code errors (1h)"); this page is where you actually sit and watch.
+function monitoringPage(ebosClients) {
+  const businessOptions = ebosClients.map((c) => `<option value="${esc(c.name)}">${esc(c.displayName || c.name)}</option>`).join('');
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bot Monitoring — ERA Dash OS</title>
+<style>
+  * { box-sizing: border-box; overflow-wrap: break-word; word-break: break-word; min-width: 0; }
+  html, body { overflow-x: hidden; max-width: 100vw; }
+  body { font-family: sans-serif; max-width: 1300px; margin: 2rem auto; padding: 0 1rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 14px; }
+  .muted { color: #666; font-size: 13px; }
+  select, button { padding: 6px; }
+  @media (max-width: 860px) {
+    body { margin: 1rem auto; padding: 0 12px; font-size: 15px; }
+    table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+  }
+</style>
+</head>
+<body>
+  <p><a href="/">&larr; Back to ERA Dash OS</a></p>
+  <h1>Bot Monitoring</h1>
+  <p class="muted">Recent real conversations, merged into one feed -- not filtered to only flagged moments, so you can actually watch, not just wait to be told something's wrong. Rows highlighted in red are real code errors (the bot hit an exception, or a Claude/API call failed) -- the thing you're responsible for. Handovers and "bot didn't know that" are normal business activity, shown for context but not flagged.</p>
+  <div style="margin:6px 0;">
+    <label style="display:inline;">Business: </label>
+    <select id="monitorClient" style="width:auto;display:inline;" onchange="loadMonitorFeed()">
+      <option value="">All businesses</option>
+      ${businessOptions}
+    </select>
+    <label style="display:inline;margin-left:10px;">Window: </label>
+    <select id="monitorHours" style="width:auto;display:inline;" onchange="loadMonitorFeed()">
+      <option value="1">Last 1 hour</option>
+      <option value="3" selected>Last 3 hours</option>
+      <option value="12">Last 12 hours</option>
+      <option value="24">Last 24 hours</option>
+    </select>
+    <button type="button" style="margin:0 0 0 8px;" onclick="loadMonitorFeed()">Refresh now</button>
+    <label style="margin-left:10px;"><input type="checkbox" id="monitorAutoRefresh" style="width:auto;" checked> Auto-refresh (20s)</label>
+    <span id="monitorFeedStatus" class="muted" style="margin-left:8px;"></span>
+  </div>
+  <table>
+    <tr><th>Time</th><th>Business</th><th>Customer</th><th>Dir</th><th>Trigger</th><th>Message</th></tr>
+    <tbody id="monitorFeedRows"><tr><td colspan="6">Loading...</td></tr></tbody>
+  </table>
+
+<script>
+function escClient(value) {
+  const div = document.createElement('div');
+  div.textContent = value ?? '';
+  return div.innerHTML;
+}
+
+// Real code errors only -- matches ebos-templates/dashboard/routes/api.js's
+// codeErrorCount definition. kb_miss/field_reprompt/handovers are normal
+// business activity, shown for context but not flagged.
+const MONITOR_CONCERN_TRIGGERS = ['error_recovery'];
+let monitorTimer = null;
+
+async function loadMonitorFeed() {
+  const el = document.getElementById('monitorFeedRows');
+  const statusEl = document.getElementById('monitorFeedStatus');
+  const hours = document.getElementById('monitorHours').value;
+  const client = document.getElementById('monitorClient').value;
+  const url = '/api/ebos/monitor-feed?hours=' + hours + (client ? '&client=' + encodeURIComponent(client) : '');
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed to load');
+    statusEl.textContent = data.length + ' messages, updated ' + new Date().toLocaleTimeString();
+    el.innerHTML = data.length
+      ? data.map((m) => {
+          const flagged = MONITOR_CONCERN_TRIGGERS.includes(m.trigger);
+          return '<tr' + (flagged ? ' style="background:#fff3cd;"' : '') + '>'
+            + '<td>' + new Date(m.created_at).toLocaleString() + '</td>'
+            + '<td>' + escClient(m.businessName) + '</td>'
+            + '<td>' + escClient(m.customer_name || m.phone_number || '(unknown)') + '</td>'
+            + '<td>' + escClient(m.direction) + '</td>'
+            + '<td>' + escClient(m.trigger || '') + (flagged ? ' &#9888;' : '') + '</td>'
+            + '<td style="white-space:pre-wrap;">' + escClient(m.body) + '</td>'
+            + '</tr>';
+        }).join('')
+      : '<tr><td colspan="6">No messages in this window.</td></tr>';
+  } catch (err) {
+    el.innerHTML = '<tr><td colspan="6">Error: ' + escClient(err.message) + '</td></tr>';
+    statusEl.textContent = '';
+  }
+}
+
+function scheduleAutoRefresh() {
+  if (monitorTimer) clearInterval(monitorTimer);
+  if (document.getElementById('monitorAutoRefresh').checked) {
+    monitorTimer = setInterval(loadMonitorFeed, 20000);
+  }
+}
+document.getElementById('monitorAutoRefresh').addEventListener('change', scheduleAutoRefresh);
+
+loadMonitorFeed();
+scheduleAutoRefresh();
+</script>
+</body>
+</html>`;
+}
+
+app.get('/monitoring', (req, res) => {
+  const ebosClients = getEbosClients(loadRegistry());
+  res.send(monitoringPage(ebosClients));
+});
+
 app.get('/', (req, res) => {
   const registry = loadRegistry();
   res.send(page(registry.clients, getEbosClients(registry)));
@@ -829,7 +903,13 @@ app.get('/api/ebos/status', async (req, res) => {
 // readable no matter how many businesses are live.
 app.get('/api/ebos/monitor-feed', async (req, res) => {
   const hours = Math.min(Number(req.query.hours) || 3, 24);
-  const ebosClients = getEbosClients(loadRegistry());
+  let ebosClients = getEbosClients(loadRegistry());
+  // Optional single-business filter -- the /monitoring page's real answer
+  // to "20 restaurants x 200 messages gets excessive": narrow to one
+  // business instead of always fetching and merging every business's feed.
+  if (req.query.client) {
+    ebosClients = ebosClients.filter((c) => c.name === req.query.client);
+  }
   const perBusiness = await Promise.all(ebosClients.map((c) => ebosMonitorFeed(c, hours)));
   const merged = perBusiness
     .flat()
@@ -1052,6 +1132,15 @@ app.post('/api/confirm-dns', (req, res) => {
   res.json({ ok: true });
 });
 
+// Self-service restart for fixbot/server.js -- the answer to "how do I
+// restart it" without SSH or asking Claude, same job-runner mechanism as
+// everything else on this page. scripts/restart-fixbot.mjs does the
+// actual systemctl call plus a real healthz check, not just fire-and-hope.
+app.post('/api/fixbot/restart', (req, res) => {
+  const jobId = startJob('restart-fixbot.mjs', []);
+  res.json({ jobId });
+});
+
 // Rolls the current template/dashboard code out to an already-live client --
 // scripts/push-update.mjs itself is what's safe here (reads the server's
 // own .env back and reuses every value, never regenerates secrets); this
@@ -1142,8 +1231,18 @@ app.listen(port, '0.0.0.0', () => console.log(`ERA Dash OS panel listening on 0.
 // (journalctl -u era-dash-panel). A delayed first run, not immediate on
 // boot, avoids firing right as the process (and its DB/secrets access)
 // is still starting up.
+//
+// FIXBOT_ALERTS_ENABLED=0 opts a panel instance out entirely -- added
+// after discovering the standby copy (dash-standby.erasystems.com.ng,
+// era-relay-standby) has its own working ALERT_WA_TOKEN and its own copy
+// of the registry, so left unguarded it would independently check every
+// business and send duplicate WhatsApp alerts alongside the primary's own
+// check. Set on the standby's systemd unit only -- primary stays enabled
+// by default (unset/anything but '0').
 const BOT_HEALTH_CHECK_INTERVAL_MS = 15 * 60 * 1000;
-setTimeout(() => {
+if (process.env.FIXBOT_ALERTS_ENABLED === '0') {
+  console.log('FIXBOT_ALERTS_ENABLED=0 -- this instance will not run bot-health checks or send alerts.');
+} else setTimeout(() => {
   runBotHealthCheck().catch((err) => console.error('Bot health check failed:', err));
   setInterval(() => {
     runBotHealthCheck().catch((err) => console.error('Bot health check failed:', err));

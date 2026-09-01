@@ -109,7 +109,7 @@ async function sendCategoryPage(to, page) {
     (nextPage) => ({ id: `${CATEGORY_PAGE_PREFIX}${nextPage}`, title: 'More categories', description: 'See more of the menu' })
   );
   await sendListMessage(to, {
-    bodyText: "Here's our menu, pick a category to see what's in it.",
+    bodyText: 'Here is our menu. Please choose a category to see what is available.',
     buttonText: 'View menu',
     sectionTitle: 'Categories',
     rows,
@@ -125,7 +125,7 @@ async function sendCategoryItemsPage(to, category, page) {
     description: `See more of ${category}`,
   }));
   await sendListMessage(to, {
-    bodyText: `${category}, tap an item to order it.`,
+    bodyText: `${category}. Please tell me what you would like once you have had a look.`,
     buttonText: 'View items',
     sectionTitle: category,
     rows,
