@@ -1,67 +1,63 @@
-// Rider sign-in: a phone number and a one-time code, nothing else -- no
-// password to forget, no app-store install (spec B3: cheapest possible
-// Android, one thumb, at a junction). A rider is pre-registered by the
-// restaurant first (routes/delivery.js's rider roster), so "sign in" here
-// only ever authenticates someone already on file, never creates a rider.
+// Rider sign-in: a phone number and a PIN staff set for them, nothing else
+// -- no password to forget, no app-store install (spec B3: cheapest
+// possible Android, one thumb, at a junction). A rider is pre-registered by
+// the restaurant first (routes/delivery.js's rider roster, which is also
+// where the PIN gets set), so "sign in" here only ever authenticates
+// someone already on file, never creates a rider.
 //
-// The OTP goes out as a WhatsApp AUTHENTICATION-category template, not the
-// shared env credentials' plain text send -- a rider has never messaged the
-// business's WhatsApp number before their first sign-in, and Meta will not
-// deliver a freeform message to a number that hasn't opened a conversation
-// window. ERA must submit a template with exactly this name to Meta for a
-// business's WABA (per-business, same one-off manual step category as
-// add-whatsapp.mjs's own Meta verification) before this can send for real --
-// EBOS_SANDBOX=1 prints instead, same as every other WhatsApp send in this
-// codebase, so the rest of the flow can be built and tested before that
-// approval exists.
+// Was a WhatsApp AUTHENTICATION-template OTP -- switched 2026-09-02
+// (Chidera's call): a rider already has to be added by staff before they
+// can sign in at all, so the OTP's only real job on top of that was
+// proving whoever's typing the number actually owns that phone. A PIN
+// staff hands the rider directly (in person, when adding them) gives the
+// same "you have to actually be this rider" property without a Meta
+// template approval this codebase otherwise has no use for, and without a
+// per-sign-in WhatsApp send at all.
+//
+// Same lockout shape as staff's own PIN accounts (lib/auth.js's
+// verifyPin) -- looked up by phone number, which is unique per rider, so
+// this already has the same anti-brute-force property that function's own
+// comment describes (an attacker is stuck guessing against exactly one
+// account, never a bare-PIN scan across every rider).
+import bcrypt from 'bcryptjs';
 import { pool } from '../lib/db.js';
-import { sendWhatsAppTemplate } from './whatsapp-send.js';
-import { getWhatsAppCredentials } from './branch-channel.js';
 
-const RIDER_OTP_TEMPLATE = 'rider_login_otp';
-const OTP_TTL_MINUTES = 10;
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_LOCKOUT_MS = 15 * 60 * 1000;
 
-function generateOtp() {
-  // 6 digits, zero-padded -- a rider reads this off a WhatsApp message and
-  // types it back, so it stays short and unambiguous (no letters that look
-  // alike on a small cheap screen).
-  return String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0');
+export function hashRiderPin(pin) {
+  return bcrypt.hash(pin, 10);
 }
 
-export async function requestRiderOtp(phone) {
-  const { rows } = await pool.query('select id, branch_id from rider where phone = $1 and status != \'suspended\'', [phone]);
+// Returns the rider row on success, null on a wrong/expired/missing/
+// locked-out PIN -- never throws for a bad guess, that's an ordinary
+// login failure, not an error. Never reveals whether a phone number
+// belongs to a real rider (a wrong phone and a wrong PIN look identical
+// to the caller), same principle as any login surface.
+export async function verifyRiderPin(phone, pin) {
+  const { rows } = await pool.query(`select * from rider where phone = $1 and status != 'suspended'`, [phone]);
   const rider = rows[0];
-  // Never reveal whether a phone number is a real rider -- same principle
-  // as any login surface. The caller always gets the same "check your
-  // WhatsApp" response either way (see routes/rider.js); this function
-  // simply does nothing when there's no match instead of erroring.
-  if (!rider) return;
+  if (!rider || !rider.pin_hash) return null;
 
-  const code = generateOtp();
-  const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
-  await pool.query('update rider set otp_code = $1, otp_expires_at = $2 where id = $3', [code, expiresAt, rider.id]);
+  // Checked before ever comparing the PIN -- a locked row refuses outright
+  // rather than doing (and timing) a real bcrypt compare, so a locked-out
+  // attacker learns nothing more from retrying.
+  if (rider.pin_locked_until && new Date(rider.pin_locked_until) > new Date()) return null;
 
-  const credentials = await getWhatsAppCredentials(rider.branch_id);
-  await sendWhatsAppTemplate(
-    phone,
-    RIDER_OTP_TEMPLATE,
-    'en_US',
-    [{ type: 'body', parameters: [{ type: 'text', text: code }] }],
-    credentials
-  );
-}
+  const ok = await bcrypt.compare(pin, rider.pin_hash);
+  if (ok) {
+    await pool.query('update rider set pin_failed_attempts = 0, pin_locked_until = null where id = $1', [rider.id]);
+    return rider;
+  }
 
-// Returns the rider row on success, null on a wrong/expired/missing code --
-// never throws for a bad guess, that's an ordinary login failure, not an
-// error.
-export async function verifyRiderOtp(phone, code) {
-  const { rows } = await pool.query(
-    `select * from rider where phone = $1 and otp_code = $2 and otp_expires_at > now() and status != 'suspended'`,
-    [phone, code]
-  );
-  const rider = rows[0];
-  if (!rider) return null;
-  // One-time -- a code already used (or expired) can never be replayed.
-  await pool.query('update rider set otp_code = null, otp_expires_at = null where id = $1', [rider.id]);
-  return rider;
+  const attempts = rider.pin_failed_attempts + 1;
+  if (attempts >= PIN_MAX_ATTEMPTS) {
+    await pool.query(
+      'update rider set pin_failed_attempts = 0, pin_locked_until = $2 where id = $1',
+      [rider.id, new Date(Date.now() + PIN_LOCKOUT_MS)]
+    );
+  } else {
+    await pool.query('update rider set pin_failed_attempts = $2 where id = $1', [rider.id, attempts]);
+  }
+  return null;
 }

@@ -94,8 +94,8 @@ create table if not exists delivery_config (
 
 alter table "order" add column if not exists delivery_zone_id uuid references delivery_zone(id);
 
--- Widen delivery.provider's check constraint to allow 'own_riders' --
--- confirmed this does NOT trip scripts/migrate.mjs's destructive-statement
--- guard (it only blocks drop table/drop column/truncate/delete from).
+-- Widen delivery.provider's check constraint to allow 'own_riders' -- a
+-- constraint swap, not a data-destructive statement, so it's outside what
+-- migrate.mjs's guard is meant to catch.
 alter table delivery drop constraint if exists delivery_provider_check;
 alter table delivery add constraint delivery_provider_check check (provider in ('chowdeck', 'bolt', 'manual', 'own_riders'));

@@ -59,7 +59,12 @@ async function migrateOne(client, sql) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sql = readFileSync(args.file, 'utf8');
-  if (DESTRUCTIVE_PATTERN.test(sql)) {
+  // Strip SQL line-comments before checking -- otherwise a comment merely
+  // explaining or referencing a blocked phrase (e.g. "this is not a `drop
+  // column`") trips the guard on prose, not on real SQL. Bit this file
+  // twice already (0012, 0014) before this fix.
+  const sqlWithoutComments = sql.replace(/--.*$/gm, '');
+  if (DESTRUCTIVE_PATTERN.test(sqlWithoutComments)) {
     throw new Error(
       `Refusing to run ${args.file}: it contains DROP/TRUNCATE/DELETE, which this tool is not meant for. Run that by hand if you're sure, after reviewing it yourself.`
     );

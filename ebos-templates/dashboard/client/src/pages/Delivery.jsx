@@ -3,7 +3,7 @@ import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 
 const EMPTY_ZONE = { name: '', aliases: '', customer_fee: '', rider_payout: '', active: true };
-const EMPTY_RIDER = { name: '', phone: '', bank_account_number: '', bank_code: '', account_name: '' };
+const EMPTY_RIDER = { name: '', phone: '', bank_account_number: '', bank_code: '', account_name: '', pin: '' };
 
 function naira(amount) {
   return `₦${Number(amount).toLocaleString()}`;
@@ -185,6 +185,8 @@ function Riders() {
   const [riders, setRiders] = useState(null);
   const [form, setForm] = useState(EMPTY_RIDER);
   const [error, setError] = useState(null);
+  const [resettingId, setResettingId] = useState(null);
+  const [newPin, setNewPin] = useState('');
 
   function load() {
     api.get('/delivery/riders').then(setRiders);
@@ -197,6 +199,18 @@ function Riders() {
     try {
       await api.post('/delivery/riders', form);
       setForm(EMPTY_RIDER);
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function savePin(id) {
+    setError(null);
+    try {
+      await api.post(`/delivery/riders/${id}`, { pin: newPin });
+      setResettingId(null);
+      setNewPin('');
       load();
     } catch (err) {
       setError(err.message);
@@ -224,34 +238,72 @@ function Riders() {
               <th>Name</th>
               <th>Phone</th>
               <th>Bank details</th>
+              <th>PIN</th>
               <th>Status</th>
               {editable && <th></th>}
             </tr>
           </thead>
           <tbody>
             {riders.map((r) => (
-              <tr key={r.id}>
-                <td>{r.name}</td>
-                <td>{r.phone}</td>
-                <td>{r.hasBankDetails ? 'On file' : 'Not set'}</td>
-                <td>
-                  <span className={`badge ${r.status === 'on_duty' ? 'active' : r.status === 'suspended' ? 'disabled' : ''}`}>{r.status}</span>
-                </td>
-                {editable && (
+              <React.Fragment key={r.id}>
+                <tr>
+                  <td>{r.name}</td>
+                  <td>{r.phone}</td>
+                  <td>{r.hasBankDetails ? 'On file' : 'Not set'}</td>
                   <td>
-                    <button className="secondary" onClick={() => toggleStatus(r)} style={{ marginRight: 8 }}>
-                      {r.status === 'suspended' ? 'Reinstate' : 'Suspend'}
-                    </button>
-                    <button className="danger" onClick={() => remove(r.id)}>
-                      Delete
-                    </button>
+                    {r.pin_locked_until && new Date(r.pin_locked_until) > new Date() ? (
+                      <span className="badge disabled">Locked out</span>
+                    ) : r.hasPin ? (
+                      'Set'
+                    ) : (
+                      <span className="badge disabled">Not set</span>
+                    )}
                   </td>
+                  <td>
+                    <span className={`badge ${r.status === 'on_duty' ? 'active' : r.status === 'suspended' ? 'disabled' : ''}`}>{r.status}</span>
+                  </td>
+                  {editable && (
+                    <td>
+                      <button
+                        className="secondary"
+                        style={{ marginRight: 8 }}
+                        onClick={() => {
+                          setResettingId(resettingId === r.id ? null : r.id);
+                          setNewPin('');
+                        }}
+                      >
+                        {r.hasPin ? 'Reset PIN' : 'Set PIN'}
+                      </button>
+                      <button className="secondary" onClick={() => toggleStatus(r)} style={{ marginRight: 8 }}>
+                        {r.status === 'suspended' ? 'Reinstate' : 'Suspend'}
+                      </button>
+                      <button className="danger" onClick={() => remove(r.id)}>
+                        Delete
+                      </button>
+                    </td>
+                  )}
+                </tr>
+                {resettingId === r.id && (
+                  <tr>
+                    <td colSpan={editable ? 6 : 5}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <input
+                          style={{ maxWidth: 140 }}
+                          placeholder="New 4-6 digit PIN"
+                          value={newPin}
+                          onChange={(e) => setNewPin(e.target.value)}
+                        />
+                        <button onClick={() => savePin(r.id)}>Save</button>
+                        <span className="hint">Tell {r.name} their new PIN directly -- it isn't sent anywhere.</span>
+                      </div>
+                    </td>
+                  </tr>
                 )}
-              </tr>
+              </React.Fragment>
             ))}
             {!riders.length && (
               <tr>
-                <td colSpan={editable ? 5 : 4} className="empty-state">
+                <td colSpan={editable ? 6 : 5} className="empty-state">
                   No riders added yet.
                 </td>
               </tr>
@@ -264,8 +316,8 @@ function Riders() {
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Add rider</h3>
           <p className="hint">
-            They sign in to the rider app themselves with this phone number. Bank details are needed before they can be paid automatically --
-            optional for now if you're paying manually.
+            They sign in to the rider app with this phone number and the PIN you set below -- tell them the PIN directly, it never goes
+            anywhere else. Bank details are needed before they can be paid automatically -- optional for now if you're paying manually.
           </p>
           {error && <div className="error-banner">{error}</div>}
           <form onSubmit={add}>
@@ -277,6 +329,10 @@ function Riders() {
               <div className="field">
                 <label>Phone number</label>
                 <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} required />
+              </div>
+              <div className="field">
+                <label>PIN (4-6 digits)</label>
+                <input value={form.pin} onChange={(e) => setForm({ ...form, pin: e.target.value })} required />
               </div>
             </div>
             <div className="form-row">

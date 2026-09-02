@@ -25,22 +25,28 @@ function useLocationReporting(intervalMs) {
   }, [intervalMs]);
 }
 
-function PhoneEntry({ onSent }) {
+// Was a phone-entry screen followed by a WhatsApp-OTP screen -- switched
+// 2026-09-02 to a single phone + PIN form (Chidera's call): a rider is
+// already added by the restaurant before they can sign in at all, so
+// there's no "send a code" step needed, only a PIN staff already gave them
+// in person.
+function PhoneAndPinLogin({ onLoggedIn }) {
   const [phone, setPhone] = useState('');
-  const [sending, setSending] = useState(false);
+  const [pin, setPin] = useState('');
+  const [signing, setSigning] = useState(false);
   const [error, setError] = useState(null);
 
   async function submit(e) {
     e.preventDefault();
     setError(null);
-    setSending(true);
+    setSigning(true);
     try {
-      await api.post('/otp/request', { phone: phone.trim() });
-      onSent(phone.trim());
+      const { rider } = await api.post('/login', { phone: phone.trim(), pin: pin.trim() });
+      onLoggedIn(rider);
     } catch (err) {
       setError(err.message);
     } finally {
-      setSending(false);
+      setSigning(false);
     }
   }
 
@@ -48,7 +54,7 @@ function PhoneEntry({ onSent }) {
     <div className="screen">
       <div className="brand">Rider</div>
       <h1>Sign in</h1>
-      <p className="hint">Enter your phone number. We'll send a code on WhatsApp.</p>
+      <p className="hint">Enter your phone number and the PIN the restaurant gave you.</p>
       {error && <div className="error">{error}</div>}
       <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <input
@@ -60,57 +66,19 @@ function PhoneEntry({ onSent }) {
           onChange={(e) => setPhone(e.target.value)}
           required
         />
-        <button type="submit" disabled={sending || !phone.trim()}>
-          {sending ? 'Sending...' : 'Send code'}
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function OtpVerify({ phone, onVerified, onBack }) {
-  const [code, setCode] = useState('');
-  const [verifying, setVerifying] = useState(false);
-  const [error, setError] = useState(null);
-
-  async function submit(e) {
-    e.preventDefault();
-    setError(null);
-    setVerifying(true);
-    try {
-      const { rider } = await api.post('/otp/verify', { phone, code: code.trim() });
-      onVerified(rider);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setVerifying(false);
-    }
-  }
-
-  return (
-    <div className="screen">
-      <div className="brand">Rider</div>
-      <h1>Enter the code</h1>
-      <p className="hint">We sent a 6-digit code to {phone} on WhatsApp.</p>
-      {error && <div className="error">{error}</div>}
-      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <input
           type="text"
           inputMode="numeric"
           pattern="[0-9]*"
           maxLength={6}
-          autoFocus
-          placeholder="000000"
+          placeholder="PIN"
           style={{ textAlign: 'center', letterSpacing: '8px', fontSize: 28 }}
-          value={code}
-          onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+          value={pin}
+          onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
           required
         />
-        <button type="submit" disabled={verifying || code.length < 4}>
-          {verifying ? 'Checking...' : 'Verify'}
-        </button>
-        <button type="button" className="link" onClick={onBack}>
-          Use a different number
+        <button type="submit" disabled={signing || !phone.trim() || pin.length < 4}>
+          {signing ? 'Signing in...' : 'Sign in'}
         </button>
       </form>
     </div>
@@ -438,7 +406,6 @@ function Duty({ rider, onLoggedOut }) {
 export default function App() {
   // undefined = still checking /me, null = signed out, object = signed in
   const [rider, setRider] = useState(undefined);
-  const [pendingPhone, setPendingPhone] = useState(null);
 
   useEffect(() => {
     api
@@ -453,18 +420,5 @@ export default function App() {
     return <Duty rider={rider} onLoggedOut={() => setRider(null)} />;
   }
 
-  if (pendingPhone) {
-    return (
-      <OtpVerify
-        phone={pendingPhone}
-        onVerified={(r) => {
-          setRider(r);
-          setPendingPhone(null);
-        }}
-        onBack={() => setPendingPhone(null)}
-      />
-    );
-  }
-
-  return <PhoneEntry onSent={setPendingPhone} />;
+  return <PhoneAndPinLogin onLoggedIn={setRider} />;
 }

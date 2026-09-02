@@ -3,7 +3,23 @@
 // the real source of truth for what a business's own dashboard can do.
 import express from 'express';
 import { pool } from '../lib/db.js';
-import { findStaffByEmail, verifyPassword, hashPassword, requireStaffApi, requireEditorApi, requireEraAdmin, canEdit, scopeToBranch } from '../lib/auth.js';
+import {
+  findStaffByEmail,
+  verifyPassword,
+  hashPassword,
+  requireStaffApi,
+  requireEditorApi,
+  requireEraAdmin,
+  canEdit,
+  scopeToBranch,
+  findPinStaffForBranch,
+  findPinStaffById,
+  verifyPin,
+  hashPin,
+  isPinTier,
+  requireFullAccessApi,
+  logActivity,
+} from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
 import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation } from '../engine/flow.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
@@ -24,7 +40,49 @@ router.post('/login', async (req, res) => {
   if (!staff || !(await verifyPassword(staff, password || ''))) {
     return res.status(401).json({ error: 'Incorrect email or password.' });
   }
-  req.session.staff = { id: staff.id, name: staff.name, role: staff.role, branch_id: staff.branch_id, branch_name: staff.branch_name };
+  req.session.staff = { id: staff.id, name: staff.name, role: staff.role, branch_id: staff.branch_id, branch_name: staff.branch_name, auth_type: staff.auth_type };
+  res.json({ staff: req.session.staff });
+});
+
+// PIN-tier login (Tier 3 staff) -- pick a branch, pick a name, enter a
+// 4-digit PIN. Never a bare "which staff has this PIN" lookup: always
+// scoped to one exact branch_id + staff_id pair, see findPinStaffById's
+// comment. Same generic failure message either way ("Incorrect name or
+// PIN") so a wrong staff_id and a right-id-wrong-PIN are indistinguishable
+// from outside, matching engine/rider-auth.js's existing non-disclosure
+// pattern for its own PIN-less OTP login.
+router.get('/pin-login/branches', async (req, res) => {
+  const { rows } = await pool.query(`select id, name from branch where status = 'active' order by name`);
+  res.json({ branches: rows });
+});
+
+router.get('/pin-login/staff', async (req, res) => {
+  const branchId = req.query.branch_id;
+  if (!branchId) return res.status(400).json({ error: 'branch_id is required.' });
+  const staff = await findPinStaffForBranch(branchId);
+  res.json({ staff });
+});
+
+router.post('/pin-login', async (req, res) => {
+  const { branch_id, staff_id, pin } = req.body;
+  const staff = branch_id && staff_id && (await findPinStaffById(branch_id, staff_id));
+  if (!staff || !(await verifyPin(staff, pin || ''))) {
+    return res.status(401).json({ error: 'Incorrect name or PIN.' });
+  }
+  const { rows } = await pool.query(`select name from branch where id = $1`, [staff.branch_id]);
+  req.session.staff = {
+    id: staff.id,
+    name: staff.name,
+    role: staff.role,
+    branch_id: staff.branch_id,
+    branch_name: rows[0]?.name || null,
+    auth_type: 'pin',
+  };
+  // A shorter session than the 30-day default every password login gets
+  // (server.js's cookie-session mount) -- a PIN login is meant for a
+  // shared/kiosk-style device on one shift, not someone's own phone, so it
+  // should expire on its own rather than stay signed in for a month.
+  req.sessionOptions.maxAge = 8 * 60 * 60 * 1000;
   res.json({ staff: req.session.staff });
 });
 
@@ -888,9 +946,9 @@ router.post('/bot-states/:key/transitions', requireEraAdmin, async (req, res) =>
 
 // --- Roles and numbers (staff) -----------------------------------------
 
-router.get('/staff', async (req, res) => {
+router.get('/staff', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query(
-    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.created_at, s.branch_id, b.name as branch_name
+    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.created_at, s.branch_id, s.auth_type, b.name as branch_name
      from staff s left join branch b on b.id = s.branch_id
      where $1::uuid is null or s.branch_id = $1
      order by s.created_at`,
@@ -948,6 +1006,48 @@ router.post('/staff/:id/handover-alerts', requireEditorApi, async (req, res) => 
     !!req.body.handover_alerts,
     req.params.id,
   ]);
+  res.json(rows[0]);
+});
+
+// PIN-tier (Tier 3) staff provisioning -- always branch-scoped by
+// construction: req.branchId has to be set (a branch-locked manager, or an
+// owner explicitly acting ?branch_id= on one branch) since there is no
+// "all-branches PIN staff", the same way an all-branches password account
+// only ever makes sense for role = 'owner'.
+router.post('/staff/pin', requireEditorApi, async (req, res) => {
+  if (!req.branchId) return res.status(400).json({ error: 'Pick a branch first -- a PIN account always belongs to exactly one branch.' });
+  const { name, pin } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required.' });
+  if (!/^\d{4}$/.test(pin || '')) return res.status(400).json({ error: 'PIN must be exactly 4 digits.' });
+  const pinHash = await hashPin(pin);
+  const { rows } = await pool.query(
+    `insert into staff (name, role, branch_id, auth_type, pin_hash, created_by_staff_id)
+     values ($1, 'staff', $2, 'pin', $3, $4)
+     returning id, name, role, status, branch_id, auth_type`,
+    [name.trim(), req.branchId, pinHash, req.staff.id]
+  );
+  await logActivity(req, 'staff_pin_created', { entityType: 'staff', entityId: rows[0].id, detail: { name: rows[0].name } });
+  res.status(201).json(rows[0]);
+});
+
+// Resets an existing PIN-tier staff member's PIN -- also clears any
+// lockout, so a reset doubles as an unlock. A branch manager can only ever
+// touch staff inside their own branch, same guard as POST /staff/:id/branch
+// above -- the where clause below scopes the update, not just the lookup,
+// so this can never silently no-op onto the wrong row.
+router.post('/staff/:id/pin', requireEditorApi, async (req, res) => {
+  if (!req.branchId) return res.status(400).json({ error: 'Pick a branch first.' });
+  const { pin } = req.body;
+  if (!/^\d{4}$/.test(pin || '')) return res.status(400).json({ error: 'PIN must be exactly 4 digits.' });
+  const pinHash = await hashPin(pin);
+  const { rows } = await pool.query(
+    `update staff set pin_hash = $1, pin_failed_attempts = 0, pin_locked_until = null
+     where id = $2 and branch_id = $3 and auth_type = 'pin'
+     returning id, name`,
+    [pinHash, req.params.id, req.branchId]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'PIN staff member not found in your branch.' });
+  await logActivity(req, 'staff_pin_reset', { entityType: 'staff', entityId: rows[0].id, detail: { name: rows[0].name } });
   res.json(rows[0]);
 });
 

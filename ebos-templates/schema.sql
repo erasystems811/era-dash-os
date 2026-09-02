@@ -127,12 +127,21 @@ create table if not exists rider (
   bank_account_number text,
   bank_code text,
   account_name text,
-  -- Sign-in OTP (see engine/rider-auth.js) -- sent as a WhatsApp
-  -- AUTHENTICATION-category template, not the shared env credentials,
-  -- since a rider has never messaged the business number before their
-  -- first sign-in.
+  -- otp_code/otp_expires_at: superseded by the pin_* columns below
+  -- (Chidera's call, 2026-09-02 -- a rider is already pre-registered by the
+  -- restaurant, so a WhatsApp AUTHENTICATION-template OTP added a Meta
+  -- approval dependency for no real security gain over a PIN staff sets
+  -- directly). Left in place, unused, rather than dropped -- migrate.mjs's
+  -- destructive-statement guard refuses `drop column` on purpose.
   otp_code text,
   otp_expires_at timestamptz,
+  -- Sign-in PIN, set by staff when adding/editing a rider (routes/
+  -- delivery.js), never by the rider themselves. Same shape and the same
+  -- lockout logic as staff's own PIN accounts (lib/auth.js's verifyPin) --
+  -- see engine/rider-auth.js's verifyRiderPin.
+  pin_hash text,
+  pin_failed_attempts integer not null default 0,
+  pin_locked_until timestamptz,
   last_lat numeric,
   last_lng numeric,
   last_seen_at timestamptz,
@@ -171,8 +180,11 @@ create table if not exists staff (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   phone_number text,
-  email text not null unique,
-  password_hash text not null,
+  -- Nullable: a PIN-tier staff account (auth_type = 'pin') has neither an
+  -- email nor a password -- see auth_type below. Every owner/manager row
+  -- still has both, exactly as before.
+  email text unique,
+  password_hash text,
   role text not null check (role in ('owner', 'manager', 'staff')),
   status text not null default 'active' check (status in ('active', 'disabled')),
   -- Null = all branches (the only sensible value for role = 'owner', and
@@ -187,6 +199,22 @@ create table if not exists staff (
   -- when one of them actually replies, the rest get told who's got it so
   -- two people don't answer the same customer.
   handover_alerts boolean not null default false,
+  -- 'password' = the email+password login every owner/manager uses.
+  -- 'pin' = a name+4-digit-PIN login, always branch_id-scoped, always
+  -- provisioned by a branch manager (or an owner acting on one branch) --
+  -- see routes/api.js's POST /staff/pin. Never valid for role = 'owner'.
+  auth_type text not null default 'password' check (auth_type in ('password', 'pin')),
+  pin_hash text,
+  -- Per-account PIN lockout, not a global one -- see lib/auth.js's
+  -- verifyPin. A 4-digit PIN is only safe because each guess is checked
+  -- against exactly one person on one branch, never a business-wide scan,
+  -- and because repeated wrong guesses lock that one row out for a while
+  -- rather than being unlimited.
+  pin_failed_attempts integer not null default 0,
+  pin_locked_until timestamptz,
+  -- Who set up this PIN account -- an accountability trail for the branch
+  -- manager who provisioned it, surfaced in the activity log.
+  created_by_staff_id uuid references staff(id),
   created_at timestamptz not null default now()
 );
 
@@ -708,6 +736,28 @@ create index if not exists order_item_order_idx on order_item (order_id);
 create index if not exists message_customer_idx on message (customer_id, created_at);
 create index if not exists generated_document_order_idx on generated_document (order_id);
 create index if not exists generated_document_booking_idx on generated_document (booking_id);
+
+-- Records every "major action" a staff member takes (order status changes,
+-- marking an order ready, confirming payment, sending a message, taking a
+-- conversation from the bot or giving it back) so a branch manager and the
+-- general manager both have an accountability trail. See lib/auth.js's
+-- logActivity and its call sites in routes/api.js.
+create table if not exists activity_log (
+  id uuid primary key default gen_random_uuid(),
+  staff_id uuid references staff(id),
+  -- Copied at write time, not re-derived by joining staff, so a later
+  -- branch reassignment never rewrites history -- same "copy, don't
+  -- re-resolve" idiom as rider_payout.amount and delivery_assignment's
+  -- zone rate above.
+  branch_id uuid references branch(id),
+  action text not null,
+  entity_type text,
+  entity_id uuid,
+  detail jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists activity_log_branch_created_idx on activity_log (branch_id, created_at desc);
+create index if not exists activity_log_staff_created_idx on activity_log (staff_id, created_at desc);
 
 -- ---------------------------------------------------------------------------
 -- pgrst_watch: keeps PostgREST's in-memory schema cache in sync automatically.

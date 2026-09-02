@@ -135,10 +135,12 @@ export async function markTypingIndicator(messageId) {
 
 // The 24-hour-session template send, for waking a stale conversation --
 // injected into bot-engine/wake-template.js's sendWakeTemplateIfNeeded (not
-// wired up yet, a known gap -- see flow.js's handover() comment) -- and, as
-// of the delivery add-on, for a rider's own sign-in OTP (engine/rider-
-// auth.js), which needs a real component (the code itself) to fill into the
-// template body -- optional here since a plain wake template needs none.
+// wired up yet, a known gap -- see flow.js's handover() comment). `components`
+// exists for any template needing a real value filled into its body (e.g.
+// a code or amount) -- optional here since a plain wake template needs
+// none. Was also a rider's own sign-in OTP (engine/rider-auth.js) until
+// that switched to a staff-set PIN (2026-09-02), which needs no WhatsApp
+// send at all -- kept as a generic capability, not tied to that one caller.
 // `credentials` is optional, same {phoneNumberId, accessToken} pattern as
 // every other send function in this file (see engine/branch-channel.js) --
 // a rider tied to a branch with its own connected number sends from that

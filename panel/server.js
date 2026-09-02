@@ -1120,8 +1120,14 @@ app.post('/api/ebos/migrate', (req, res) => {
   const { client, allEbos, file } = req.body;
   if (!file) return res.status(400).json({ error: 'file is required' });
   if (!client && !allEbos) return res.status(400).json({ error: 'client or allEbos is required' });
-  const relFile = path.join('ebos-templates', 'migrations', file);
-  const args = [allEbos ? '--all-ebos' : `--client=${client}`, `--file=${relFile}`];
+  // Absolute path, not relative -- migrate.mjs (spawned by jobs.mjs with no
+  // explicit cwd) inherits this process's cwd, which is panel/ (the
+  // systemd unit's WorkingDirectory), not the repo root. A relative
+  // 'ebos-templates/migrations/...' resolved against panel/ instead of the
+  // repo root and always 404'd; MIGRATIONS_DIR is already computed
+  // correctly above, reuse it instead of rebuilding the path bare.
+  const absFile = path.join(MIGRATIONS_DIR, file);
+  const args = [allEbos ? '--all-ebos' : `--client=${client}`, `--file=${absFile}`];
   const jobId = startJob('migrate.mjs', args);
   res.json({ jobId });
 });

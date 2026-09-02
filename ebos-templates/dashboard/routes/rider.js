@@ -1,5 +1,5 @@
-// The rider-facing API -- a phone number, a WhatsApp OTP, on/off duty, and
-// (later stages) the offer/assignment lifecycle. Session-cookie
+// The rider-facing API -- a phone number, a staff-set PIN, on/off duty, and
+// the offer/assignment lifecycle. Session-cookie
 // authenticated, same mechanism as the staff dashboard (routes/api.js) but
 // a wholly separate cookie/session, never mixed with a staff login -- a
 // rider and a staff member are different kinds of account, and this app is
@@ -7,7 +7,7 @@
 // collide (see server.js).
 import express from 'express';
 import { pool } from '../lib/db.js';
-import { requestRiderOtp, verifyRiderOtp } from '../engine/rider-auth.js';
+import { verifyRiderPin } from '../engine/rider-auth.js';
 import { offerBus } from '../engine/offer-bus.js';
 import { notifyDeliveryAssigned } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
@@ -25,21 +25,12 @@ function offerMatchesBranch(offer, riderBranchId) {
   return !offer.branchId || !riderBranchId || offer.branchId === riderBranchId;
 }
 
-router.post('/otp/request', async (req, res) => {
+router.post('/login', async (req, res) => {
   const phone = (req.body?.phone || '').trim();
-  if (!phone) return res.status(400).json({ error: 'Phone number is required.' });
-  await requestRiderOtp(phone);
-  // Same response whether or not that phone is a real rider -- see
-  // engine/rider-auth.js's own comment on why this never reveals a match.
-  res.json({ ok: true });
-});
-
-router.post('/otp/verify', async (req, res) => {
-  const phone = (req.body?.phone || '').trim();
-  const code = (req.body?.code || '').trim();
-  if (!phone || !code) return res.status(400).json({ error: 'Phone number and code are required.' });
-  const rider = await verifyRiderOtp(phone, code);
-  if (!rider) return res.status(401).json({ error: 'That code is incorrect or has expired.' });
+  const pin = (req.body?.pin || '').trim();
+  if (!phone || !pin) return res.status(400).json({ error: 'Phone number and PIN are required.' });
+  const rider = await verifyRiderPin(phone, pin);
+  if (!rider) return res.status(401).json({ error: 'Incorrect phone number or PIN.' });
   req.session.rider = { id: rider.id, name: rider.name, phone: rider.phone };
   res.json({ rider: req.session.rider });
 });

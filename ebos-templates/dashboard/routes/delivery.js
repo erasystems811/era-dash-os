@@ -8,6 +8,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { requireEditorApi } from '../lib/auth.js';
 import { encrypt } from '../lib/crypto.js';
+import { hashRiderPin } from '../engine/rider-auth.js';
 
 export const router = express.Router();
 
@@ -53,8 +54,12 @@ router.delete('/zones/:id', requireEditorApi, async (req, res) => {
 
 function riderRow(r) {
   if (!r) return r;
-  const { bank_account_number, ...rest } = r;
-  return { ...rest, hasBankDetails: Boolean(bank_account_number) };
+  // pin_locked_until is kept (not sensitive, just a timestamp -- the
+  // roster shows a locked-out rider so staff know to reset their PIN
+  // rather than wondering why they can't sign in) -- pin_hash and the raw
+  // attempt count are the only real secrets here.
+  const { bank_account_number, pin_hash, pin_failed_attempts, otp_code, otp_expires_at, ...rest } = r;
+  return { ...rest, hasBankDetails: Boolean(bank_account_number), hasPin: Boolean(pin_hash) };
 }
 
 router.get('/riders', async (req, res) => {
@@ -65,23 +70,48 @@ router.get('/riders', async (req, res) => {
   res.json(rows.map(riderRow));
 });
 
+// A PIN is required at creation -- a rider with no PIN could never sign
+// in, so this isn't optional the way editing one later is (staff may add a
+// rider before deciding/telling them their PIN in person, but not before
+// setting SOME PIN, or the account is just dead on arrival).
 router.post('/riders', requireEditorApi, async (req, res) => {
   const f = req.body;
+  if (!f.pin || !/^\d{4,6}$/.test(f.pin)) return res.status(400).json({ error: 'A 4 to 6 digit PIN is required.' });
   const { rows } = await pool.query(
-    `insert into rider (branch_id, name, phone, bank_account_number, bank_code, account_name)
-     values ($1, $2, $3, $4, $5, $6) returning *`,
-    [req.branchId || f.branch_id || null, f.name, f.phone, encrypt(f.bank_account_number), f.bank_code || null, f.account_name || null]
+    `insert into rider (branch_id, name, phone, bank_account_number, bank_code, account_name, pin_hash)
+     values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+    [req.branchId || f.branch_id || null, f.name, f.phone, encrypt(f.bank_account_number), f.bank_code || null, f.account_name || null, await hashRiderPin(f.pin)]
   );
   res.status(201).json(riderRow(rows[0]));
 });
 
+// Every field here is optional and coalesced against the existing row --
+// the "reset PIN" action sends only { pin }, and name/phone are NOT NULL
+// columns, so treating a missing field as "set it to null" would throw
+// instead of just doing the wrong thing, but it's still wrong: this has to
+// behave as a real partial update, the same way bank_account_number
+// already does below.
+//
+// pin itself is optional so editing a rider's name/bank details doesn't
+// force staff to also re-type or reset their PIN. Sent only when staff
+// actually wants to change it (also clears any existing lockout, since a
+// new PIN staff just set in person is a legitimate reason to let them
+// straight back in).
 router.post('/riders/:id', requireEditorApi, async (req, res) => {
   const f = req.body;
+  if (f.pin && !/^\d{4,6}$/.test(f.pin)) return res.status(400).json({ error: 'PIN must be 4 to 6 digits.' });
   const { rows } = await pool.query(
-    `update rider set name = $1, phone = $2, bank_code = $3, account_name = $4,
-       bank_account_number = coalesce($5, bank_account_number)
-     where id = $6 returning *`,
-    [f.name, f.phone, f.bank_code || null, f.account_name || null, f.bank_account_number ? encrypt(f.bank_account_number) : null, req.params.id]
+    `update rider set
+       name = coalesce($1, name),
+       phone = coalesce($2, phone),
+       bank_code = coalesce($3, bank_code),
+       account_name = coalesce($4, account_name),
+       bank_account_number = coalesce($5, bank_account_number),
+       pin_hash = coalesce($6, pin_hash),
+       pin_failed_attempts = case when $6::text is null then pin_failed_attempts else 0 end,
+       pin_locked_until = case when $6::text is null then pin_locked_until else null end
+     where id = $7 returning *`,
+    [f.name || null, f.phone || null, f.bank_code || null, f.account_name || null, f.bank_account_number ? encrypt(f.bank_account_number) : null, f.pin ? await hashRiderPin(f.pin) : null, req.params.id]
   );
   res.json(riderRow(rows[0]));
 });
