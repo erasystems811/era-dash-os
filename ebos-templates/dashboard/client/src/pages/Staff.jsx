@@ -1,17 +1,22 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
+import { useScope, scopeQuery } from '../ScopeContext.jsx';
 
 const EMPTY = { name: '', phone_number: '', email: '', password: '', role: 'staff', branch_id: '' };
+const EMPTY_PIN = { name: '', pin: '' };
 
 export default function StaffPage() {
   const { staff } = useStaff();
+  const { scope } = useScope();
   const editable = canEdit(staff);
   const isOwner = staff?.role === 'owner';
   const [list, setList] = useState(null);
   const [branches, setBranches] = useState([]);
   const [form, setForm] = useState(EMPTY);
+  const [pinForm, setPinForm] = useState(EMPTY_PIN);
   const [error, setError] = useState(null);
+  const [pinError, setPinError] = useState(null);
 
   function load() {
     api.get('/staff').then(setList);
@@ -24,6 +29,16 @@ export default function StaffPage() {
   // picker here at all.
   const showBranches = branches.length > 1;
 
+  // Who a PIN account gets created under: the acting manager's own lock,
+  // or (for an owner) whichever single branch they're currently scoped to
+  // via the sidebar switcher. A PIN account always belongs to exactly one
+  // branch -- see routes/api.js's POST /staff/pin -- so this form simply
+  // doesn't render for an owner viewing "All orders"/"Compare branches",
+  // same "don't show a control that can't do anything yet" rule as the
+  // scope switcher itself.
+  const pinBranchId = staff?.branch_id || (scope && scope !== 'all' ? scope : null);
+  const pinBranchName = branches.find((b) => b.id === pinBranchId)?.name;
+
   async function add(e) {
     e.preventDefault();
     setError(null);
@@ -33,6 +48,30 @@ export default function StaffPage() {
       load();
     } catch (err) {
       setError(err.message);
+    }
+  }
+
+  async function addPin(e) {
+    e.preventDefault();
+    setPinError(null);
+    try {
+      await api.post(`/staff/pin${scopeQuery(pinBranchId)}`, pinForm);
+      setPinForm(EMPTY_PIN);
+      load();
+    } catch (err) {
+      setPinError(err.message);
+    }
+  }
+
+  async function resetPin(person) {
+    const pin = window.prompt(`New 4-digit PIN for ${person.name}:`);
+    if (!pin) return;
+    setPinError(null);
+    try {
+      await api.post(`/staff/${person.id}/pin${scopeQuery(pinBranchId)}`, { pin });
+      load();
+    } catch (err) {
+      setPinError(err.message);
     }
   }
 
@@ -81,7 +120,7 @@ export default function StaffPage() {
           <thead>
             <tr>
               <th>Name</th>
-              <th>Email</th>
+              <th>Login</th>
               <th>Phone</th>
               <th>Role</th>
               {showBranches && <th>Branch</th>}
@@ -94,12 +133,12 @@ export default function StaffPage() {
             {list.map((p) => (
               <tr key={p.id}>
                 <td>{p.name}</td>
-                <td>{p.email}</td>
+                <td>{p.auth_type === 'pin' ? <span className="badge">PIN</span> : p.email}</td>
                 <td>{p.phone_number}</td>
                 <td>{p.role}</td>
                 {showBranches && (
                   <td>
-                    {isOwner ? (
+                    {isOwner && p.auth_type !== 'pin' ? (
                       <select value={p.branch_id || ''} onChange={(e) => changeBranch(p, e.target.value)}>
                         <option value="">All branches</option>
                         {branches.map((b) => (
@@ -133,7 +172,12 @@ export default function StaffPage() {
                   )}
                 </td>
                 {editable && (
-                  <td>
+                  <td style={{ display: 'flex', gap: 8 }}>
+                    {p.auth_type === 'pin' && (
+                      <button className="secondary" onClick={() => resetPin(p)}>
+                        Reset PIN
+                      </button>
+                    )}
                     <button className="secondary" onClick={() => toggleStatus(p)}>
                       {p.status === 'active' ? 'Disable' : 'Re-enable'}
                     </button>
@@ -192,6 +236,37 @@ export default function StaffPage() {
                   </select>
                 </div>
               )}
+            </div>
+            <button type="submit">Add staff</button>
+          </form>
+        </div>
+      )}
+
+      {editable && pinBranchId && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Add staff with a PIN{pinBranchName ? ` -- ${pinBranchName}` : ''}</h3>
+          <p className="subtitle">
+            No email needed -- they sign in on the shared dashboard device with their name and this 4-digit PIN. They only ever see
+            Orders, Catalogue, Conversations, Knowledge base, and Documents.
+          </p>
+          {pinError && <div className="error-banner">{pinError}</div>}
+          <form onSubmit={addPin}>
+            <div className="form-row">
+              <div className="field">
+                <label>Name</label>
+                <input value={pinForm.name} onChange={(e) => setPinForm({ ...pinForm, name: e.target.value })} required />
+              </div>
+              <div className="field" style={{ maxWidth: 160 }}>
+                <label>4-digit PIN</label>
+                <input
+                  value={pinForm.pin}
+                  onChange={(e) => setPinForm({ ...pinForm, pin: e.target.value.replace(/\D/g, '').slice(0, 4) })}
+                  inputMode="numeric"
+                  pattern="\d{4}"
+                  maxLength={4}
+                  required
+                />
+              </div>
             </div>
             <button type="submit">Add staff</button>
           </form>

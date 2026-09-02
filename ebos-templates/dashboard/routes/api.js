@@ -21,7 +21,9 @@ import {
   logActivity,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference } from '../engine/flow.js';
+import { resolveZoneForAddress, getDeliveryConfig } from '../engine/delivery-zones.js';
+import { createDelivery } from '../engine/delivery.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
 import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../engine/whatsapp-profile.js';
 import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort, deleteBestEffort } from '../engine/whatsapp-catalog.js';
@@ -316,6 +318,7 @@ router.post('/whatsapp-catalog/confirm-connected', requireEraAdmin, async (req, 
 router.get('/delivery-config', async (req, res) => {
   const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
   if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
   const { rows } = await pool.query(
     'select business_id, mode, payout_mode, provider, offer_timeout_seconds from delivery_config limit 1'
   );
@@ -341,6 +344,7 @@ router.post('/delivery-config', requireEraAdmin, async (req, res) => {
 router.get('/voice-config', async (req, res) => {
   const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
   if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
   const { rows } = await pool.query(
     `select business_id, enabled, transport, inbound_number, voice_id, transfer_numbers, operating_hours,
        greeting_override, max_minutes_per_month, recording_enabled, recording_retention_days
@@ -467,6 +471,108 @@ router.get('/orders', async (req, res) => {
   res.json(rows);
 });
 
+// Staff creating an order directly -- a delivery or order that came in
+// some way other than a channel this system listens on itself (a landline
+// call, a walk-in). Owner/manager only (requireEditorApi) and never a
+// PIN-tier session even if one somehow held a manager role
+// (requireFullAccessApi) -- creating a real, priced, already-marked-paid
+// order is a different trust level than the one write action (notify-
+// ready) Tier 3 gets.
+//
+// Reuses the real engine pieces rather than a second, parallel path:
+// findOrCreateCustomer (same lookup/branch-scoping WhatsApp uses),
+// resolveZoneForAddress (same deterministic, never-guessed zone match
+// own_riders delivery already relies on), and newReference for the order
+// number. Item prices are always the real, current product.price --
+// never trusted from the request, exactly like every other place an order
+// gets priced.
+//
+// Lands as status='confirmed' (payment already happened outside this
+// system -- cash, transfer, in person), engine_state='fulfilment' (the
+// same state a real WhatsApp order reaches right after payment) so a
+// later message from this same customer is treated as "asking about an
+// existing order", never as a fresh chat mistaking this for a brand new
+// inquiry. From here it's the exact same order everything else (marking
+// ready, own_riders dispatch, delivery tracking) already works on
+// unchanged.
+router.post('/orders', requireFullAccessApi, requireEditorApi, async (req, res) => {
+  const f = req.body;
+  if (!f.phone) return res.status(400).json({ error: 'A customer phone number is required.' });
+  if (!Array.isArray(f.items) || !f.items.length) return res.status(400).json({ error: 'At least one item is required.' });
+  if (!['delivery', 'pickup'].includes(f.fulfilment_type)) return res.status(400).json({ error: 'fulfilment_type must be "delivery" or "pickup".' });
+  if (f.fulfilment_type === 'delivery' && !f.address) return res.status(400).json({ error: 'A delivery address is required.' });
+
+  const branchId = req.branchId || f.branch_id || null;
+  const customer = await findOrCreateCustomer({ phoneNumber: f.phone, channel: 'manual', branchId });
+  if (f.name && !customer.name) {
+    await pool.query('update customers set name = $1 where id = $2', [f.name, customer.id]);
+    customer.name = f.name;
+  }
+  // Kept in sync on the in-memory customer object too, not just written to
+  // the row -- createDelivery() below reads customer.address directly, and
+  // a stale value here would silently create a delivery row with the
+  // customer's OLD (or no) address instead of the one just typed in.
+  if (f.fulfilment_type === 'delivery' && f.address) {
+    await pool.query('update customers set address = $1 where id = $2', [f.address, customer.id]);
+    customer.address = f.address;
+  }
+
+  const { rows: products } = await pool.query(
+    `select id, name, price from product where id = any($1::uuid[])`,
+    [f.items.map((i) => i.productId)]
+  );
+  const byId = new Map(products.map((p) => [p.id, p]));
+  const unknown = f.items.find((i) => !byId.has(i.productId));
+  if (unknown) return res.status(400).json({ error: `Unknown product: ${unknown.productId}` });
+  const lineItems = f.items.map((i) => {
+    const product = byId.get(i.productId);
+    return { productId: product.id, quantity: Math.max(1, Number(i.quantity) || 1), price: product.price };
+  });
+  const itemsTotal = lineItems.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
+
+  let deliveryFee = 0;
+  let deliveryZoneId = null;
+  if (f.fulfilment_type === 'delivery') {
+    const deliveryConfig = await getDeliveryConfig();
+    if (deliveryConfig.mode === 'own_riders') {
+      const zone = await resolveZoneForAddress(f.address, branchId);
+      // Never guess a zone (same rule the bot itself follows) -- an
+      // unresolved address here just means no delivery fee is added and no
+      // own-riders dispatch will ever trigger for it, not a made-up price.
+      // Staff typed the address themselves, so they can see and fix it.
+      if (zone) {
+        deliveryZoneId = zone.id;
+        deliveryFee = Number(zone.customer_fee);
+      }
+    }
+  }
+
+  const { rows: orderRows } = await pool.query(
+    `insert into "order" (customer_id, reference, engine_state, status, total, delivery_fee, payment_status, fulfilment_type, branch_id, delivery_zone_id)
+     values ($1, $2, 'fulfilment', 'confirmed', $3, $4, 'confirmed', $5, $6, $7) returning *`,
+    [customer.id, newReference('ORD'), itemsTotal + deliveryFee, deliveryFee, f.fulfilment_type, branchId, deliveryZoneId]
+  );
+  const order = orderRows[0];
+
+  for (const item of lineItems) {
+    await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+  }
+
+  // The same createDelivery() completePayment() calls for every real
+  // WhatsApp order (engine/flow.js) -- without this, OrderDetail.jsx's
+  // Delivery card has nothing to show even after a rider accepts, since
+  // that card reads the `delivery` table, not delivery_offer/
+  // delivery_assignment directly. Caught by testing this end to end, not
+  // by inspection: a rider accepted the own_riders offer just fine, but
+  // the order's own delivery summary stayed null until this was added.
+  if (f.fulfilment_type === 'delivery') {
+    await createDelivery(order, customer);
+  }
+
+  await logActivity(req, 'order_created_manually', { entityType: 'order', entityId: order.id, detail: { reference: order.reference } });
+  res.status(201).json(order);
+});
+
 // Today's dashboard summary card. Defined before /orders/:id below even
 // though the path shape (/orders/stats/today) can't actually collide with
 // it (that only matches a single path segment) -- kept here anyway so the
@@ -548,16 +654,23 @@ router.get('/orders/:id', async (req, res) => {
 // Staff-triggered, not automatic -- "I'll let you know when to pick up" (the
 // payment-received message for pickup orders) only becomes true once
 // someone here actually clicks it, once the food genuinely is ready.
-router.post('/orders/:id/notify-ready', requireEditorApi, async (req, res) => {
+// requireStaffApi, not requireEditorApi -- deliberately widened so Tier 3
+// (PIN) staff can act on orders from the Orders tab, the one write
+// capability their otherwise read-only 5-tab view needs. Was
+// owner/manager-only before this; see the RBAC plan's rollout note about
+// checking for pre-existing password-tier 'staff' rows before this ships,
+// since they gain this too.
+router.post('/orders/:id/notify-ready', requireStaffApi, async (req, res) => {
   try {
     await notifyReadyForPickup(req.params.id);
+    await logActivity(req, 'order_notified_ready', { entityType: 'order', entityId: req.params.id });
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ error: `Could not notify customer: ${err.message}` });
   }
 });
 
-router.post('/orders/:id/status', requireEditorApi, async (req, res) => {
+router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
   const { status } = req.body;
   await pool.query('update "order" set status = $1, updated_at = now() where id = $2', [status, req.params.id]);
   // Staff marking an order completed (or cancelling it) is what actually
@@ -575,6 +688,7 @@ router.post('/orders/:id/status', requireEditorApi, async (req, res) => {
   if (status === 'ready') {
     await maybeDispatchOwnRiders(req.params.id);
   }
+  await logActivity(req, 'order_status_changed', { entityType: 'order', entityId: req.params.id, detail: { status } });
   res.json({ ok: true });
 });
 
@@ -583,11 +697,12 @@ router.post('/orders/:id/status', requireEditorApi, async (req, res) => {
 // completePayment() the Paystack webhook uses -- receipt, delivery booking,
 // customer notification, all of it -- rather than a second, thinner path
 // that could drift out of sync with what a real automated payment does.
-router.post('/orders/:id/confirm-payment', requireEditorApi, async (req, res) => {
+router.post('/orders/:id/confirm-payment', requireStaffApi, async (req, res) => {
   const { rows } = await pool.query(`update "order" set payment_status = 'confirmed' where id = $1 returning *`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
   try {
     await completePayment(req.params.id);
+    await logActivity(req, 'order_payment_confirmed', { entityType: 'order', entityId: req.params.id });
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ error: `Payment marked confirmed, but finishing the order failed: ${err.message}` });
@@ -847,6 +962,7 @@ router.post('/conversations/:id/send', async (req, res) => {
   if (!text) return res.status(400).json({ error: 'Message text is required.' });
   try {
     await sendStaffReply(req.params.id, text, req.staff.id);
+    await logActivity(req, 'message_sent', { entityType: 'conversation', entityId: req.params.id });
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ error: `Could not send: ${err.message}` });
@@ -859,6 +975,7 @@ router.post('/conversations/:id/send', async (req, res) => {
 // order? straight to payment) instead of re-asking from scratch.
 router.post('/conversations/:id/return-to-bot', async (req, res) => {
   await resumeBotControl(req.params.id);
+  await logActivity(req, 'conversation_returned_to_bot', { entityType: 'conversation', entityId: req.params.id });
   res.json({ ok: true });
 });
 
@@ -867,6 +984,7 @@ router.post('/conversations/:id/return-to-bot', async (req, res) => {
 // step instead of just relying on the first reply to mark the takeover.
 router.post('/conversations/:id/take-over', async (req, res) => {
   await takeOverConversation(req.params.id, req.staff.id);
+  await logActivity(req, 'conversation_taken_over', { entityType: 'conversation', entityId: req.params.id });
   res.json({ ok: true });
 });
 
@@ -897,7 +1015,7 @@ router.delete('/knowledge-base/:id', requireEditorApi, async (req, res) => {
 
 // --- Train the bot: bot_field + bot_state ----------------------------
 
-router.get('/bot-fields', async (req, res) => {
+router.get('/bot-fields', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query('select * from bot_field order by key');
   res.json(rows);
 });
@@ -925,7 +1043,7 @@ router.delete('/bot-fields/:key', requireEraAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
-router.get('/bot-states', async (req, res) => {
+router.get('/bot-states', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query('select * from bot_state order by label');
   res.json(rows);
 });
@@ -1051,6 +1169,22 @@ router.post('/staff/:id/pin', requireEditorApi, async (req, res) => {
   res.json(rows[0]);
 });
 
+// Never reachable by a PIN-tier session -- this is the accountability
+// trail ABOUT staff, not a tab staff themselves get. Filtered by
+// req.branchId exactly like /orders: a branch manager sees only their own
+// branch's log, an owner sees everything unless explicitly scoped to one
+// branch via the same scope switcher every other branch-scoped page uses.
+router.get('/activity-log', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select a.id, a.action, a.entity_type, a.entity_id, a.detail, a.created_at, a.branch_id, s.name as staff_name
+     from activity_log a left join staff s on s.id = a.staff_id
+     where $1::uuid is null or a.branch_id = $1
+     order by a.created_at desc limit 200`,
+    [req.branchId]
+  );
+  res.json(rows);
+});
+
 // --- Generated documents -----------------------------------------------
 
 router.get('/documents', async (req, res) => {
@@ -1060,7 +1194,7 @@ router.get('/documents', async (req, res) => {
 
 // --- Settings (the single business row) --------------------------------
 
-router.get('/business', async (req, res) => {
+router.get('/business', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query(
     'select id, name, type, phone_number, address, operating_hours, delivery_enabled, whatsapp_connection, handover_number, bank_name, bank_account_number, bank_account_name, logo_data_url, brand_color from business limit 1'
   );
@@ -1073,7 +1207,7 @@ router.get('/business', async (req, res) => {
 // Review reviewer) confirm the right account is linked, not just an opaque
 // numeric ID. instagram_business_basic is exactly the permission this
 // exercises.
-router.get('/settings/instagram-status', async (req, res) => {
+router.get('/settings/instagram-status', requireFullAccessApi, async (req, res) => {
   const igUserId = process.env.INSTAGRAM_USER_ID;
   const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
   if (!igUserId || !accessToken) return res.json({ connected: false });
@@ -1091,7 +1225,7 @@ router.get('/settings/instagram-status', async (req, res) => {
 // email, address, websites, category) -- separate from the /business route
 // above, which only drives the bot's own behaviour.
 
-router.get('/whatsapp-profile', async (req, res) => {
+router.get('/whatsapp-profile', requireFullAccessApi, async (req, res) => {
   try {
     res.json(await getWhatsappBusinessProfile());
   } catch (err) {
@@ -1143,20 +1277,31 @@ router.post('/business', requireEditorApi, async (req, res) => {
 // --- Branches -- optional, only matters for a business with more than one
 // physical location. Real business data (like catalogue), so any owner or
 // manager can manage it, unlike bot config.
-router.get('/branches', async (req, res) => {
-  const { rows } = await pool.query('select * from branch order by name');
+// Filtered by req.branchId like every other branch-scoped route -- a
+// branch-locked manager only ever gets their own branch's row back, never
+// every branch in the business. This was a real gap before: the query used
+// to ignore req.branchId entirely, so a branch manager could see (and,
+// through the edit routes below, touch) every other branch too, exactly
+// the cross-branch view locking them to a branch_id is meant to prevent.
+router.get('/branches', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query('select * from branch where $1::uuid is null or id = $1 order by name', [req.branchId]);
   res.json(rows);
 });
 
 // Powers the dashboard's "compare branches" scope -- deliberately no order
 // rail here (see client/src/pages/AllBranches.jsx), just the side-by-side
 // numbers an owner with several locations genuinely can't get today.
+// Owner-only by construction, not just requireEditorApi: comparing
+// branches side-by-side is meaningless once you're locked to one, so a
+// branch manager gets a clear 403 here rather than a degenerate
+// one-row "comparison."
 // "Needs attention" is bucketed by customers.branch_id, which is only ever
 // set under sharing_mode = 'independent' with a resolved branch (see
 // fields.js's customer resolver) -- under 'merged', or before a branch is
 // known, those conversations land in the null bucket below rather than
 // being force-attributed to a branch that didn't actually handle them.
-router.get('/branches/summary', async (req, res) => {
+router.get('/branches/summary', requireFullAccessApi, async (req, res) => {
+  if (req.branchId) return res.status(403).json({ error: 'Only an owner can compare branches.' });
   const [{ rows: branches }, { rows: orders }, { rows: deliveries }, { rows: attention }, { rows: hourly }] = await Promise.all([
     pool.query('select id, name from branch order by name'),
     pool.query(

@@ -18,12 +18,21 @@ export function StaffProvider({ children }) {
     setStaff(staff);
   }
 
+  // Tier 3 login: pick a branch, pick a name, enter the 4-digit PIN. Sets
+  // the same staff shape as the email/password login above -- everything
+  // downstream (canEdit, isPinTier, the nav) just reads staff.role/
+  // branch_id/auth_type, regardless of which flow set it.
+  async function loginWithPin(branchId, staffId, pin) {
+    const { staff } = await api.post('/pin-login', { branch_id: branchId, staff_id: staffId, pin });
+    setStaff(staff);
+  }
+
   async function logout() {
     await api.post('/logout');
     setStaff(null);
   }
 
-  return <StaffContext.Provider value={{ staff, login, logout }}>{children}</StaffContext.Provider>;
+  return <StaffContext.Provider value={{ staff, login, loginWithPin, logout }}>{children}</StaffContext.Provider>;
 }
 
 export function useStaff() {
@@ -42,4 +51,13 @@ export function canEdit(staff) {
 // show one at all, never to gate a feature.
 export function visibleBranchId(staff) {
   return staff?.branch_id || null;
+}
+
+// Tier 3: name+PIN login, always branch-locked, always the restricted
+// 5-tab view -- see Layout.jsx's nav split and App.jsx's route guard.
+// Mirrors lib/auth.js's server-side isPinTier; intentionally duplicated
+// rather than shared, same as canEdit/visibleBranchId above -- different
+// runtimes, not meant to be the same module.
+export function isPinTier(staff) {
+  return staff?.auth_type === 'pin';
 }

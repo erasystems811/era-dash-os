@@ -228,7 +228,13 @@ create table if not exists customers (
   -- can't collide with that.
   preferred_name text,
   phone_number text,
-  channel text not null default 'whatsapp' check (channel in ('whatsapp', 'instagram', 'tiktok', 'website', 'voice')),
+  -- 'manual' -- staff created this order/customer directly from the
+  -- dashboard (routes/api.js's POST /orders), for a delivery or order that
+  -- came in some way other than a channel this system listens on itself
+  -- (a landline call, a walk-in). Still a real customer row -- delivery
+  -- notifications/tracking go to phone_number over WhatsApp exactly like
+  -- any other channel, see engine/flow.js's recipientFor.
+  channel text not null default 'whatsapp' check (channel in ('whatsapp', 'instagram', 'tiktok', 'website', 'voice', 'manual')),
   channel_id text,
   address text,
   handled_by text not null default 'bot' check (handled_by in ('bot', 'staff')),

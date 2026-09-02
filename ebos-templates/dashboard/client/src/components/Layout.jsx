@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { useStaff } from '../StaffContext.jsx';
+import { useStaff, isPinTier } from '../StaffContext.jsx';
 import { useScope } from '../ScopeContext.jsx';
 import { api } from '../api.js';
 
@@ -12,7 +12,23 @@ const BASE_NAV = [
   { to: '/knowledge-base', label: 'Knowledge base' },
   { to: '/documents', label: 'Documents' },
   { to: '/staff', label: 'Roles and numbers' },
+  { to: '/activity-log', label: 'Activity log' },
   { to: '/settings', label: 'Settings' },
+];
+
+// Tier 3 (PIN) staff -- exactly these 5, nothing else, regardless of
+// add-ons the business has on (Delivery/Voice included) or how many
+// branches exist. No Branches/Staff/Settings/Activity log: none of those
+// are staff's to see, per the RBAC spec, and requireFullAccessApi already
+// blocks the underlying API calls server-side even if this list were
+// bypassed some other way -- this is the "don't even render the tab" half
+// of that same defense-in-depth.
+const PIN_NAV = [
+  { to: '/', label: 'Orders', end: true },
+  { to: '/catalogue', label: 'Catalogue' },
+  { to: '/conversations', label: 'Conversations' },
+  { to: '/knowledge-base', label: 'Knowledge base' },
+  { to: '/documents', label: 'Documents' },
 ];
 
 export default function Layout() {
@@ -42,7 +58,14 @@ export default function Layout() {
     ...(deliveryMode === 'own_riders' ? [{ to: '/delivery', label: 'Delivery' }] : []),
     ...(voiceEnabled ? [{ to: '/voice', label: 'Voice' }] : []),
   ];
-  const NAV = addOnItems.length ? [...BASE_NAV.slice(0, 2), ...addOnItems, ...BASE_NAV.slice(2)] : BASE_NAV;
+  // Branches is hidden (not just filtered) for a branch-locked manager --
+  // closes a real gap that used to exist: the page itself used to show
+  // every branch to anyone who could reach it, not just the one they're
+  // locked to. Staff/Settings/Activity log stay owner-or-manager-visible
+  // in the nav; requireEditorApi on their write routes already governs
+  // who can actually change anything once there.
+  const baseNav = locked ? BASE_NAV.filter((item) => item.to !== '/branches') : BASE_NAV;
+  const NAV = isPinTier(staff) ? PIN_NAV : addOnItems.length ? [...baseNav.slice(0, 2), ...addOnItems, ...baseNav.slice(2)] : baseNav;
 
   useEffect(() => {
     api.get('/business').then((b) => setBusinessName(b?.name || ''));

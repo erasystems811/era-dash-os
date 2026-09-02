@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
 import AllBranches from './AllBranches.jsx';
+import { useStaff, canEdit } from '../StaffContext.jsx';
 
 const COLUMNS = [
   { key: 'new', label: 'New', hint: 'oldest first' },
@@ -41,18 +42,180 @@ function busiestHourText(hour) {
   return `${fmt(start)} to ${fmt(end)} · ${hour.count} order${hour.count === 1 ? '' : 's'}`;
 }
 
+// For a delivery/order that came in some way other than a channel this
+// system listens on itself (a landline call, a walk-in) -- Chidera's ask,
+// 2026-09-02: "where can i book a delivery without a whatsapp order".
+// Owner/manager only (matches routes/api.js's POST /orders gate); staff
+// pick real items from the real catalogue and a real price, never type one
+// in, same "never guess a price" principle as everywhere else an order
+// gets priced.
+function NewOrderForm({ onCreated, onCancel }) {
+  const [products, setProducts] = useState(null);
+  const [phone, setPhone] = useState('');
+  const [name, setName] = useState('');
+  const [fulfilmentType, setFulfilmentType] = useState('delivery');
+  const [address, setAddress] = useState('');
+  const [items, setItems] = useState([]); // [{productId, quantity}]
+  const [pickProductId, setPickProductId] = useState('');
+  const [pickQuantity, setPickQuantity] = useState(1);
+  const [error, setError] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.get('/catalogue').then(setProducts);
+  }, []);
+
+  function addItem() {
+    if (!pickProductId) return;
+    setItems((prev) => {
+      const existing = prev.find((i) => i.productId === pickProductId);
+      if (existing) {
+        return prev.map((i) => (i.productId === pickProductId ? { ...i, quantity: i.quantity + Number(pickQuantity) } : i));
+      }
+      return [...prev, { productId: pickProductId, quantity: Number(pickQuantity) || 1 }];
+    });
+    setPickProductId('');
+    setPickQuantity(1);
+  }
+
+  function removeItem(productId) {
+    setItems((prev) => prev.filter((i) => i.productId !== productId));
+  }
+
+  const byId = new Map((products || []).map((p) => [p.id, p]));
+  const subtotal = items.reduce((sum, i) => sum + Number(byId.get(i.productId)?.price || 0) * i.quantity, 0);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null);
+    if (!phone.trim()) return setError('A phone number is required.');
+    if (!items.length) return setError('Add at least one item.');
+    if (fulfilmentType === 'delivery' && !address.trim()) return setError('A delivery address is required.');
+    setSaving(true);
+    try {
+      const order = await api.post('/orders', {
+        phone: phone.trim(),
+        name: name.trim() || undefined,
+        fulfilment_type: fulfilmentType,
+        address: fulfilmentType === 'delivery' ? address.trim() : undefined,
+        items,
+      });
+      onCreated(order);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!products) return null;
+
+  return (
+    <div className="card">
+      <h3 style={{ marginTop: 0 }}>New order</h3>
+      <p className="hint">
+        For an order that didn't come in on WhatsApp/Instagram/a call -- a landline order, a walk-in. This gets created already marked
+        paid; use this only once payment is actually settled.
+      </p>
+      {error && <div className="error-banner">{error}</div>}
+      <form onSubmit={submit}>
+        <div className="form-row">
+          <div className="field">
+            <label>Customer phone number</label>
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="e.g. 2348010000000" required />
+          </div>
+          <div className="field">
+            <label>Customer name (optional)</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+        </div>
+
+        <div className="form-row">
+          <div className="field">
+            <label>Fulfilment</label>
+            <select value={fulfilmentType} onChange={(e) => setFulfilmentType(e.target.value)}>
+              <option value="delivery">Delivery</option>
+              <option value="pickup">Pickup</option>
+            </select>
+          </div>
+          {fulfilmentType === 'delivery' && (
+            <div className="field">
+              <label>Delivery address</label>
+              <input value={address} onChange={(e) => setAddress(e.target.value)} required />
+            </div>
+          )}
+        </div>
+
+        <label>Items</label>
+        <div className="form-row" style={{ alignItems: 'flex-end' }}>
+          <div className="field">
+            <select value={pickProductId} onChange={(e) => setPickProductId(e.target.value)}>
+              <option value="">Choose an item...</option>
+              {products.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({naira(p.price)})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field" style={{ maxWidth: 100 }}>
+            <input type="number" min="1" value={pickQuantity} onChange={(e) => setPickQuantity(e.target.value)} />
+          </div>
+          <button type="button" className="secondary" onClick={addItem}>
+            Add
+          </button>
+        </div>
+
+        {items.length > 0 && (
+          <ul style={{ marginBottom: 12 }}>
+            {items.map((i) => (
+              <li key={i.productId}>
+                <b>{i.quantity}</b> {byId.get(i.productId)?.name} ({naira(Number(byId.get(i.productId)?.price || 0) * i.quantity)}){' '}
+                <button type="button" className="link" onClick={() => removeItem(i.productId)}>
+                  remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {items.length > 0 && (
+          <p className="hint">
+            Items subtotal: {naira(subtotal)}. A delivery fee is added automatically if the address matches a set-up delivery zone.
+          </p>
+        )}
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="submit" disabled={saving}>
+            {saving ? 'Creating...' : 'Create order'}
+          </button>
+          <button type="button" className="secondary" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function Orders() {
   const { scope } = useScope();
+  const { staff } = useStaff();
+  const navigate = useNavigate();
   const [orders, setOrders] = useState(null);
   const [today, setToday] = useState(null);
+  const [showNewOrder, setShowNewOrder] = useState(false);
+
+  function load() {
+    const q = scopeQuery(scope);
+    api.get(`/orders${q}`).then(setOrders);
+    api.get(`/orders/stats/today${q}`).then(setToday);
+  }
 
   useEffect(() => {
     if (scope === 'all') return;
     setOrders(null);
     setToday(null);
-    const q = scopeQuery(scope);
-    api.get(`/orders${q}`).then(setOrders);
-    api.get(`/orders/stats/today${q}`).then(setToday);
+    load();
   }, [scope]);
 
   // Changing scope changes the page, not just filters it -- comparing
@@ -71,7 +234,18 @@ export default function Orders() {
           <h1>Orders</h1>
           <p className="subtitle">Every order that has come in through the bot or the dashboard.</p>
         </div>
+        {canEdit(staff) && !showNewOrder && <button onClick={() => setShowNewOrder(true)}>New order</button>}
       </div>
+
+      {showNewOrder && (
+        <NewOrderForm
+          onCreated={(order) => {
+            setShowNewOrder(false);
+            navigate(`/orders/${order.id}`);
+          }}
+          onCancel={() => setShowNewOrder(false)}
+        />
+      )}
 
       <div className="stat-row">
         <div className="stat-card">

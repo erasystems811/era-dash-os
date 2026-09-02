@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, Link } from 'react-router-dom';
 import { useStaff } from '../StaffContext.jsx';
 
 export default function Login() {
@@ -41,6 +41,9 @@ export default function Login() {
         <button type="submit" disabled={loading} style={{ width: '100%' }}>
           {loading ? 'Logging in...' : 'Log in'}
         </button>
+        <p style={{ textAlign: 'center', marginTop: '1rem' }}>
+          <Link to="/staff-login">Staff — sign in with your name and PIN</Link>
+        </p>
       </form>
     </div>
   );

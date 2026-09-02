@@ -330,7 +330,11 @@ export async function recordAppReplyInstagram({ channelId, text }) {
 // with no branch_id yet (created before this business had branches, or
 // under merged) still matches -- treated as "not yet claimed by a branch",
 // same as resolveMenu's unassigned-product rule, not a second customer.
-async function findOrCreateCustomer({ phoneNumber, channelId, channel = 'whatsapp', branchId = null }) {
+// Exported for routes/api.js's manual order creation (a staff-entered
+// phone number for a delivery/order that came in outside any channel this
+// system listens on itself) -- same lookup, same branch-scoping rule,
+// rather than a second copy of this logic living in the route.
+export async function findOrCreateCustomer({ phoneNumber, channelId, channel = 'whatsapp', branchId = null }) {
   const scoped = branchId && (await getSharingMode()) === 'independent';
   const { rows } = await pool.query(
     phoneNumber
@@ -346,7 +350,7 @@ async function findOrCreateCustomer({ phoneNumber, channelId, channel = 'whatsap
   return created[0];
 }
 
-function newReference(prefix) {
+export function newReference(prefix) {
   return `${prefix}-${randomBytes(3).toString('hex').toUpperCase()}`;
 }
 

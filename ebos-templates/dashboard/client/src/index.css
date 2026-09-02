@@ -437,6 +437,75 @@ label {
   font-size: 13px;
   margin: 0 0 20px;
 }
+.muted {
+  color: var(--text-muted);
+}
+.link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+.link-button:hover {
+  background: none;
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+/* PIN login (Tier 3 staff): name buttons sized for a touch device, not a
+   typed dropdown -- see PinLogin.jsx. */
+.pin-name-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pin-name-list button {
+  background: var(--accent-soft);
+  color: var(--accent);
+  width: 100%;
+  padding: 14px;
+  font-size: 15px;
+  text-align: left;
+}
+.pin-name-list button:hover {
+  background: var(--accent);
+  color: #fff;
+}
+.pin-dots {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.pin-dots span {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: transparent;
+}
+.pin-dots span.filled {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.pin-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.pin-pad button {
+  background: var(--accent-soft);
+  color: var(--accent);
+  padding: 18px 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+.pin-pad button:hover {
+  background: var(--accent);
+  color: #fff;
+}
 
 .stat-row {
   display: flex;
