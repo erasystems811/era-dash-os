@@ -3,7 +3,7 @@ import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
 
-const EMPTY = { name: '', phone_number: '', email: '', password: '', role: 'staff', branch_id: '' };
+const EMPTY = { name: '', phone_number: '', email: '', password: '', role: 'manager', branch_id: '' };
 const EMPTY_PIN = { name: '', pin: '' };
 
 export default function StaffPage() {
@@ -191,7 +191,8 @@ export default function StaffPage() {
 
       {editable && (
         <div className="card">
-          <h3 style={{ marginTop: 0 }}>Add staff</h3>
+          <h3 style={{ marginTop: 0 }}>Add manager or owner</h3>
+          <p className="subtitle">A real login with their own email and password -- for whoever runs a branch or the whole business.</p>
           {error && <div className="error-banner">{error}</div>}
           <form onSubmit={add}>
             <div className="form-row">
@@ -218,7 +219,6 @@ export default function StaffPage() {
               <div className="field" style={{ maxWidth: 220 }}>
                 <label>Role</label>
                 <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
-                  <option value="staff">Staff</option>
                   <option value="manager">Manager</option>
                   <option value="owner">Owner</option>
                 </select>

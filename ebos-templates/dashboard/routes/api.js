@@ -487,14 +487,16 @@ router.get('/orders', async (req, res) => {
 // never trusted from the request, exactly like every other place an order
 // gets priced.
 //
-// Lands as status='confirmed' (payment already happened outside this
-// system -- cash, transfer, in person), engine_state='fulfilment' (the
-// same state a real WhatsApp order reaches right after payment) so a
-// later message from this same customer is treated as "asking about an
-// existing order", never as a fresh chat mistaking this for a brand new
-// inquiry. From here it's the exact same order everything else (marking
-// ready, own_riders dispatch, delivery tracking) already works on
-// unchanged.
+// Lands directly as status='preparation', skipping 'confirmed' entirely
+// (Chidera's call) -- 'confirmed' exists to flag a real WhatsApp order as
+// "paid, needs someone to look at it," which is redundant here since
+// staff just looked at it themselves by typing it in. engine_state=
+// 'fulfilment' is the same state a real WhatsApp order reaches right after
+// payment, so a later message from this same customer is treated as
+// "asking about an existing order," never as a fresh chat mistaking this
+// for a brand new inquiry. From here it's the exact same order everything
+// else (the Preparation stage's "mark as ready" button, own_riders
+// dispatch, delivery tracking) already works on unchanged.
 router.post('/orders', requireFullAccessApi, requireEditorApi, async (req, res) => {
   const f = req.body;
   if (!f.phone) return res.status(400).json({ error: 'A customer phone number is required.' });
@@ -549,7 +551,7 @@ router.post('/orders', requireFullAccessApi, requireEditorApi, async (req, res) 
 
   const { rows: orderRows } = await pool.query(
     `insert into "order" (customer_id, reference, engine_state, status, total, delivery_fee, payment_status, fulfilment_type, branch_id, delivery_zone_id)
-     values ($1, $2, 'fulfilment', 'confirmed', $3, $4, 'confirmed', $5, $6, $7) returning *`,
+     values ($1, $2, 'fulfilment', 'preparation', $3, $4, 'confirmed', $5, $6, $7) returning *`,
     [customer.id, newReference('ORD'), itemsTotal + deliveryFee, deliveryFee, f.fulfilment_type, branchId, deliveryZoneId]
   );
   const order = orderRows[0];
@@ -1075,8 +1077,17 @@ router.get('/staff', requireFullAccessApi, async (req, res) => {
   res.json(rows);
 });
 
+// Email+password accounts are only ever Manager or Owner now -- a plain
+// "staff" role login here would just be a confusing second way to create
+// what PIN accounts (POST /staff/pin) are for. Kept as an application-
+// level check, not a DB constraint: the same role value is still valid and
+// required on a PIN row (auth_type = 'pin'), just never paired with a
+// password here.
 router.post('/staff', requireEditorApi, async (req, res) => {
   const f = req.body;
+  if (f.role === 'staff') {
+    return res.status(400).json({ error: 'Staff sign in with a name and PIN -- use "Add staff" below, not this form.' });
+  }
   const passwordHash = await hashPassword(f.password);
   // A branch-locked manager can only ever create staff inside their own
   // branch -- req.branchId (their own, from scopeToBranch) wins over
@@ -1091,7 +1102,19 @@ router.post('/staff', requireEditorApi, async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
+// A branch-locked manager can only touch staff inside their own branch,
+// and can never touch an owner account regardless -- disabling the person
+// who runs the whole business is not something a branch's own manager
+// should ever be able to do from here. requireEditorApi alone didn't catch
+// this: it only checks the ACTOR's role, never who the target row actually
+// is, so any manager could previously disable any staff row by id,
+// including an owner's.
 router.post('/staff/:id/status', requireEditorApi, async (req, res) => {
+  const { rows: target } = await pool.query('select id, role, branch_id from staff where id = $1', [req.params.id]);
+  if (!target[0]) return res.status(404).json({ error: 'Staff member not found.' });
+  if (req.branchId && (target[0].role === 'owner' || target[0].branch_id !== req.branchId)) {
+    return res.status(403).json({ error: 'You can only manage staff in your own branch.' });
+  }
   const { rows } = await pool.query('update staff set status = $1 where id = $2 returning id, status', [req.body.status, req.params.id]);
   res.json(rows[0]);
 });
@@ -1114,9 +1137,14 @@ router.post('/staff/:id/branch', requireEditorApi, async (req, res) => {
 // A staff member needs a phone number on file before a handover alert can
 // reach them -- toggling this on with no number set would silently do
 // nothing, so that's rejected here rather than failing quietly later.
+// Same branch scoping as /staff/:id/status above -- a branch manager can
+// only toggle this for staff in their own branch.
 router.post('/staff/:id/handover-alerts', requireEditorApi, async (req, res) => {
-  const { rows: existing } = await pool.query('select phone_number from staff where id = $1', [req.params.id]);
+  const { rows: existing } = await pool.query('select phone_number, branch_id from staff where id = $1', [req.params.id]);
   if (!existing[0]) return res.status(404).json({ error: 'Staff member not found.' });
+  if (req.branchId && existing[0].branch_id !== req.branchId) {
+    return res.status(403).json({ error: 'You can only manage staff in your own branch.' });
+  }
   if (req.body.handover_alerts && !existing[0].phone_number) {
     return res.status(400).json({ error: 'Add a phone number for this staff member first.' });
   }

@@ -5,9 +5,13 @@ import { useScope, scopeQuery } from '../ScopeContext.jsx';
 import AllBranches from './AllBranches.jsx';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 
+// No 'new' column, deliberately (Chidera's call) -- an order still being
+// built through chat, before payment, is work in progress on the
+// Conversations tab, not something this board needs to show. This board
+// starts the moment there's something to act on: paid and needing a look.
 const COLUMNS = [
-  { key: 'new', label: 'New', hint: 'oldest first' },
-  { key: 'confirmed', label: 'Confirmed', hint: 'awaiting kitchen' },
+  { key: 'confirmed', label: 'Confirmed', hint: 'needs a look' },
+  { key: 'preparation', label: 'Preparation', hint: 'kitchen is on it' },
   { key: 'ready', label: 'Ready', hint: 'awaiting pickup/rider' },
   { key: 'delivery', label: 'Delivery', hint: 'rider or pickup' },
   { key: 'completed', label: 'Completed', hint: '' },

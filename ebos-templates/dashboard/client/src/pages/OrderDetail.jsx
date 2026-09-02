@@ -3,7 +3,19 @@ import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 
-const STATUSES = ['new', 'confirmed', 'ready', 'delivery', 'completed', 'cancelled'];
+// One explicit action per stage, not a generic status dropdown (Chidera's
+// call) -- staff should never have to think about which of six raw status
+// words is "the next one," just press the one obviously-right button.
+// 'preparation' is the only stage the mark-as-ready action appears on --
+// that's the button that calls a rider (routes/api.js's /orders/:id/status
+// already triggers own_riders dispatch when status becomes 'ready',
+// unchanged here, just given a real button instead of a dropdown option).
+const NEXT_STAGE = {
+  confirmed: { label: 'Start preparing', next: 'preparation' },
+  preparation: { label: 'Mark as ready', next: 'ready' },
+  ready: { label: 'Send out', next: 'delivery' },
+  delivery: { label: 'Mark completed', next: 'completed' },
+};
 
 export default function OrderDetail() {
   const { id } = useParams();
@@ -38,8 +50,13 @@ export default function OrderDetail() {
     }
   }
 
-  async function updateStatus(e) {
-    await api.post(`/orders/${id}/status`, { status: e.target.value });
+  async function advanceStatus(next) {
+    await api.post(`/orders/${id}/status`, { status: next });
+    load();
+  }
+
+  async function cancelOrder() {
+    await api.post(`/orders/${id}/status`, { status: 'cancelled' });
     load();
   }
 
@@ -176,17 +193,17 @@ export default function OrderDetail() {
         </div>
       )}
 
-      {canEdit(staff) && (
+      {canEdit(staff) && !['completed', 'cancelled'].includes(order.status) && (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Update status</h3>
-          <div className="field" style={{ maxWidth: 220 }}>
-            <select value={order.status} onChange={updateStatus}>
-              {STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
+          <p className="hint" style={{ marginTop: 0 }}>
+            Currently: <span className={`badge ${order.status}`}>{order.status}</span>
+          </p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {NEXT_STAGE[order.status] && <button onClick={() => advanceStatus(NEXT_STAGE[order.status].next)}>{NEXT_STAGE[order.status].label}</button>}
+            <button className="secondary" onClick={cancelOrder}>
+              Cancel order
+            </button>
           </div>
         </div>
       )}
