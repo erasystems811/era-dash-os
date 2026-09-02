@@ -15,28 +15,42 @@ function urlBase64ToUint8Array(base64String) {
 // in-page alarm only ever fires while this tab is open -- this is what
 // actually rings/vibrates the phone with the screen off or the app
 // backgrounded, Chidera's report: "there wasnt any actual ring on my
-// phone"). Best-effort and silent on failure -- an old browser with no
-// Push API support, a denied notification permission, or a deployment
-// with no VAPID keys configured yet all just mean "no push this time",
-// never a broken sign-in/duty-toggle over it.
+// phone"). Returns a real result instead of failing silently, because
+// going on duty with no working alarm defeats the whole point of being on
+// duty -- Chidera's call: "make allow notification a prerequisite to be
+// on duty".
+//
+// Two different kinds of "didn't work", handled differently by the
+// caller: `unsupported` is a deployment/browser-level fact the rider has
+// no control over (an old browser, or this business's push not set up yet
+// -- see engine/push-notify.js) and must never block someone from working
+// just because ERA hasn't finished wiring something up; `denied` is the
+// rider's own choice (tapped Block, or their phone's settings already had
+// notifications off for this site) and is exactly the case worth stopping
+// them going on duty over, since it's the one thing they can actually fix
+// right then.
 async function subscribeToPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return { ok: false, reason: 'unsupported' };
   try {
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
     const { publicKey } = await api.get('/push-public-key');
-    if (!publicKey) return; // this deployment hasn't got VAPID keys set up yet
+    if (!publicKey) return { ok: false, reason: 'unsupported' }; // this deployment hasn't got VAPID keys set up yet
     const registration = await navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
       const permission = await Notification.requestPermission();
-      if (permission !== 'granted') return;
+      if (permission !== 'granted') return { ok: false, reason: 'denied' };
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(publicKey),
       });
     }
     await api.post('/push-subscribe', { subscription: subscription.toJSON() });
+    return { ok: true };
   } catch (err) {
     console.error('Push subscription failed:', err);
+    // A real, unexpected failure (not a plain "denied") -- treated the
+    // same as unsupported, not the rider's fault, so it never blocks them.
+    return { ok: false, reason: 'unsupported' };
   }
 }
 
@@ -355,13 +369,6 @@ function Duty({ rider, onLoggedOut }) {
 
   const onDuty = status === 'on_duty';
 
-  // Going on duty is the natural moment to make sure a real push
-  // subscription exists -- the same moment the rider is telling the app
-  // "I'm available, offers can come in now."
-  useEffect(() => {
-    if (onDuty) subscribeToPush();
-  }, [onDuty]);
-
   // 60s while on duty and idle (ActiveDelivery's own 15s takes over once a
   // job is accepted, see there) -- none at all off duty. This is what
   // makes "go off duty" actually mean something on the data bill, not just
@@ -389,6 +396,20 @@ function Duty({ rider, onLoggedOut }) {
     setError(null);
     setBusy(true);
     const next = onDuty ? 'off_duty' : 'on_duty';
+    // Allow notifications is a real prerequisite for going ON duty
+    // (Chidera's call) -- an offer with no working alarm defeats the
+    // whole point of being on duty. `unsupported` (an old browser, or
+    // this business's push not set up yet -- not the rider's own choice)
+    // never blocks them; `denied` (they tapped Block) does, since it's
+    // the one thing they can actually go fix right then.
+    if (next === 'on_duty') {
+      const pushResult = await subscribeToPush();
+      if (!pushResult.ok && pushResult.reason === 'denied') {
+        setBusy(false);
+        setError("Turn on notifications for this app in your phone settings first -- otherwise you won't hear new delivery offers.");
+        return;
+      }
+    }
     try {
       const updated = await api.post('/duty', { status: next });
       setStatus(updated.status);
