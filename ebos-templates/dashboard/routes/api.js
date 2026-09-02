@@ -918,8 +918,19 @@ router.get('/conversations', async (req, res) => {
 router.get('/conversations/needs-attention', async (req, res) => {
   const { rows } = await pool.query(
     `select 'conversation' as kind, c.id, c.name, c.phone_number, c.channel, c.channel_id,
-            c.handover_reason as reason, c.handover_at as at, null::uuid as order_id, null as order_reference, null as zone_name, null::uuid as callback_task_id
+            c.handover_reason as reason, c.handover_at as at, o.id as order_id, o.reference as order_reference, null as zone_name, null::uuid as callback_task_id,
+            coalesce(o.status, 'new') as stage
      from customers c
+     -- Most recent non-cancelled order for this customer, if any -- same
+     -- "no order yet" case as orderStages.js's own 'new' stage (a draft
+     -- order still being built through chat, before staff's kanban board
+     -- ever renders it), which is also what a customer with no order row
+     -- at all falls back to here via coalesce.
+     left join lateral (
+       select id, reference, status from "order"
+       where customer_id = c.id and status != 'cancelled'
+       order by created_at desc limit 1
+     ) o on true
      -- Voice channel excluded here on purpose: a voice handover shows up
      -- below instead, as its own richer 'callback' row (with a real
      -- context_summary and a claim/resolve workflow this generic
@@ -928,14 +939,16 @@ router.get('/conversations/needs-attention', async (req, res) => {
      where c.handled_by = 'staff' and c.channel != 'voice' and ($1::uuid is null or c.branch_id = $1)
      union all
      select 'delivery' as kind, o.id, null, null, null, null,
-            'No rider has accepted this delivery' as reason, o.staff_alerted_at as at, o.order_id, ord.reference as order_reference, z.name as zone_name, null::uuid as callback_task_id
+            'No rider has accepted this delivery' as reason, o.staff_alerted_at as at, o.order_id, ord.reference as order_reference, z.name as zone_name, null::uuid as callback_task_id,
+            null as stage
      from delivery_offer o
      join delivery_zone z on z.id = o.zone_id
      join "order" ord on ord.id = o.order_id
      where o.status = 'OPEN' and o.staff_alerted_at is not null and ($1::uuid is null or o.branch_id = $1)
      union all
      select 'callback' as kind, c.id, c.name, c.phone_number, c.channel, c.channel_id,
-            ct.reason as reason, ct.created_at as at, null::uuid as order_id, null as order_reference, null as zone_name, ct.id as callback_task_id
+            ct.reason as reason, ct.created_at as at, null::uuid as order_id, null as order_reference, null as zone_name, ct.id as callback_task_id,
+            null as stage
      from callback_task ct
      join customers c on c.id = ct.customer_id
      where ct.status = 'open' and ($1::uuid is null or ct.branch_id = $1)

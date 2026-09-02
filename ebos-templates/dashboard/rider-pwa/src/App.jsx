@@ -261,7 +261,7 @@ function ActiveDelivery({ assignment: initialAssignment, offer, dropoffAddress, 
             </a>
           )}
           <button onClick={markArrived} disabled={busy}>
-            {busy ? 'Updating...' : "I'm here"}
+            {busy ? 'Updating...' : "I've arrived"}
           </button>
         </>
       )}

@@ -17,6 +17,22 @@ function timeSince(iso) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// Same stage vocabulary as orderStages.js's kanban board, plus 'new' -- the
+// one stage that board deliberately never renders a column for (a draft
+// order still being built through chat), which is exactly the case a
+// needs-attention row with no order yet, or an order that hasn't moved past
+// its own default, falls into.
+const STAGE_LABELS = {
+  new: 'New',
+  confirmation: 'Confirmation',
+  preparation: 'Preparation',
+  ready: 'Ready',
+  delivery: 'Delivery',
+  in_transit: 'In transit',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+};
+
 function AllConversations() {
   const [conversations, setConversations] = useState(null);
   const [query, setQuery] = useState('');
@@ -134,6 +150,7 @@ function NeedsAttention() {
           <tr>
             <th>Who</th>
             <th>Channel</th>
+            <th>Stage</th>
             <th>Reason</th>
             <th>Waiting</th>
             {editable && <th></th>}
@@ -149,6 +166,7 @@ function NeedsAttention() {
                   <Link to={href}>{isDelivery ? `Order ${r.order_reference} (${r.zone_name})` : r.name || r.phone_number || r.channel_id}</Link>
                 </td>
                 <td>{isDelivery ? <span className="badge new">delivery</span> : <span className={`badge ${r.channel}`}>{r.channel}</span>}</td>
+                <td>{r.stage && <span className="badge active">{STAGE_LABELS[r.stage] || r.stage}</span>}</td>
                 <td style={{ color: 'var(--text-muted)' }}>{r.reason || '(taken over from the app)'}</td>
                 <td>
                   <span className="badge new">{timeSince(r.at)}</span>
@@ -172,7 +190,55 @@ function NeedsAttention() {
           })}
           {!rows.length && (
             <tr>
-              <td colSpan={editable ? 5 : 4} className="empty-state">Nothing waiting on staff right now.</td>
+              <td colSpan={editable ? 6 : 5} className="empty-state">Nothing waiting on staff right now.</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Everyone the bot is currently answering on its own -- handled_by='bot',
+// nobody's stepped in. Filtered client-side out of the same /conversations
+// list AllConversations already fetches (it already returns handled_by on
+// every row), rather than a second endpoint for what's really just one
+// column's value.
+function ActiveConversations() {
+  const [conversations, setConversations] = useState(null);
+
+  useEffect(() => {
+    api.get('/conversations').then(setConversations);
+  }, []);
+
+  if (!conversations) return null;
+  const rows = conversations.filter((c) => c.handled_by === 'bot');
+
+  return (
+    <div className="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Customer</th>
+            <th>Channel</th>
+            <th>Last message</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((c) => (
+            <tr key={c.id} className="clickable" onClick={() => (window.location.href = `/conversations/${c.id}`)}>
+              <td>
+                <Link to={`/conversations/${c.id}`}>{c.name || c.phone_number || c.channel_id}</Link>
+              </td>
+              <td>
+                <span className={`badge ${c.channel}`}>{c.channel}</span>
+              </td>
+              <td style={{ color: 'var(--text-muted)' }}>{(c.last_message || '').slice(0, 70)}</td>
+            </tr>
+          ))}
+          {!rows.length && (
+            <tr>
+              <td colSpan={3} className="empty-state">No conversation the bot is currently handling.</td>
             </tr>
           )}
         </tbody>
@@ -244,7 +310,7 @@ function MessageCustomer() {
 }
 
 export default function Conversations() {
-  const [tab, setTab] = useState('all');
+  const [tab, setTab] = useState('attention');
 
   return (
     <div>
@@ -256,14 +322,19 @@ export default function Conversations() {
       </div>
       <MessageCustomer />
       <div className="card" style={{ display: 'flex', gap: 8, padding: 6, width: 'fit-content' }}>
-        <button className={tab === 'all' ? '' : 'secondary'} onClick={() => setTab('all')}>
-          All conversations
-        </button>
         <button className={tab === 'attention' ? '' : 'secondary'} onClick={() => setTab('attention')}>
           Needs attention
         </button>
+        <button className={tab === 'active' ? '' : 'secondary'} onClick={() => setTab('active')}>
+          Active
+        </button>
+        <button className={tab === 'all' ? '' : 'secondary'} onClick={() => setTab('all')}>
+          All conversations
+        </button>
       </div>
-      {tab === 'all' ? <AllConversations /> : <NeedsAttention />}
+      {tab === 'attention' && <NeedsAttention />}
+      {tab === 'active' && <ActiveConversations />}
+      {tab === 'all' && <AllConversations />}
     </div>
   );
 }

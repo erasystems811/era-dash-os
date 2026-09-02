@@ -1616,13 +1616,49 @@ function scheduleDebouncedProcessing(customer) {
       // until they happened to message again. Best-effort and deliberately
       // swallows its own failure, so a second error here can't cascade.
       try {
-        // One plain message, not two -- this used to send its own
-        // "having trouble" line here and then handover()'s default
-        // "let me confirm this properly" right after, which read as a
-        // stitched-together non-sequitur to the customer (found live,
-        // 2026-09-02: "let me confirm this properly" makes no sense right
-        // after being told something broke).
-        await handover(customer, SYSTEM_ERROR_HANDOVER_REASON, null, 'Hello, someone will be with you shortly.');
+        // Still lets the bot retry normally on every later message (the
+        // usual handled_by='staff'-but-no-real-human-yet gate in
+        // handlePendingBatch already does that) -- this only decides what
+        // the CUSTOMER sees when a retry fails again. First failure: the
+        // one-time ack below. Every failure after that, while still the
+        // same unresolved outage and no staff reply yet: stay silent to
+        // the customer (no repeat "someone will be with you shortly" spam)
+        // but still relay to staff, so a message sent during a still-broken
+        // retry isn't lost. The moment a retry actually succeeds, this
+        // catch never runs and the customer gets a normal reply again.
+        const { rows: freshRows } = await pool.query(
+          'select handled_by, handover_reason, handled_by_staff_id, app_handled_at from customers where id = $1',
+          [customer.id]
+        );
+        const fresh = freshRows[0];
+        const alreadyInErrorHandover =
+          fresh?.handled_by === 'staff' &&
+          fresh.handover_reason === SYSTEM_ERROR_HANDOVER_REASON &&
+          !(fresh.handled_by_staff_id || fresh.app_handled_at);
+
+        if (alreadyInErrorHandover) {
+          const { rows: lastMsg } = await pool.query(
+            `select body from message where customer_id = $1 and direction = 'inbound' order by created_at desc limit 1`,
+            [customer.id]
+          );
+          const recipients = await handoverRecipients();
+          for (const to of recipients) {
+            await botEngine.sendMessage({
+              trigger: 'staff_handoff_intro',
+              to,
+              text: `${displayNameFor(customer)} sent another message while still erroring: ${lastMsg[0]?.body || '(no text)'}`,
+              whatsappSend: sendWhatsApp,
+            });
+          }
+        } else {
+          // First failure -- one plain message, not two -- this used to
+          // send its own "having trouble" line here and then handover()'s
+          // default "let me confirm this properly" right after, which read
+          // as a stitched-together non-sequitur to the customer (found
+          // live, 2026-09-02: "let me confirm this properly" makes no
+          // sense right after being told something broke).
+          await handover(customer, SYSTEM_ERROR_HANDOVER_REASON, null, 'Hello, please someone will be with you shortly.');
+        }
       } catch (innerErr) {
         console.error('Failed to notify customer after a processing error:', innerErr);
       }
@@ -1788,25 +1824,6 @@ async function handlePendingBatch(customer, text) {
     // dashboard and can answer themselves; the bot just isn't the one
     // talking right now. It picks back up the moment "Return to bot" is
     // pressed or the 30-minute idle window above trips.
-    return;
-  }
-
-  // The bot itself broke on this thread (see scheduleDebouncedProcessing's
-  // error-recovery handover) and no human has replied yet. Retrying
-  // dispatch/classifyIntent here would most likely just fail the same way
-  // again, and re-running the ack above every message would spam the
-  // customer with the same "someone will be with you shortly" line. Relay
-  // straight to whoever gets handover alerts instead -- no bot attempt, no
-  // repeat ack, same "picks back up on 'Return to bot'" recovery path.
-  if (customer.handled_by === 'staff' && customer.handover_reason === SYSTEM_ERROR_HANDOVER_REASON) {
-    const recipients = await handoverRecipients();
-    for (const to of recipients) {
-      try {
-        await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text: `${displayNameFor(customer)} says: ${text}`, whatsappSend: sendWhatsApp });
-      } catch (err) {
-        console.error(`Failed to relay message to ${to}:`, err);
-      }
-    }
     return;
   }
 
