@@ -205,20 +205,27 @@ router.post('/offers/:id/accept', requireRider, async (req, res) => {
       [riderName, riderRows[0]?.phone || null, trackingPath, offer.order_id]
     );
 
-    // The customer's own typed address -- withheld from the offer itself
-    // (a rider deciding whether to accept only sees the zone, per spec B3),
-    // handed over now that they actually have the job, so the rider PWA
-    // can offer a nav handoff for the drop-off leg the same way it already
-    // does for pickup. Still just the free text the customer typed, not a
-    // real coordinate (see the tracking-link note below) -- Maps will do
-    // its own best-effort search on it, same as typing it in by hand.
+    // The customer's own typed address and phone number -- withheld from
+    // the offer itself (a rider deciding whether to accept only sees the
+    // zone, per spec B3), handed over now that they actually have the job,
+    // so the rider PWA can offer a nav handoff for the drop-off leg (same
+    // as it already does for pickup) and a tap-to-call for reaching the
+    // customer directly (Chidera's ask, 2026-09-03). Address is still just
+    // the free text the customer typed, not a real coordinate (see the
+    // tracking-link note below) -- Maps will do its own best-effort search
+    // on it, same as typing it in by hand.
     const { rows: custRows } = await client.query(
-      `select c.address from customers c join "order" o on o.customer_id = c.id where o.id = $1`,
+      `select c.address, c.phone_number from customers c join "order" o on o.customer_id = c.id where o.id = $1`,
       [offer.order_id]
     );
 
     await client.query('COMMIT');
-    res.json({ assignment, deliveryCode, dropoffAddress: custRows[0]?.address || null });
+    res.json({
+      assignment,
+      deliveryCode,
+      dropoffAddress: custRows[0]?.address || null,
+      customerPhone: custRows[0]?.phone_number || null,
+    });
 
     // Fire-and-forget, after the response -- the assignment is already
     // committed, so a WhatsApp hiccup here must never surface as a failed

@@ -214,7 +214,7 @@ function navHandoffUrl(address) {
 // or a refresh doesn't lose where the rider actually is -- /assignments/:id
 // itself is the source of truth on the server, this is just tracking the
 // same thing client-side between taps.
-function ActiveDelivery({ assignment: initialAssignment, offer, dropoffAddress, onFinished }) {
+function ActiveDelivery({ assignment: initialAssignment, offer, dropoffAddress, customerPhone, onFinished }) {
   const [assignment, setAssignment] = useState(initialAssignment);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -305,6 +305,11 @@ function ActiveDelivery({ assignment: initialAssignment, offer, dropoffAddress, 
               <button type="button">Open in Maps</button>
             </a>
           )}
+          {customerPhone && (
+            <a href={`tel:${customerPhone}`}>
+              <button type="button">Call customer</button>
+            </a>
+          )}
           <button onClick={markArrived} disabled={busy}>
             {busy ? 'Updating...' : "I've arrived"}
           </button>
@@ -315,6 +320,11 @@ function ActiveDelivery({ assignment: initialAssignment, offer, dropoffAddress, 
         <>
           <h1>Enter their code</h1>
           <p className="hint">Ask the customer for the code they were sent, to close out this delivery.</p>
+          {customerPhone && (
+            <a href={`tel:${customerPhone}`}>
+              <button type="button">Call customer</button>
+            </a>
+          )}
           <form onSubmit={deliver} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <input
               type="text"
@@ -354,7 +364,7 @@ function OfferScreen({ offer, onAccepted, onDone }) {
     setBusy(true);
     try {
       const data = await api.post(`/offers/${offer.id}/accept`, {});
-      onAccepted(data.assignment, data.dropoffAddress);
+      onAccepted(data.assignment, data.dropoffAddress, data.customerPhone);
     } catch (err) {
       setDeclined(err.message);
     } finally {
@@ -463,6 +473,7 @@ function Duty({ rider, onLoggedOut }) {
         assignment={active.assignment}
         offer={active.offer}
         dropoffAddress={active.dropoffAddress}
+        customerPhone={active.customerPhone}
         onFinished={() => {
           setActive(null);
           setOffer(null);
@@ -475,7 +486,9 @@ function Duty({ rider, onLoggedOut }) {
     return (
       <OfferScreen
         offer={offer}
-        onAccepted={(assignment, dropoffAddress) => setActive({ assignment, offer, dropoffAddress })}
+        onAccepted={(assignment, dropoffAddress, customerPhone) =>
+          setActive({ assignment, offer, dropoffAddress, customerPhone })
+        }
         onDone={() => setOffer(null)}
       />
     );
