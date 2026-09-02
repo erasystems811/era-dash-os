@@ -142,31 +142,62 @@ function naira(amount) {
   return `₦${Number(amount).toLocaleString()}`;
 }
 
-// A short, loud beep synthesised in-browser (no audio file to fetch/cache,
-// which matters on a cheap phone with full storage and patchy data -- spec
-// 0.2/0.3) -- plus real vibration. Both fire the moment an offer event
-// arrives, whether or not the app is in the foreground.
+// A loud beep synthesised in-browser (no audio file to fetch/cache, which
+// matters on a cheap phone with full storage and patchy data -- spec
+// 0.2/0.3), repeated for ~20s like a real ringing phone instead of one
+// 700ms ping (Chidera's report: "i need a long ring like 20 seconds") --
+// fires the moment an offer event arrives, whether or not the app is in
+// the foreground. Returns a stop() so the caller can cut it short the
+// instant the rider actually acts on the offer (accept/decline), rather
+// than ringing at them for the full 20s regardless.
+const ALARM_DURATION_MS = 20000;
+const ALARM_CYCLE_MS = 1000;
+
 function playAlarm() {
+  let stopped = false;
+  let ctx = null;
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'square';
-    osc.frequency.value = 880;
-    gain.gain.value = 0.3;
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    setTimeout(() => {
-      osc.stop();
-      ctx.close();
-    }, 700);
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
   } catch {
     // Some browsers refuse to start audio without a prior user gesture --
     // vibration below still fires either way, never worth failing loudly
     // over a missed beep.
   }
-  if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+
+  function ring() {
+    if (stopped) return;
+    if (ctx) {
+      try {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = 880;
+        gain.gain.value = 0.3;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        setTimeout(() => osc.stop(), 700);
+      } catch {
+        // ignore -- see above
+      }
+    }
+    if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+  }
+
+  ring();
+  const interval = setInterval(ring, ALARM_CYCLE_MS);
+  const stopAt = setTimeout(stop, ALARM_DURATION_MS);
+
+  function stop() {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(interval);
+    clearTimeout(stopAt);
+    if (navigator.vibrate) navigator.vibrate(0);
+    if (ctx) ctx.close().catch(() => {});
+  }
+
+  return stop;
 }
 
 // A plain Google Maps search link -- opens the phone's own installed maps
@@ -315,7 +346,8 @@ function OfferScreen({ offer, onAccepted, onDone }) {
   const [declined, setDeclined] = useState(null);
 
   useEffect(() => {
-    playAlarm();
+    const stop = playAlarm();
+    return stop;
   }, [offer.id]);
 
   async function accept() {
