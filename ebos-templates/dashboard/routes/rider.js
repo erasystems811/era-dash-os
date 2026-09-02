@@ -12,7 +12,66 @@ import { offerBus } from '../engine/offer-bus.js';
 import { notifyDeliveryAssigned } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { sendPayout } from '../engine/payout-providers.js';
+import { resolveSource } from '../engine/delivery.js';
 import { decrypt } from '../lib/crypto.js';
+
+// The single source of truth for "what should this rider's app show right
+// now" -- used by both /login and /me so a page refresh (or reopening the
+// app after it was killed) always lands back on reality, never a client-
+// side guess. Real bug this fixes (Chidera's report, 2026-09-03): the
+// session only ever stored {id, name, phone} from login, so /me used to
+// just echo that back with no `status` field at all -- the client
+// defaulted a missing status to 'off_duty' on every single refresh,
+// showing a rider as off duty (and silently dropping their in-progress
+// delivery screen, since `active` was plain React state with nothing to
+// restore it from) regardless of what was actually true in the database.
+// A rider going off duty now only ever happens from their own explicit
+// tap on /duty -- refreshing 100 times changes nothing.
+export async function loadRiderState(riderId) {
+  const { rows: riderRows } = await pool.query('select id, name, phone, status from rider where id = $1', [riderId]);
+  const riderRow = riderRows[0];
+  if (!riderRow) return null;
+
+  const { rows: assignmentRows } = await pool.query(
+    `select da.*, dz.name as zone_name, dz.rider_payout
+     from delivery_assignment da
+     join delivery_offer dof on dof.id = da.offer_id
+     join delivery_zone dz on dz.id = dof.zone_id
+     where da.rider_id = $1 and da.status in ('ASSIGNED', 'PICKED_UP', 'ARRIVED')
+     order by da.created_at desc
+     limit 1`,
+    [riderId]
+  );
+  const assignmentRow = assignmentRows[0];
+
+  let active = null;
+  if (assignmentRow) {
+    const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [assignmentRow.order_id]);
+    const order = orderRows[0];
+    const pickup = order ? await resolveSource(order) : {};
+    const { rows: custRows } = await pool.query(
+      `select c.address, c.phone_number from customers c join "order" o on o.customer_id = c.id where o.id = $1`,
+      [assignmentRow.order_id]
+    );
+    active = {
+      assignment: assignmentRow,
+      offer: {
+        id: assignmentRow.offer_id,
+        zoneName: assignmentRow.zone_name,
+        payout: assignmentRow.rider_payout,
+        pickupName: pickup.name || null,
+        pickupAddress: pickup.address || null,
+      },
+      dropoffAddress: custRows[0]?.address || null,
+      customerPhone: custRows[0]?.phone_number || null,
+    };
+  }
+
+  return {
+    rider: { id: riderRow.id, name: riderRow.name, phone: riderRow.phone, status: riderRow.status },
+    active,
+  };
+}
 
 export const router = express.Router();
 
@@ -31,8 +90,8 @@ router.post('/login', async (req, res) => {
   if (!phone || !pin) return res.status(400).json({ error: 'Phone number and PIN are required.' });
   const rider = await verifyRiderPin(phone, pin);
   if (!rider) return res.status(401).json({ error: 'Incorrect phone number or PIN.' });
-  req.session.rider = { id: rider.id, name: rider.name, phone: rider.phone };
-  res.json({ rider: req.session.rider });
+  req.session.rider = { id: rider.id };
+  res.json(await loadRiderState(rider.id));
 });
 
 router.post('/logout', (req, res) => {
@@ -45,8 +104,17 @@ function requireRider(req, res, next) {
   next();
 }
 
-router.get('/me', (req, res) => {
-  res.json({ rider: req.session?.rider || null });
+router.get('/me', async (req, res) => {
+  if (!req.session?.rider) return res.json({ rider: null, active: null });
+  const state = await loadRiderState(req.session.rider.id);
+  if (!state) {
+    // The rider row is gone (deleted from the dashboard) but the browser
+    // still has an old session cookie -- treat it as signed out rather
+    // than crashing on a null rider.
+    req.session = null;
+    return res.json({ rider: null, active: null });
+  }
+  res.json(state);
 });
 
 router.get('/status', requireRider, async (req, res) => {

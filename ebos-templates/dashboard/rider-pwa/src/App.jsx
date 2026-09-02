@@ -94,8 +94,8 @@ function PhoneAndPinLogin({ onLoggedIn }) {
     setError(null);
     setSigning(true);
     try {
-      const { rider } = await api.post('/login', { phone: phone.trim(), pin: pin.trim() });
-      onLoggedIn(rider);
+      const state = await api.post('/login', { phone: phone.trim(), pin: pin.trim() });
+      onLoggedIn(state);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -399,15 +399,19 @@ function OfferScreen({ offer, onAccepted, onDone }) {
   );
 }
 
-function Duty({ rider, onLoggedOut }) {
+function Duty({ rider, initialActive, onLoggedOut }) {
   const [status, setStatus] = useState(rider.status || 'off_duty');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [offer, setOffer] = useState(null);
   // Set once an offer is actually accepted -- takes over the whole screen
   // until the delivery is closed out, independent of on/off duty (a rider
-  // mid-delivery isn't listening for new offers anyway, see below).
-  const [active, setActive] = useState(null);
+  // mid-delivery isn't listening for new offers anyway, see below). Seeded
+  // from /me's own live lookup (routes/rider.js's loadRiderState), not
+  // always null -- a refresh (or reopening the app after it was killed)
+  // must never lose track of a delivery already in progress (Chidera's
+  // report, 2026-09-03: "what of his existing ride he was on?").
+  const [active, setActive] = useState(initialActive || null);
 
   const onDuty = status === 'on_duty';
 
@@ -518,19 +522,30 @@ function Duty({ rider, onLoggedOut }) {
 export default function App() {
   // undefined = still checking /me, null = signed out, object = signed in
   const [rider, setRider] = useState(undefined);
+  const [initialActive, setInitialActive] = useState(null);
 
   useEffect(() => {
     api
       .get('/me')
-      .then((d) => setRider(d.rider))
+      .then((d) => {
+        setRider(d.rider);
+        setInitialActive(d.active || null);
+      })
       .catch(() => setRider(null));
   }, []);
 
   if (rider === undefined) return null;
 
   if (rider) {
-    return <Duty rider={rider} onLoggedOut={() => setRider(null)} />;
+    return <Duty rider={rider} initialActive={initialActive} onLoggedOut={() => setRider(null)} />;
   }
 
-  return <PhoneAndPinLogin onLoggedIn={setRider} />;
+  return (
+    <PhoneAndPinLogin
+      onLoggedIn={(state) => {
+        setInitialActive(state.active || null);
+        setRider(state.rider);
+      }}
+    />
+  );
 }
