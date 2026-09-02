@@ -1,0 +1,109 @@
+/* One thumb, in sunlight, possibly at a junction (spec B3) -- large text,
+   large tap targets, high contrast, nothing that rewards careful reading. */
+* {
+  box-sizing: border-box;
+}
+html, body, #root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #111827;
+  color: #f9fafb;
+  -webkit-tap-highlight-color: transparent;
+}
+.screen {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 24px;
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
+  gap: 20px;
+}
+.brand {
+  font-size: 22px;
+  font-weight: 700;
+  text-align: center;
+  margin-bottom: 8px;
+}
+h1 {
+  font-size: 26px;
+  margin: 0 0 4px;
+}
+p.hint {
+  color: #9ca3af;
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+input {
+  width: 100%;
+  font-size: 22px;
+  padding: 18px;
+  border-radius: 12px;
+  border: 2px solid #374151;
+  background: #1f2937;
+  color: #f9fafb;
+}
+input:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+button {
+  width: 100%;
+  font-size: 20px;
+  font-weight: 700;
+  padding: 20px;
+  border-radius: 14px;
+  border: none;
+  background: #3b82f6;
+  color: #fff;
+  cursor: pointer;
+}
+button:disabled {
+  background: #374151;
+  color: #6b7280;
+  cursor: default;
+}
+button.off {
+  background: #1f2937;
+  border: 2px solid #374151;
+  color: #f9fafb;
+}
+button.danger {
+  background: #7f1d1d;
+}
+.error {
+  background: #7f1d1d;
+  color: #fecaca;
+  padding: 14px;
+  border-radius: 10px;
+  font-size: 16px;
+}
+.status-badge {
+  display: inline-block;
+  padding: 10px 20px;
+  border-radius: 999px;
+  font-size: 18px;
+  font-weight: 700;
+  text-align: center;
+}
+.status-badge.on {
+  background: #14532d;
+  color: #86efac;
+}
+.status-badge.off {
+  background: #374151;
+  color: #d1d5db;
+}
+.link {
+  text-align: center;
+  color: #9ca3af;
+  font-size: 16px;
+  background: none;
+  border: none;
+  padding: 8px;
+  text-decoration: underline;
+}

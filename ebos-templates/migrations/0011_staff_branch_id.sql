@@ -1,0 +1,18 @@
+-- Stage 6 of real multi-branch support: staff.branch_id. Not a new role --
+-- "branch staff"/"branch manager" from the addendum are the EXISTING
+-- staff/manager roles plus a required branch; null means "all branches",
+-- meaningful only for role = 'owner'. Nullable and unenforced by a check
+-- constraint on purpose (kept at the application layer, in routes/api.js's
+-- staff routes) -- consistent with this codebase's existing preference for
+-- row-data over rigid schema constraints for business rules that might
+-- need a human exception.
+--
+-- Zero effect on any business until someone is actually assigned a
+-- branch: with branch_id null (every existing staff row, on every
+-- business), lib/auth.js's scopeToBranch resolves to "see everything",
+-- exactly today's behaviour.
+--
+-- Apply to a live business with:
+--   node scripts/migrate.mjs --client=slug --file=ebos-templates/migrations/0011_staff_branch_id.sql
+--   node scripts/migrate.mjs --all-ebos --file=ebos-templates/migrations/0011_staff_branch_id.sql
+alter table staff add column if not exists branch_id uuid references branch(id);

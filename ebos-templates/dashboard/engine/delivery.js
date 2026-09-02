@@ -17,6 +17,7 @@
 // order.
 import { pool } from '../lib/db.js';
 import { geocodeAddress } from './geocode.js';
+import { getDeliveryConfig } from './delivery-zones.js';
 
 const CHOWDECK_API_BASE = process.env.CHOWDECK_API_BASE || 'https://api.chowdeck.com';
 
@@ -37,6 +38,20 @@ async function chowdeckAvailable() {
 }
 
 export async function createDelivery(order, customer) {
+  // own_riders is an explicit, per-business database choice (delivery_
+  // config.mode), not the legacy env-var Chowdeck toggle -- checked first
+  // so it always wins if a business somehow has both configured. Only ever
+  // inserts the summary row here (status='pending', no rider yet, exactly
+  // like the chowdeck/manual rows below at this same point) -- the actual
+  // dispatch to real riders happens later, when staff marks the order
+  // ready (routes/api.js's /orders/:id/status calls
+  // engine/delivery-dispatch.js's maybeDispatchOwnRiders), because "paid"
+  // and "the kitchen is ready to hand this to someone" are different facts
+  // (see flow.js's completePayment comment on this exact distinction).
+  const deliveryConfig = await getDeliveryConfig();
+  if (deliveryConfig.mode === 'own_riders') {
+    return ownRidersDelivery(order, customer);
+  }
   if (await chowdeckAvailable()) {
     try {
       return await chowdeckDelivery(order, customer);
@@ -46,6 +61,15 @@ export async function createDelivery(order, customer) {
     }
   }
   return manualDelivery(order, customer);
+}
+
+async function ownRidersDelivery(order, customer) {
+  const { rows } = await pool.query(
+    `insert into delivery (order_id, customer_id, address, phone_number, provider, status, price, branch_id)
+     values ($1, $2, $3, $4, 'own_riders', 'pending', $5, $6) returning *`,
+    [order.id, customer.id, customer.address, customer.phone_number, order.delivery_fee || 0, order.branch_id || null]
+  );
+  return { riderName: null, trackingUrl: null, record: rows[0] };
 }
 
 async function chowdeckHeaders() {
@@ -58,8 +82,10 @@ async function chowdeckHeaders() {
 // If this order was placed against a specific branch (see schema.sql's
 // branch table), that branch is where the rider actually picks up from --
 // business.address is only the right fallback for a single-location
-// business with no branch rows at all.
-async function resolveSource(order) {
+// business with no branch rows at all. Exported for engine/delivery-
+// dispatch.js's own use (an own_riders offer needs the same pickup
+// address/name a Chowdeck booking already resolves here).
+export async function resolveSource(order) {
   if (order.branch_id) {
     const { rows } = await pool.query('select name, address, phone_number from branch where id = $1', [order.branch_id]);
     if (rows[0]) return rows[0];
@@ -144,18 +170,18 @@ async function chowdeckDelivery(order, customer) {
   // price column here is plain naira.
   const priceNaira = (data.delivery_price || 0) / 100;
   const { rows } = await pool.query(
-    `insert into delivery (order_id, customer_id, address, phone_number, provider, provider_delivery_id, tracking_url, status, price)
-     values ($1, $2, $3, $4, 'chowdeck', $5, $6, 'pending', $7) returning *`,
-    [order.id, customer.id, customer.address, customer.phone_number, data.id ? String(data.id) : data.reference, data.tracking_url || null, priceNaira]
+    `insert into delivery (order_id, customer_id, address, phone_number, provider, provider_delivery_id, tracking_url, status, price, branch_id)
+     values ($1, $2, $3, $4, 'chowdeck', $5, $6, 'pending', $7, $8) returning *`,
+    [order.id, customer.id, customer.address, customer.phone_number, data.id ? String(data.id) : data.reference, data.tracking_url || null, priceNaira, order.branch_id || null]
   );
   return { riderName: null, trackingUrl: data.tracking_url || null, record: rows[0] };
 }
 
 async function manualDelivery(order, customer) {
   const { rows } = await pool.query(
-    `insert into delivery (order_id, customer_id, address, phone_number, provider, status, price)
-     values ($1, $2, $3, $4, 'manual', 'pending', 0) returning *`,
-    [order.id, customer.id, customer.address, customer.phone_number]
+    `insert into delivery (order_id, customer_id, address, phone_number, provider, status, price, branch_id)
+     values ($1, $2, $3, $4, 'manual', 'pending', 0, $5) returning *`,
+    [order.id, customer.id, customer.address, customer.phone_number, order.branch_id || null]
   );
   return { riderName: null, trackingUrl: null, record: rows[0] };
 }

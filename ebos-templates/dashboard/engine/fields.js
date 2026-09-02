@@ -51,6 +51,39 @@ export async function branchOptions() {
   return rows;
 }
 
+export async function getSharingMode() {
+  const { rows } = await pool.query('select sharing_mode from business limit 1');
+  return rows[0]?.sharing_mode || 'independent';
+}
+
+// The one place the menu is ever read from for a live conversation --
+// "never query the products table directly from a feature" (branch
+// addendum section 4). `branchId` is the conversation's already-resolved
+// branch (order.branch_id, or null/unknown before that's settled).
+//
+// merged, or branchId not yet known: the full catalogue, unscoped -- this
+// is also what every business gets today (nobody has branch-scoped
+// products yet), so it's a no-op until sharing_mode is actually switched to
+// 'independent' AND a real branch is known.
+//
+// independent, with a known branch: that branch's own items, PLUS any item
+// nobody's assigned to a specific branch yet. Not a transitional shim --
+// a permanent rule. The moment a business adds its second branch, every
+// existing product still has branch_id = null; treating "unassigned" as
+// "visible everywhere" means the menu never silently goes empty just
+// because nobody's gone through and split up 300 items yet. Assigning an
+// item to one branch is opt-in, from the Catalogue page.
+export async function resolveMenu(branchId) {
+  const base = `select id, name, description, price, category from product where availability = true and import_status is distinct from 'new'`;
+  const sharingMode = branchId ? await getSharingMode() : 'merged';
+  if (sharingMode === 'merged') {
+    const { rows } = await pool.query(`${base} order by category nulls last, name`);
+    return rows;
+  }
+  const { rows } = await pool.query(`${base} and (branch_id = $1 or branch_id is null) order by category nulls last, name`, [branchId]);
+  return rows;
+}
+
 // A whole order in one message ("2 jollof rice, 1 suya wrap, 3 chapman")
 // is the normal case, not an edge case -- so item collection is one AI call
 // that pulls out every item+quantity pair it can match against the real
@@ -66,8 +99,8 @@ export async function branchOptions() {
 // the caller can ask a specific clarifying question grounded in what's
 // actually available, not guess or fall back to a blanket "what would you
 // like" -- always driven by the real catalogue, never invented options.
-export async function extractOrderItems(message) {
-  const { rows: products } = await pool.query(`select id, name, price from product where availability = true and import_status is distinct from 'new' order by name`);
+export async function extractOrderItems(message, branchId) {
+  const products = await resolveMenu(branchId);
   if (!products.length) return { matched: [], ambiguous: [] };
   // Asking for a catalogue INDEX rather than a copied-out name closes a
   // real failure mode found in testing: with a comma-separated catalogue
@@ -109,8 +142,8 @@ export async function extractOrderItems(message) {
 // object) when the message isn't actually about changing the order at all
 // -- callers need to tell "nothing to change" from "explicitly asked to
 // change nothing", so a normal reply doesn't get misread as a modification.
-export async function extractOrderModifications(message, currentItems) {
-  const { rows: products } = await pool.query(`select id, name, price from product where availability = true and import_status is distinct from 'new' order by name`);
+export async function extractOrderModifications(message, currentItems, branchId) {
+  const products = await resolveMenu(branchId);
   if (!products.length) return null;
   const numbered = products.map((p, i) => `${i + 1}. ${p.name}`).join('\n');
   const currentList = currentItems.length ? currentItems.map((i) => `${i.quantity}x ${i.name}`).join(', ') : '(nothing yet)';

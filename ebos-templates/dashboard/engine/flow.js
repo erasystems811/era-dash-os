@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { pool } from '../lib/db.js';
 import * as botEngine from '../bot-engine/index.js';
 import { classifyIntent, detectWantsHuman, detectDelayComplaint } from './classify.js';
-import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extractOrderItems, extractOrderModifications, extractFulfilmentChange, loadBotFields, describeForExtraction, branchOptions } from './fields.js';
+import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extractOrderItems, extractOrderModifications, extractFulfilmentChange, loadBotFields, describeForExtraction, branchOptions, resolveMenu, getSharingMode } from './fields.js';
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
 import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
@@ -13,6 +13,8 @@ import { sendMenuList } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
+import { getWhatsAppCredentials } from './branch-channel.js';
+import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
 
 // The one place that decides "who is this customer and how do we reach
 // them" by channel -- WhatsApp uses their phone number, Instagram uses
@@ -23,14 +25,46 @@ import { createDelivery, estimateDeliveryFee } from './delivery.js';
 function recipientFor(customer) {
   return customer.channel === 'instagram' ? customer.channel_id : customer.phone_number;
 }
-function senderFor(customer) {
-  return customer.channel === 'instagram' ? sendInstagram : sendWhatsApp;
+// Resolves which underlying transport function to hand to bot-engine's
+// generic sendMessage -- and for WhatsApp, which branch's own number/token
+// to send it from, via customer.branch_id (set at customer creation, see
+// findOrCreateCustomer). getWhatsAppCredentials returns null for every
+// customer today (no branch has real credentials configured yet -- see
+// engine/branch-channel.js), which sendWhatsApp treats as "use the single
+// shared env-var pair", so this is a no-op until a branch actually gets its
+// own number connected from the dashboard.
+// Voice add-on only. A phone call has nowhere to "push" a reply to -- there
+// is no API to call the way sendWhatsApp/sendInstagram do, only a caller
+// waiting on the line. So a voice customer's replies are collected here
+// instead, keyed by customer.id (same per-customer keying pendingTimers
+// below already uses -- a customer is never on two calls at once), and
+// handleVoiceTurn reads them back out once the shared engine (dispatch/
+// handlePendingBatch, completely unchanged for voice) finishes reacting to
+// one utterance. This is the ONLY voice-specific branch reply()/senderFor()
+// need -- everything upstream of send() stays exactly as it is for
+// WhatsApp/Instagram today.
+const voiceReplyBuffers = new Map();
+
+async function senderFor(customer) {
+  if (customer.channel === 'instagram') return sendInstagram;
+  if (customer.channel === 'voice') {
+    return (to, text) => {
+      const buffered = voiceReplyBuffers.get(customer.id) || [];
+      buffered.push(text);
+      voiceReplyBuffers.set(customer.id, buffered);
+      return {};
+    };
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  return (to, text) => sendWhatsApp(to, text, credentials);
 }
 // sendInstagramDocument's attachment type ('file') already fetches by URL
 // generically, so it doubles as the image sender there -- only WhatsApp
 // distinguishes an 'image' message type from a 'document' one.
-function imageSenderFor(customer) {
-  return customer.channel === 'instagram' ? sendInstagramDocument : sendWhatsAppImage;
+async function imageSenderFor(customer) {
+  if (customer.channel === 'instagram') return sendInstagramDocument;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  return (to, link, caption) => sendWhatsAppImage(to, link, caption, credentials);
 }
 // Pure display text for staff-facing alerts -- customer.phone_number is
 // always null for an Instagram customer (DMs never expose one), so that
@@ -91,7 +125,7 @@ function normalizeDashes(text) {
 // satisfies with 'bot_flow_step'.
 async function reply(customer, text, logTag = 'bot_flow_step') {
   const clean = normalizeDashes(text);
-  const sendResult = await botEngine.sendMessage({ trigger: 'bot_flow_step', to: recipientFor(customer), text: clean, whatsappSend: senderFor(customer) });
+  const sendResult = await botEngine.sendMessage({ trigger: 'bot_flow_step', to: recipientFor(customer), text: clean, whatsappSend: await senderFor(customer) });
   await logMessage({
     customerId: customer.id,
     direction: 'outbound',
@@ -117,7 +151,7 @@ export async function sendStaffReply(customerId, text, staffId) {
 
   const isFirstTakeover = staffId && customer.handled_by_staff_id !== staffId;
 
-  const sendResult = await botEngine.sendMessage({ trigger: 'explicit_type_command', to: recipientFor(customer), text, whatsappSend: senderFor(customer) });
+  const sendResult = await botEngine.sendMessage({ trigger: 'explicit_type_command', to: recipientFor(customer), text, whatsappSend: await senderFor(customer) });
   await logMessage({
     customerId: customer.id,
     direction: 'outbound',
@@ -281,15 +315,33 @@ export async function recordAppReplyInstagram({ channelId, text }) {
 // so channelId is the identifier there instead. Exactly one of
 // phoneNumber/channelId is expected per call, matching which channel the
 // message actually came in on.
-async function findOrCreateCustomer({ phoneNumber, channelId, channel = 'whatsapp' }) {
+// branchId is only used for a brand-new customer's initial branch_id --
+// resolved by the webhook from which number the message arrived on when
+// that's known (see webhook-whatsapp.js's resolveBranchByPhoneNumberId),
+// null otherwise. An existing customer keeps whatever branch_id it already
+// has; this never moves a returning customer to a different branch.
+//
+// The lookup itself only scopes by branch when BOTH sharing_mode is
+// 'independent' AND branchId is actually known -- same "unscoped until
+// proven otherwise" idiom as resolveMenu, and for the same reason: with no
+// branch known yet, there's nothing correct to scope by, so matching on
+// phone/channel_id alone (today's only behaviour) is the safe fallback,
+// not a special case. Under independent with a known branch, a customer
+// with no branch_id yet (created before this business had branches, or
+// under merged) still matches -- treated as "not yet claimed by a branch",
+// same as resolveMenu's unassigned-product rule, not a second customer.
+async function findOrCreateCustomer({ phoneNumber, channelId, channel = 'whatsapp', branchId = null }) {
+  const scoped = branchId && (await getSharingMode()) === 'independent';
   const { rows } = await pool.query(
-    phoneNumber ? 'select * from customers where phone_number = $1' : 'select * from customers where channel = $1 and channel_id = $2',
-    phoneNumber ? [phoneNumber] : [channel, channelId]
+    phoneNumber
+      ? `select * from customers where phone_number = $1 ${scoped ? 'and (branch_id = $2 or branch_id is null)' : ''}`
+      : `select * from customers where channel = $1 and channel_id = $2 ${scoped ? 'and (branch_id = $3 or branch_id is null)' : ''}`,
+    phoneNumber ? (scoped ? [phoneNumber, branchId] : [phoneNumber]) : scoped ? [channel, channelId, branchId] : [channel, channelId]
   );
   if (rows[0]) return rows[0];
   const { rows: created } = await pool.query(
-    `insert into customers (phone_number, channel_id, channel) values ($1, $2, $3) returning *`,
-    [phoneNumber || null, channelId || null, channel]
+    `insert into customers (phone_number, channel_id, channel, branch_id) values ($1, $2, $3, $4) returning *`,
+    [phoneNumber || null, channelId || null, channel, branchId]
   );
   return created[0];
 }
@@ -337,8 +389,21 @@ export async function closeStaleOrders() {
   if (rowCount) console.log(`Closed ${rowCount} order(s) abandoned for over ${STALE_ORDER_HOURS}h.`);
 }
 
-async function createDraftOrder(customerId) {
-  const { rows } = await pool.query(`insert into "order" (customer_id, reference) values ($1, $2) returning *`, [customerId, newReference('ORD')]);
+// branchId is only ever non-null here when the channel itself already told
+// us (a real per-branch WhatsApp number, see webhook-whatsapp.js/branch-
+// channel.js) -- that's "store the resolved branch once known, never
+// re-resolve" for the channel-routed case: the order starts with branch_id
+// already set, so missingFieldsForOrder's own branch question (fields.js)
+// never triggers at all, exactly as if there were only one branch. A
+// shared-number business (no per-branch numbers configured) still gets
+// null here and keeps asking the existing way, after items -- reordering
+// that to ask first is real conversational-flow surgery with no live
+// business needing it yet, deliberately left for when one does.
+async function createDraftOrder(customerId, branchId = null) {
+  const { rows } = await pool.query(
+    `insert into "order" (customer_id, reference, branch_id) values ($1, $2, $3) returning *`,
+    [customerId, newReference('ORD'), branchId]
+  );
   return rows[0];
 }
 
@@ -352,8 +417,11 @@ async function transitionOrder(order, toState) {
 // Any staff can opt into handover alerts (staff.handover_alerts), not just
 // a single business.handover_number -- that field is kept only as a
 // fallback for a business that hasn't set any staff-level alerts up yet, so
-// nothing that already worked stops working.
-async function handoverRecipients() {
+// nothing that already worked stops working. Exported for engine/delivery-
+// dispatch.js's own escalation alert (an unaccepted delivery offer) -- same
+// "who to tell" list as a customer handover, without needing the full
+// customer-conversation handover() machinery around it.
+export async function handoverRecipients() {
   const { rows: staffRows } = await pool.query(`select phone_number from staff where handover_alerts = true and phone_number is not null`);
   if (staffRows.length) return staffRows.map((s) => s.phone_number);
   const { rows: biz } = await pool.query('select handover_number from business limit 1');
@@ -366,6 +434,59 @@ async function handoverRecipients() {
 // having to go look them up on the dashboard first.
 async function handover(customer, reason, extra) {
   await pool.query(`update customers set handled_by = 'staff', handover_at = now(), handover_reason = $1 where id = $2`, [reason, customer.id]);
+
+  // Voice add-on only (spec A8, Phase 1/call-forwarding -- no live transfer
+  // built yet, see engine/voice.js). One handover() branching by channel,
+  // not a second parallel implementation -- every A8 trigger already flows
+  // through THIS function via the shared dispatch tree (asks for a person,
+  // a complaint, a change to an already-paid order), so branching here is
+  // what makes every one of those triggers work for voice for free, without
+  // forking handlePendingBatch/dispatch itself.
+  if (customer.channel === 'voice') {
+    // Can't put a live call "on hold" the way a chat thread waits for a
+    // later reply -- Phase 1 has no live transfer, so the honest thing to
+    // say is that someone will call back (spec A8's own wording), not
+    // WhatsApp's "I'll get back to you here shortly".
+    await reply(customer, `Let me get someone to call you back on this number shortly.`, 'handover_ack');
+
+    // Matched by caller_number, not customer_id -- on a customer's very
+    // FIRST call, voice_call.customer_id isn't written until after this
+    // turn's engine call resolves (see engine/voice.js), but caller_number
+    // is set the instant the call itself started. A customer is never on
+    // two calls at once, so caller_number alone is already unambiguous.
+    const { rows: callRows } = await pool.query(
+      `select id, branch_id from voice_call where caller_number = $1 and ended_at is null order by started_at desc limit 1`,
+      [customer.phone_number]
+    );
+    const call = callRows[0];
+    if (call) {
+      const { rows: recent } = await pool.query(
+        `select sender, body from message where customer_id = $1 order by created_at desc limit 20`,
+        [customer.id]
+      );
+      const transcript = recent.reverse().map((m) => `${m.sender}: ${m.body}`).join('\n');
+      // A summarisation failure must never silently drop the callback
+      // itself (0.4) -- fall back to the raw transcript rather than
+      // throwing and losing the whole handover.
+      const summary = await askText(
+        'Summarise this phone call transcript in exactly three short lines: "What they want:", "So far:", "Outstanding:". No markdown, no asterisks, and no dash of any kind anywhere in the text. Use a comma or period instead of a dash wherever you would normally use one. Be terse.',
+        transcript
+      ).catch(() => transcript.slice(0, 500));
+      await pool.query(
+        `insert into callback_task (branch_id, call_id, customer_id, reason, context_summary) values ($1, $2, $3, $4, $5)`,
+        [call.branch_id, call.id, customer.id, reason, summary]
+      );
+    }
+
+    const voiceRecipients = await handoverRecipients();
+    if (voiceRecipients.length) {
+      const alert = `A caller needs a person: ${displayNameFor(customer)}.\nReason: ${reason}\nThey were told someone will call them back on this number.`;
+      for (const to of voiceRecipients) {
+        await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text: alert, whatsappSend: sendWhatsApp });
+      }
+    }
+    return;
+  }
 
   // Never leave the customer with silence just because the bot handed off
   // -- they get an ack here regardless of whether anyone is even configured
@@ -417,9 +538,9 @@ const NO_KB_MATCH = 'NO_KB_MATCH';
 // the menu, missing the knowledge base and business facts entirely -- which
 // is exactly why "when do you close?" got "let me check with the team"
 // instead of the real "24/7" answer already sitting in the knowledge base).
-async function buildBusinessKnowledgeContext() {
+async function buildBusinessKnowledgeContext(branchId) {
   const { rows: kb } = await pool.query('select question, answer from knowledge_base order by position');
-  const { rows: products } = await pool.query(`select name, description, price from product where availability = true and import_status is distinct from 'new' order by name`);
+  const products = await resolveMenu(branchId);
   const { rows: bizRows } = await pool.query('select address, operating_hours from business limit 1');
   const business = bizRows[0] || {};
   const branches = await branchOptions();
@@ -471,23 +592,46 @@ async function handleGreeting(customer, text) {
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,
 // which matters here specifically: it runs alongside real content in the
-// SAME reply (handleCollectInfo), so there's no room for it to improvise
-// past a plain courtesy phrase. Covers the greetings actually seen in real
-// conversations; anything not matched just means no prefix, never a forced
-// or wrong one.
+// SAME reply (handleCollectInfo, handleEnquiry), so there's no room for it
+// to improvise past a plain courtesy phrase. Covers the greetings actually
+// seen in real conversations; anything not matched just means no prefix,
+// never a forced or wrong one.
+//
+// Composes rather than short-circuits: found live, a message with BOTH a
+// time-of-day greeting and a wellbeing question ("good afternoon, how are
+// you doing?") only got the time-of-day half acknowledged -- the "how are
+// you" was answered with silence, technically "not ignored" (something
+// still went out) but not actually a real answer to what was asked either.
+// Every branch below can fire independently and all their text concatenates
+// into one reply, matching how a real person would answer both parts of
+// "good afternoon, how are you" in one breath.
 function greetingAckFor(text) {
-  if (/good\s*morning/i.test(text)) return 'Good morning! ';
-  if (/good\s*afternoon/i.test(text)) return 'Good afternoon! ';
-  if (/good\s*evening/i.test(text)) return 'Good evening! ';
-  if (/\b(hi|hello|hey+|how\s*(far|you\s*(dey|de)|are\s*you))\b/i.test(text)) return 'Hey there! ';
-  return '';
+  let ack = '';
+  if (/good\s*morning/i.test(text)) ack += 'Good morning! ';
+  else if (/good\s*afternoon/i.test(text)) ack += 'Good afternoon! ';
+  else if (/good\s*evening/i.test(text)) ack += 'Good evening! ';
+  else if (/\b(hi|hello|hey+)\b/i.test(text)) ack += 'Hey there! ';
+  if (/how\s*(far|you\s*(dey|de)|are\s*you|is\s*(your\s*day|it\s*going))\b/i.test(text)) {
+    ack += "I'm doing well, thank you for asking. ";
+  }
+  return ack;
 }
 
 async function handleEnquiry(customer, text) {
   const { answer: rawAnswer, isGeneralAvailability } = await answerFromKnowledgeBase(text);
   const answer = await resolveGeneralAvailability(customer, isGeneralAvailability, rawAnswer, text);
-  if (answer) {
-    await reply(customer, answer, 'kb_answer');
+  // Same idiom as handleCollectInfo's greetingPrefix -- a batched message can
+  // both greet AND ask a browse question ("good afternoon, what do you
+  // have?"), and the greeting was being silently dropped whenever the
+  // question half resolved to an empty answer (a pure browse question is
+  // BY DESIGN answered with just the menu button, so `answer` alone was
+  // often falsy and this whole function returned without sending anything).
+  // handleCollectInfo already folds a greeting into its reply this same
+  // way; this path never did, which is exactly the gap that made a
+  // multi-part message with a greeting in it look ignored.
+  const greeting = greetingAckFor(text);
+  if (answer || greeting) {
+    await reply(customer, `${greeting}${answer || ''}`.trim(), 'kb_answer');
     return;
   }
   // Covers both how the menu could have just been sent instead of text --
@@ -523,7 +667,7 @@ async function summariseOrder(order) {
 // (item, branch), naming the actual choices turns a repeated question into
 // something they can act on ("we didn't have a match, here's what we do
 // have" instead of the same sentence verbatim).
-async function fieldPrompt(fieldKey, fallbackQuestion) {
+async function fieldPrompt(fieldKey, fallbackQuestion, branchId) {
   if (fieldKey === 'items') {
     // A business with a menu photo on file gets it forwarded instead (see
     // the items_menu_shown call site below) -- naming every item as text
@@ -531,8 +675,8 @@ async function fieldPrompt(fieldKey, fallbackQuestion) {
     // unreadable as text" problem the photo forward exists to avoid).
     const { rows: photos } = await pool.query('select 1 from menu_photo limit 1');
     if (photos.length) return fallbackQuestion || 'What would you like to order?';
-    const { rows } = await pool.query(`select name from product where availability = true and import_status is distinct from 'new' order by name`);
-    if (rows.length) return `${fallbackQuestion || 'What would you like to order?'} We have: ${rows.map((r) => r.name).join(', ')}.`;
+    const products = await resolveMenu(branchId);
+    if (products.length) return `${fallbackQuestion || 'What would you like to order?'} We have: ${products.map((p) => p.name).join(', ')}.`;
   }
   if (fieldKey === 'branch') {
     const branches = await branchOptions();
@@ -567,7 +711,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
       // item+quantity it can match, not just the first one -- a customer
       // who writes their whole order in one go should never have to repeat
       // it back one item at a time.
-      const { matched, ambiguous } = await extractOrderItems(text);
+      const { matched, ambiguous } = await extractOrderItems(text, order.branch_id);
       if (!matched.length) {
         // A vague mention that could genuinely mean more than one real item
         // ("rice" when both jollof and fried rice exist) -- ask which one,
@@ -610,7 +754,8 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
           if (customer.channel !== 'instagram' && process.env.EBOS_SANDBOX !== '1') {
             catalogShown = await sendMenuList(
               recipientFor(customer),
-              "Here's our menu, tap below to see everything we have."
+              "Here's our menu, tap below to see everything we have.",
+              order.branch_id
             ).catch((err) => {
               console.error('sendMenuList failed:', err.message);
               return false;
@@ -631,7 +776,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
           if (!catalogShown && process.env.PUBLIC_URL) {
             const { rows: photos } = await pool.query('select id from menu_photo order by position');
             if (photos.length) {
-              const sendImage = imageSenderFor(customer);
+              const sendImage = await imageSenderFor(customer);
               for (const photo of photos) {
                 await sendImage(recipientFor(customer), `${process.env.PUBLIC_URL}/documents/menu-photo/${photo.id}`);
               }
@@ -646,7 +791,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
           // once it's actually sent; only fall back to fieldPrompt's own
           // (photo, or as a last resort, text-list) behaviour when it
           // didn't.
-          await send(catalogShown ? 'What would you like to order?' : await fieldPrompt('items', 'What would you like to order?'), 'items_menu_shown');
+          await send(catalogShown ? 'What would you like to order?' : await fieldPrompt('items', 'What would you like to order?', order.branch_id), 'items_menu_shown');
         }
         return;
       }
@@ -670,7 +815,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
         [order.id]
       );
-      const mods = await extractOrderModifications(text, currentItemsForMod);
+      const mods = await extractOrderModifications(text, currentItemsForMod, order.branch_id);
       if (mods) {
         const { lines } = await applyOrderModifications(order, mods, { allowRemovals: true });
         prefix = `${prefix}Got it, added that on, your order's now ${lines}. `;
@@ -679,7 +824,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         const field = fields.find((f) => f.key === outstanding[0]);
         const extracted = await extractAndApply({ fieldKey: outstanding[0], message: text, contextQuestion: field?.question, order });
         if (extracted === null) {
-          await send(await fieldPrompt(outstanding[0], field?.question));
+          await send(await fieldPrompt(outstanding[0], field?.question, order.branch_id));
           return;
         }
       }
@@ -696,7 +841,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
   if (stillOutstanding.length) {
     const fields = await loadBotFields();
     const nextField = fields.find((f) => f.key === stillOutstanding[0]);
-    await send(await fieldPrompt(stillOutstanding[0], nextField?.question));
+    await send(await fieldPrompt(stillOutstanding[0], nextField?.question, order.branch_id));
     return;
   }
 
@@ -793,9 +938,9 @@ async function handleCollectFulfilment(customer, order, text) {
       // when `answer` is set the customer asked a real question and this is
       // just the normal follow-up prompt after answering it, not a miss.
       if (answer) {
-        await reply(customer, `${answer} ${await fieldPrompt(outstanding[0], field?.question)}`);
+        await reply(customer, `${answer} ${await fieldPrompt(outstanding[0], field?.question, order.branch_id)}`);
       } else {
-        await reply(customer, await fieldPrompt(outstanding[0], field?.question), 'field_reprompt');
+        await reply(customer, await fieldPrompt(outstanding[0], field?.question, order.branch_id), 'field_reprompt');
       }
       return;
     }
@@ -807,7 +952,7 @@ async function handleCollectFulfilment(customer, order, text) {
   if (stillOutstanding.length) {
     const fields = await loadBotFields();
     const nextField = fields.find((f) => f.key === stillOutstanding[0]);
-    await reply(customer, await fieldPrompt(stillOutstanding[0], nextField?.question));
+    await reply(customer, await fieldPrompt(stillOutstanding[0], nextField?.question, order.branch_id));
     return;
   }
 
@@ -816,10 +961,30 @@ async function handleCollectFulfilment(customer, order, text) {
   // instead of the business quietly absorbing it. No-op (returns 0) for
   // pickup orders and for any business not on real Chowdeck delivery.
   if (order.fulfilment_type === 'delivery') {
-    const deliveryFee = await estimateDeliveryFee(order, customer);
-    if (deliveryFee > 0) {
-      await pool.query(`update "order" set delivery_fee = $1 where id = $2`, [deliveryFee, order.id]);
-      order.delivery_fee = deliveryFee;
+    const deliveryConfig = await getDeliveryConfig();
+    if (deliveryConfig.mode === 'own_riders' && !order.delivery_zone_id) {
+      // Persisted the moment it's resolved (not re-resolved at dispatch
+      // time) so the price the customer is about to pay and the amount the
+      // rider is eventually owed both come from the exact same zone row --
+      // see schema.sql's own comment on order.delivery_zone_id.
+      const zone = await resolveZoneForAddress(customer.address, order.branch_id);
+      if (!zone) {
+        // Never guess a zone (spec B5) -- a wrong one means a wrong price
+        // charged to the customer and a wrong amount owed to a rider, both
+        // real money. Same handover primitive sendPaymentInstructions
+        // already uses when bank details aren't configured.
+        await handover(customer, 'Delivery address could not be matched to a delivery zone');
+        return;
+      }
+      await pool.query(`update "order" set delivery_zone_id = $1, delivery_fee = $2 where id = $3`, [zone.id, zone.customer_fee, order.id]);
+      order.delivery_zone_id = zone.id;
+      order.delivery_fee = Number(zone.customer_fee);
+    } else if (deliveryConfig.mode !== 'own_riders') {
+      const deliveryFee = await estimateDeliveryFee(order, customer);
+      if (deliveryFee > 0) {
+        await pool.query(`update "order" set delivery_fee = $1 where id = $2`, [deliveryFee, order.id]);
+        order.delivery_fee = deliveryFee;
+      }
     }
   }
   const { total } = await summariseOrder(order);
@@ -913,7 +1078,7 @@ async function answerOrderQuestion(order, text, statusLine) {
   // access to, not a smaller private copy of just the catalogue. Found
   // live: without this, a real answer ("24/7", already in the knowledge
   // base) got replaced with a made-up "let me check with the team."
-  const { businessContext, menuContext, kbContext } = await buildBusinessKnowledgeContext();
+  const { businessContext, menuContext, kbContext } = await buildBusinessKnowledgeContext(order.branch_id);
   const orderLine = lines ? `their order so far: ${lines}${deliveryFee > 0 ? `, plus NGN ${deliveryFee} delivery fee` : ''}, total NGN ${total}` : `nothing added to their order yet`;
   const system = `You're a staff member replying MID-CONVERSATION to an existing customer you're already talking to -- ${orderLine}. ${statusLine}\n\nThis is not an opening message. Never use first-contact phrases like "thanks for reaching out" or any greeting -- reply exactly like someone already in the middle of a conversation would.\n\n${businessContext}\n\n${menuContext}\n\n${kbContext}\n\nDoes this message ask a real question (their order, the menu, business hours/location, delivery, payment, anything covered above) that deserves a direct answer? If yes, answer it directly and warmly using ONLY the real details given here. A direct, unambiguous consequence of a stated fact counts as answerable too -- e.g. "open 24/7" directly means "we don't close", and the menu above is the FULL list of what's available, so asked about anything not on it, the real answer is a short "no, we don't have that" (that clause only -- never also name what's actually available yourself, see the special case below for how that part is handled) rather than a non-answer. Never invent a fact that isn't supported by what's given, and never claim you're checking with the team or will follow up unless that's real (nothing here authorizes that) -- if it's genuinely not covered, just say plainly you don't have that info right now. Answer ONLY what was actually asked -- never ask your own follow-up question about delivery vs pickup, or which branch, even in passing. Those are asked separately, once, at the right point in the flow by a different fixed step -- asking about them here creates a second, fake version that doesn't actually get saved anywhere, so when the real fixed step asks for real later, it looks like a broken repeat of something they already answered. If the message isn't actually asking anything (small talk, "ok", "thanks"), reply with exactly {"answer": null, "isGeneralAvailability": false}.\n\nSpecial case -- does answering properly involve the full list of what's available? Either a BROAD browse question naming no specific item ("what do you have", "what's on the menu", "what's available", "can I see the menu/catalogue"), OR a specific item that's NOT available (where "here's what we do have" would be the natural next thing to say). For either, set "isGeneralAvailability": true -- for the broad case leave "answer" null, for the not-available case "answer" is only the short "no" clause. Never write out the item list yourself in either case -- a real, always-current menu with photos and prices is shown separately as an interactive button right after (this JSON's "answer" is only a fallback for whenever that button truly can't be shown). This is different from a question naming or clearly implying a specific item that IS available ("do you have jollof", "how much is suya", "any rice dish?", "is there something spicy") -- that's answerable, not general, so answer it directly as usual with real semantic matching against the actual menu (meaning, not exact wording), isGeneralAvailability false.\n\nReply ONLY with JSON: {"answer": "<direct answer text>" or null, "isGeneralAvailability": true or false}.`;
   const result = await askJson(system, text);
@@ -954,11 +1119,11 @@ function looksLikeBrowseQuestion(text) {
 // over the plain-text item list; falls back to the text answer whenever
 // the catalogue is genuinely empty or the send itself fails, so a customer
 // is never left with silence just because of a transient WhatsApp error.
-async function resolveGeneralAvailability(customer, isGeneralAvailability, answer, rawText) {
+async function resolveGeneralAvailability(customer, isGeneralAvailability, answer, rawText, branchId) {
   const shouldShowMenu = isGeneralAvailability || looksLikeBrowseQuestion(rawText);
   if (!shouldShowMenu || customer.channel === 'instagram' || process.env.EBOS_SANDBOX === '1') return answer;
 
-  const shown = await sendMenuList(recipientFor(customer), "Here's our menu, tap below to see everything we have.").catch((err) => {
+  const shown = await sendMenuList(recipientFor(customer), "Here's our menu, tap below to see everything we have.", branchId).catch((err) => {
     console.error('sendMenuList failed:', err.message);
     return false;
   });
@@ -982,7 +1147,7 @@ async function resolveGeneralAvailability(customer, isGeneralAvailability, answe
 // changes.
 async function answerOrThenShowMenu(customer, order, text, statusLine) {
   const { answer, isGeneralAvailability } = await answerOrderQuestion(order, text, statusLine);
-  return resolveGeneralAvailability(customer, isGeneralAvailability, answer, text);
+  return resolveGeneralAvailability(customer, isGeneralAvailability, answer, text, order.branch_id);
 }
 
 async function handleWaitingOnPayment(customer, order, text) {
@@ -1232,7 +1397,7 @@ async function dispatch(customer, order, text) {
       `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
       [order.id]
     );
-    const mods = await extractOrderModifications(text, currentItems);
+    const mods = await extractOrderModifications(text, currentItems, order.branch_id);
     if (mods) {
       await handleOrderModification(customer, order, mods);
       return;
@@ -1284,6 +1449,28 @@ export async function notifyReadyForPickup(orderId) {
   const customer = custRows[0];
   if (!customer) throw new Error('Customer not found.');
   await reply(customer, `Your order is ready for pickup!`, 'ready_for_pickup');
+}
+
+// Own-riders delivery only -- called from routes/rider.js's own
+// /offers/:id/accept, right after a rider wins the atomic claim (spec B6:
+// "customer receives tracking link and a 4 digit delivery code" happens at
+// that moment, not later). Same exported-notification shape as
+// notifyReadyForPickup above, called from outside this file's own
+// request/reply loop for the same reason: the event that triggers it
+// (a rider accepting) doesn't originate from the customer's next message.
+export async function notifyDeliveryAssigned(orderId, { riderName, trackingUrl, deliveryCode }) {
+  const { rows } = await pool.query('select * from "order" where id = $1', [orderId]);
+  const order = rows[0];
+  if (!order) throw new Error('Order not found.');
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+  const customer = custRows[0];
+  if (!customer) throw new Error('Customer not found.');
+  const trackingLine = trackingUrl ? ` Track your delivery here: ${trackingUrl}.` : '';
+  await reply(
+    customer,
+    `Your order is on its way with ${riderName}.${trackingLine} Give them this code when they arrive: ${deliveryCode}`,
+    'delivery_assigned'
+  );
 }
 
 // Called from the Paystack webhook once a payment is verified -- not part
@@ -1578,7 +1765,7 @@ async function handlePendingBatch(customer, text) {
   // deterministic prefix instead: no AI call, no chance of it inventing an
   // answer, and folded into the SAME reply handleCollectInfo sends below
   // (which does have real data) rather than a separate message.
-  const newOrder = await createDraftOrder(customer.id);
+  const newOrder = await createDraftOrder(customer.id, customer.branch_id);
   await transitionOrder(newOrder, 'understand_request');
   await transitionOrder(newOrder, 'collect_info');
   await handleCollectInfo(customer, newOrder, text, greetingAckFor(text));
@@ -1591,14 +1778,14 @@ async function handlePendingBatch(customer, text) {
 // between looking and ordering. Instead: acknowledge what they looked at
 // by name, and let them order in their own words, exactly like every order
 // in this system already works (typed, any number of items in one go).
-export async function acknowledgeMenuTap({ phoneNumber, channelId, itemName, channel = 'whatsapp' }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel });
+export async function acknowledgeMenuTap({ phoneNumber, channelId, itemName, channel = 'whatsapp', branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${itemName}]` });
   await reply(customer, `${itemName} is available. Please let me know how many and anything else you would like, and I will take your order.`, 'menu_tap_ack');
 }
 
-export async function handleInboundMessage({ phoneNumber, channelId, text, channel = 'whatsapp', messageId }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel });
+export async function handleInboundMessage({ phoneNumber, channelId, text, channel = 'whatsapp', messageId, branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: text });
   // Best-effort -- shows "typing..." for the debounce wait so the customer
   // sees something happening instead of silence. Never let this delay or
@@ -1621,6 +1808,122 @@ export async function handleInboundMessage({ phoneNumber, channelId, text, chann
   scheduleDebouncedProcessing(customer);
 }
 
+// Voice add-on's own front door onto this SAME engine (spec 0.6: "voice is
+// a new way of talking to the same engine, not a second engine"). Deliberately
+// does NOT go through handleInboundMessage/scheduleDebouncedProcessing --
+// that 15-second debounce exists to batch a WhatsApp customer's rapid-fire
+// messages into one reply, which is the wrong shape for a live call that
+// must answer every utterance immediately. This calls straight into
+// handlePendingBatch, the exact same routing handleInboundMessage's timer
+// eventually reaches -- pure ack detection, existing-order dispatch,
+// intent classification, handover, everything -- completely unchanged.
+//
+// The mandatory, not-configurable-off order read-back (spec A5) needs no
+// extra code here: handleCollectInfo already can't reach payment without
+// passing through its own `to confirm: ${lines}, total NGN ${total}...`
+// step and waiting for a yes, for every channel, because that's baked into
+// the order engine's state machine itself, not a per-channel branch.
+//
+// `isFirstTurn` (supplied by engine/voice.js, which is the one thing that
+// actually knows where a call is in its own lifecycle) drives customer
+// recognition (spec A6): a returning caller gets greeted by name,
+// deterministically, so it can never say the wrong name or invent one. This
+// is deliberately the ONLY half of A6 built right now -- asking for a name
+// *naturally mid-order* on a first call needs a real call to test the
+// timing against, not a guess (0.4: never guess), and stays open for the
+// stage that wires up a real phone line.
+export async function handleVoiceTurn({ callerNumber, branchId, spokenText, isFirstTurn = false }) {
+  const customer = await findOrCreateCustomer({ phoneNumber: callerNumber, channel: 'voice', branchId });
+  const hasCalledBefore = Boolean(customer.last_voice_call_at);
+  if (isFirstTurn) {
+    await pool.query('update customers set last_voice_call_at = now() where id = $1', [customer.id]);
+  }
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'voice', sender: 'customer', body: spokenText });
+
+  voiceReplyBuffers.set(customer.id, []);
+  await handlePendingBatch(customer, spokenText);
+  const buffered = voiceReplyBuffers.get(customer.id) || [];
+  voiceReplyBuffers.delete(customer.id);
+  let replyText = buffered.join(' ').trim();
+
+  if (isFirstTurn && hasCalledBefore && customer.preferred_name) {
+    const greeting = `Welcome back, ${customer.preferred_name}!`;
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'voice', sender: 'bot', body: greeting, trigger: 'voice_welcome_back' });
+    replyText = `${greeting} ${replyText}`.trim();
+  }
+
+  return { customer, replyText };
+}
+
+// Voice add-on only. Used by engine/voice.js for A8's trigger 3 (two
+// consecutive low-confidence recognition turns) -- called INSTEAD of
+// handleVoiceTurn, deliberately never routing a possibly-garbled transcript
+// into the shared order engine at all. Reuses handover() exactly as every
+// other trigger does, just from a different entry point than
+// handlePendingBatch (nothing in handlePendingBatch can see recognizer
+// confidence -- that number never reaches this file for any other channel).
+export async function escalateVoiceCall({ callerNumber, branchId, reason }) {
+  const customer = await findOrCreateCustomer({ phoneNumber: callerNumber, channel: 'voice', branchId });
+  voiceReplyBuffers.set(customer.id, []);
+  await handover(customer, reason);
+  const buffered = voiceReplyBuffers.get(customer.id) || [];
+  voiceReplyBuffers.delete(customer.id);
+  return { customer, replyText: buffered.join(' ').trim() };
+}
+
+// Voice add-on only (spec A9). Deliberately its own function, not a branch
+// inside handover() -- unlike a real handover, this doesn't mean the bot
+// failed at something or that a human needs to intervene right now, so it
+// never flips customers.handled_by (a caller phoning back once the
+// restaurant is actually open must get the normal bot again, not be stuck
+// staff-handled forever because they once called at 2am). It does still
+// create a callback_task, exactly per spec A9 ("otherwise creates a
+// callback_task") -- a person should still know a call came in while
+// closed, just without it blocking this customer's next, in-hours call.
+export async function handleClosedHoursCall({ callerNumber, branchId, opensAt }) {
+  const customer = await findOrCreateCustomer({ phoneNumber: callerNumber, channel: 'voice', branchId });
+  const message = opensAt
+    ? `We're closed right now, we open again at ${opensAt}. I'll have someone follow up with you about this call.`
+    : `We're closed right now. I'll have someone follow up with you about this call.`;
+
+  voiceReplyBuffers.set(customer.id, []);
+  await reply(customer, message, 'voice_closed_hours');
+  const buffered = voiceReplyBuffers.get(customer.id) || [];
+  voiceReplyBuffers.delete(customer.id);
+
+  // Matched by caller_number, same reasoning as handover()'s voice branch
+  // above -- customer.id can't have reached voice_call.customer_id yet on a
+  // first-ever call.
+  const { rows: callRows } = await pool.query(
+    `select id, branch_id from voice_call where caller_number = $1 and ended_at is null order by started_at desc limit 1`,
+    [customer.phone_number]
+  );
+  const call = callRows[0];
+  if (call) {
+    // One callback_task per call, not one per turn -- a caller who keeps
+    // talking after being told "we're closed" shouldn't flood the queue
+    // with duplicates of the same fact.
+    const { rows: existing } = await pool.query(
+      `select 1 from callback_task where call_id = $1 and reason = 'Called outside operating hours'`,
+      [call.id]
+    );
+    if (!existing.length) {
+      await pool.query(
+        `insert into callback_task (branch_id, call_id, customer_id, reason, context_summary) values ($1, $2, $3, $4, $5)`,
+        [
+          call.branch_id,
+          call.id,
+          customer.id,
+          'Called outside operating hours',
+          opensAt ? `Caller reached us while closed. We open again at ${opensAt}.` : 'Caller reached us while closed.',
+        ]
+      );
+    }
+  }
+
+  return { customer, replyText: buffered.join(' ').trim() };
+}
+
 // An image was being silently dropped entirely before this -- no reply, no
 // record, nothing -- which is exactly how a customer's actual payment proof
 // went unacknowledged. Handled outside the debounce/text pipeline (an image
@@ -1636,8 +1939,8 @@ export async function handleInboundMessage({ phoneNumber, channelId, text, chann
 // webhook already hands over a direct, pre-signed CDN URL (no lookup step
 // at all, see instagram-send.js) -- same parameter slot, resolved by
 // channel below rather than two separate function signatures.
-export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind, channel = 'whatsapp' }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel });
+export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind, channel = 'whatsapp', branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[${kind}]` });
 
   // Same principle as handlePendingBatch -- a pending handover alone

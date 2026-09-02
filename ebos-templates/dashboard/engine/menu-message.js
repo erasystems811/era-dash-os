@@ -16,6 +16,7 @@
 // everywhere else in this system -- any number of items, in their own
 // words, in one message or several.
 import { pool } from '../lib/db.js';
+import { resolveMenu } from './fields.js';
 
 const GRAPH_VERSION = 'v20.0';
 // WhatsApp's own hard limit for a list message: 10 rows TOTAL across every
@@ -55,13 +56,19 @@ async function sendListMessage(to, { bodyText, buttonText, sectionTitle, rows })
   return res.json();
 }
 
-async function liveProducts() {
-  const { rows } = await pool.query(
-    `select id, name, description, price, category from product
-     where availability = true and import_status is distinct from 'new' and import_status is distinct from 'removed'
-     order by category nulls last, name`
-  );
-  return rows;
+// Never queries product directly -- resolveMenu (engine/fields.js) is the
+// one place that reads the menu, so this stays correct as soon as
+// sharing_mode/branch scoping is actually in use, with no change here.
+// Previously excluded import_status = 'removed' here specifically, which
+// this drops: per schema.sql's own comment on product.import_status, a
+// 'removed'-flagged item's real name/price stay live and it keeps serving
+// customers until a human actually confirms the removal from the Catalogue
+// page -- excluding it here was inconsistent with every other menu read
+// (fields.js's extractOrderItems/extractOrderModifications never excluded
+// it either) and let a still-orderable item silently vanish from the "View
+// menu" button before staff had approved anything.
+async function liveProducts(branchId) {
+  return resolveMenu(branchId);
 }
 
 function toProductRow(product) {
@@ -94,8 +101,8 @@ function groupByCategory(products) {
   return byCategory;
 }
 
-async function sendCategoryPage(to, page) {
-  const products = await liveProducts();
+async function sendCategoryPage(to, page, branchId) {
+  const products = await liveProducts(branchId);
   const byCategory = groupByCategory(products);
   const categories = [...byCategory.keys()];
   const rows = paginate(
@@ -116,8 +123,8 @@ async function sendCategoryPage(to, page) {
   });
 }
 
-async function sendCategoryItemsPage(to, category, page) {
-  const products = (await liveProducts()).filter((p) => (p.category || UNCATEGORIZED) === category);
+async function sendCategoryItemsPage(to, category, page, branchId) {
+  const products = (await liveProducts(branchId)).filter((p) => (p.category || UNCATEGORIZED) === category);
   if (!products.length) return false;
   const rows = paginate(products, page, toProductRow, (nextPage) => ({
     id: `${ITEM_PAGE_PREFIX}${category}::${nextPage}`,
@@ -140,8 +147,8 @@ async function sendCategoryItemsPage(to, category, page) {
 // past 9 rows, so a menu of any real size (10, 40, or 160 items) is fully
 // reachable, never silently cut off. Returns false only when the
 // catalogue is genuinely empty -- caller falls back to text.
-export async function sendMenuList(to, bodyText) {
-  const products = await liveProducts();
+export async function sendMenuList(to, bodyText, branchId) {
+  const products = await liveProducts(branchId);
   if (!products.length) return false;
 
   if (products.length <= PAGE_SIZE) {
@@ -150,7 +157,7 @@ export async function sendMenuList(to, bodyText) {
     return true;
   }
 
-  await sendCategoryPage(to, 0);
+  await sendCategoryPage(to, 0, branchId);
   return true;
 }
 
@@ -167,20 +174,20 @@ export function menuRowKind(id) {
 // "More..." row). A tapped product row is handled separately by the
 // webhook (see productNameForRowId below) -- that one's just an
 // acknowledgement, not a page to send.
-export async function handleMenuNavigation(to, rowId) {
+export async function handleMenuNavigation(to, rowId, branchId) {
   const kind = menuRowKind(rowId);
   if (kind === 'category_page') {
-    await sendCategoryPage(to, Number(rowId.slice(CATEGORY_PAGE_PREFIX.length)));
+    await sendCategoryPage(to, Number(rowId.slice(CATEGORY_PAGE_PREFIX.length)), branchId);
     return;
   }
   if (kind === 'category') {
-    await sendCategoryItemsPage(to, rowId.slice(CATEGORY_PREFIX.length), 0);
+    await sendCategoryItemsPage(to, rowId.slice(CATEGORY_PREFIX.length), 0, branchId);
     return;
   }
   if (kind === 'item_page') {
     const rest = rowId.slice(ITEM_PAGE_PREFIX.length);
     const sep = rest.lastIndexOf('::');
-    await sendCategoryItemsPage(to, rest.slice(0, sep), Number(rest.slice(sep + 2)));
+    await sendCategoryItemsPage(to, rest.slice(0, sep), Number(rest.slice(sep + 2)), branchId);
   }
 }
 

@@ -1,0 +1,26 @@
+services:
+  wa-router:
+    build: .
+    restart: unless-stopped
+    mem_limit: 100m
+    environment:
+      - WEBHOOK_VERIFY_TOKEN=${WEBHOOK_VERIFY_TOKEN}
+      - PANEL_URL=${PANEL_URL}
+      - REGISTRY_SYNC_TOKEN=${REGISTRY_SYNC_TOKEN}
+      - PORT=8090
+    volumes:
+      - wa_router_data:/data
+    networks:
+      - era-demo_default
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  era-demo_default:
+    external: true
+
+volumes:
+  wa_router_data:

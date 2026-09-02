@@ -33,3 +33,13 @@ export function useStaff() {
 export function canEdit(staff) {
   return staff?.role === 'owner' || staff?.role === 'manager';
 }
+
+// Branch-lock, not edit-permission -- orthogonal to canEdit above (a branch
+// manager can edit within their branch; an owner can edit everywhere; both
+// are still "can edit"). null means "all branches" -- true for every login
+// today, and for an owner/admin even once other staff start getting
+// locked. Used only by the dashboard's scope switcher to decide whether to
+// show one at all, never to gate a feature.
+export function visibleBranchId(staff) {
+  return staff?.branch_id || null;
+}

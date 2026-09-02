@@ -1,6 +1,7 @@
 import express from 'express';
 import { handleInboundMessage, handleInboundMedia, recordAppReply, acknowledgeMenuTap } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productNameForRowId } from './menu-message.js';
+import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
 export const router = express.Router();
 
@@ -61,14 +62,22 @@ router.post('/', async (req, res) => {
           }
           continue;
         }
+        // Which of the business's own WhatsApp numbers this event arrived
+        // on -- resolves to a real branch only once that number has a
+        // branch_channel row (engine/branch-channel.js); null for every
+        // business today, which every call below already treats as "not
+        // resolved by channel, decide some other way" (a single-branch
+        // business needs no resolution at all; a shared-number multi-branch
+        // business will ask the customer instead, once that's built).
+        const branchId = await resolveBranchByPhoneNumberId(change.value?.metadata?.phone_number_id);
         for (const message of change.value?.messages || []) {
           if (isDuplicateMessage(message.id)) continue;
           if (message.type === 'image') {
-            await handleInboundMedia({ phoneNumber: message.from, mediaId: message.image.id, kind: 'image', channel: 'whatsapp' });
+            await handleInboundMedia({ phoneNumber: message.from, mediaId: message.image.id, kind: 'image', channel: 'whatsapp', branchId });
             continue;
           }
           if (message.type === 'document') {
-            await handleInboundMedia({ phoneNumber: message.from, mediaId: message.document.id, kind: 'document', channel: 'whatsapp' });
+            await handleInboundMedia({ phoneNumber: message.from, mediaId: message.document.id, kind: 'document', channel: 'whatsapp', branchId });
             continue;
           }
           // A tap on the List Message menu (engine/menu-message.js) --
@@ -83,14 +92,14 @@ router.post('/', async (req, res) => {
             const rowId = message.interactive.list_reply.id;
             if (menuRowKind(rowId) === 'product') {
               const productName = await productNameForRowId(rowId);
-              if (productName) await acknowledgeMenuTap({ phoneNumber: message.from, itemName: productName, channel: 'whatsapp' });
+              if (productName) await acknowledgeMenuTap({ phoneNumber: message.from, itemName: productName, channel: 'whatsapp', branchId });
             } else {
-              await handleMenuNavigation(message.from, rowId).catch((err) => console.error('handleMenuNavigation failed:', err.message));
+              await handleMenuNavigation(message.from, rowId, branchId).catch((err) => console.error('handleMenuNavigation failed:', err.message));
             }
             continue;
           }
           if (message.type !== 'text') continue; // audio/video not handled yet
-          await handleInboundMessage({ phoneNumber: message.from, text: message.text.body, channel: 'whatsapp', messageId: message.id });
+          await handleInboundMessage({ phoneNumber: message.from, text: message.text.body, channel: 'whatsapp', messageId: message.id, branchId });
         }
       }
     }

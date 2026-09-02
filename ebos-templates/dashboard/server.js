@@ -14,13 +14,17 @@ import { fileURLToPath } from 'node:url';
 import { loadStaff } from './lib/auth.js';
 import { router as apiRoutes } from './routes/api.js';
 import { router as documentRoutes } from './routes/documents.js';
+import { router as trackingRoutes } from './routes/tracking.js';
+import { router as riderApiRoutes } from './routes/rider.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
 import { recoverPendingMessages, closeStaleOrders } from './engine/flow.js';
+import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
+const RIDER_PWA_DIST = path.join(__dirname, 'rider-pwa', 'dist');
 
 const app = express();
 
@@ -39,20 +43,54 @@ app.use('/webhook/instagram', instagramWebhook);
 // Public documents -- the invoice/receipt link sent to a customer over
 // WhatsApp has to open without a dashboard login.
 app.use('/documents', documentRoutes);
+// Public delivery tracking (own_riders mode) -- same reasoning as
+// /documents above, and the tracking_url stored on `delivery` (see
+// routes/rider.js's /offers/:id/accept) already points here.
+app.use('/track', trackingRoutes);
 
+// Scoped to /api, not global -- the rider session below needs its own,
+// completely separate cookie-session instance on its own path (/rider), and
+// two cookie-session middlewares both touching req.session on overlapping
+// paths would each try to persist whichever session was assigned last back
+// into their own cookie, silently cross-writing rider data into the staff
+// cookie or vice versa. Scoping each to its own path prefix means they
+// never run on the same request at all.
 app.use(
+  '/api',
   cookieSession({
     name: 'ebos_session',
     secret: process.env.SESSION_SECRET,
     maxAge: 30 * 24 * 60 * 60 * 1000,
     httpOnly: true,
     sameSite: 'lax',
-  })
+  }),
+  loadStaff,
+  apiRoutes
 );
-app.use(loadStaff);
-app.use('/api', apiRoutes);
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+// The rider PWA (rider-pwa/) -- own session, own static bundle, own SPA
+// fallback, all under /rider so none of it ever shares a request with the
+// staff dashboard's own session/routes above. Delivery add-on only
+// (own_riders mode) -- with mode='none' these files still exist (built into
+// every image, per the addon spec's "code present and inert, not absent"
+// rule) but are simply never linked to from the staff dashboard's nav.
+app.use(
+  '/rider/api',
+  cookieSession({
+    name: 'ebos_rider_session',
+    secret: process.env.SESSION_SECRET,
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    httpOnly: true,
+    sameSite: 'lax',
+  }),
+  riderApiRoutes
+);
+app.use('/rider', express.static(RIDER_PWA_DIST));
+app.get('/rider/*', (req, res) => {
+  res.sendFile(path.join(RIDER_PWA_DIST, 'index.html'));
+});
 
 // The React dashboard (client/) -- built at image-build time (see
 // Dockerfile), served as static files with an SPA fallback so client-side
@@ -100,4 +138,15 @@ app.listen(port, () => {
   setInterval(() => {
     closeStaleOrders().catch((err) => console.error('closeStaleOrders failed:', err));
   }, 60 * 60 * 1000);
+  // Delivery add-on (own_riders mode) escalation sweep -- spec B4's 90s/
+  // 180s timeouts need a much shorter tick than closeStaleOrders' hourly
+  // one to mean anything. sweepOfferEscalation itself is a single cheap
+  // row read and returns immediately when mode != 'own_riders' (same
+  // "scheduled but genuinely inert until switched on" shape as
+  // closeStaleOrders already is for every business regardless of any
+  // toggle -- this has to run unconditionally so a business that flips the
+  // toggle on mid-uptime is covered without a redeploy).
+  setInterval(() => {
+    sweepOfferEscalation().catch((err) => console.error('sweepOfferEscalation failed:', err));
+  }, 15_000);
 });

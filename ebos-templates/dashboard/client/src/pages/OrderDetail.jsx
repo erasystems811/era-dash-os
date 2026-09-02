@@ -16,8 +16,27 @@ export default function OrderDetail() {
   }
   useEffect(load, [id]);
 
+  const [overrideReason, setOverrideReason] = useState('');
+  const [overrideBusy, setOverrideBusy] = useState(false);
+  const [overrideError, setOverrideError] = useState(null);
+
   if (!data) return null;
-  const { order, items, customer, documents, delivery } = data;
+  const { order, items, customer, documents, delivery, deliveryAssignment } = data;
+
+  async function releaseDelivery(e) {
+    e.preventDefault();
+    setOverrideError(null);
+    setOverrideBusy(true);
+    try {
+      await api.post(`/delivery/assignments/${deliveryAssignment.id}/release`, { reason: overrideReason.trim() });
+      setOverrideReason('');
+      load();
+    } catch (err) {
+      setOverrideError(err.message);
+    } finally {
+      setOverrideBusy(false);
+    }
+  }
 
   async function updateStatus(e) {
     await api.post(`/orders/${id}/status`, { status: e.target.value });
@@ -118,6 +137,31 @@ export default function OrderDetail() {
             Provider: {delivery.provider} &middot; Status: <span className={`badge ${delivery.status}`}>{delivery.status}</span>
           </p>
           {delivery.rider_name && <p>Rider: {delivery.rider_name} ({delivery.rider_phone})</p>}
+          {/* Own-riders only -- a human override for when the normal code
+              hand-off can't happen (customer lost the code, phone died,
+              gave it to a neighbour). Never available once it's already
+              closed out, one way or another. */}
+          {canEdit(staff) && deliveryAssignment && !['DELIVERED', 'FAILED'].includes(deliveryAssignment.status) && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+              <p className="hint" style={{ marginTop: 0 }}>
+                Customer lost the code, or the rider can't reach them to confirm? Release this delivery with a reason -- the rider still gets
+                paid.
+              </p>
+              {overrideError && <div className="error-banner">{overrideError}</div>}
+              <form onSubmit={releaseDelivery} style={{ display: 'flex', gap: 10 }}>
+                <input
+                  style={{ flex: 1 }}
+                  placeholder="Reason (e.g. customer lost the code)"
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  required
+                />
+                <button type="submit" className="secondary" disabled={overrideBusy}>
+                  {overrideBusy ? 'Releasing...' : 'Release delivery'}
+                </button>
+              </form>
+            </div>
+          )}
         </div>
       )}
 

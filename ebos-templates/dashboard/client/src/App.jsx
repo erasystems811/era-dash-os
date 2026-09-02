@@ -1,6 +1,7 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { StaffProvider, useStaff } from './StaffContext.jsx';
+import { ScopeProvider } from './ScopeContext.jsx';
 import Layout from './components/Layout.jsx';
 import Login from './pages/Login.jsx';
 import Orders from './pages/Orders.jsx';
@@ -14,6 +15,8 @@ import KnowledgeBase from './pages/KnowledgeBase.jsx';
 import Documents from './pages/Documents.jsx';
 import Staff from './pages/Staff.jsx';
 import Settings from './pages/Settings.jsx';
+import Delivery from './pages/Delivery.jsx';
+import Voice from './pages/Voice.jsx';
 
 function Protected({ children }) {
   const { staff } = useStaff();
@@ -30,7 +33,9 @@ export default function App() {
         <Route
           element={
             <Protected>
-              <Layout />
+              <ScopeProvider>
+                <Layout />
+              </ScopeProvider>
             </Protected>
           }
         >
@@ -39,6 +44,8 @@ export default function App() {
           <Route path="/bookings" element={<Bookings />} />
           <Route path="/catalogue" element={<Catalogue />} />
           <Route path="/branches" element={<Branches />} />
+          <Route path="/delivery" element={<Delivery />} />
+          <Route path="/voice" element={<Voice />} />
           <Route path="/conversations" element={<Conversations />} />
           <Route path="/conversations/:id" element={<ConversationDetail />} />
           <Route path="/knowledge-base" element={<KnowledgeBase />} />

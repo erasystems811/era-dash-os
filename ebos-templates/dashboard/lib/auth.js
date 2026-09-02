@@ -3,7 +3,8 @@ import { pool } from './db.js';
 
 export async function findStaffByEmail(email) {
   const { rows } = await pool.query(
-    `select id, name, email, password_hash, role, status from staff where email = $1`,
+    `select s.id, s.name, s.email, s.password_hash, s.role, s.status, s.branch_id, b.name as branch_name
+     from staff s left join branch b on b.id = s.branch_id where s.email = $1`,
     [email.trim().toLowerCase()]
   );
   return rows[0] || null;
@@ -41,6 +42,21 @@ export function canEdit(staff) {
 
 export function requireEditorApi(req, res, next) {
   if (!canEdit(req.staff)) return res.status(403).json({ error: 'Only an owner or manager can do this.' });
+  next();
+}
+
+// Computes req.branchId once per request, for every route after this one to
+// filter by -- the same "row data, not a role check" idiom as everywhere
+// else branch logic lives. A staff member locked to a branch (branch_id set
+// -- see schema.sql's comment on staff.branch_id) always sees only that
+// branch, full stop, never overridable by a query param -- that's the whole
+// point of locking them, not just a default. An owner/admin (branch_id
+// null) sees everything UNLESS they explicitly ask to view one branch (the
+// dashboard's scope switcher passing ?branch_id=), which is how the same
+// "branch scope" view serves both "my one branch" and "owner looking at one
+// branch specifically" with one mechanism.
+export function scopeToBranch(req, res, next) {
+  req.branchId = req.staff?.branch_id || req.query.branch_id || null;
   next();
 }
 

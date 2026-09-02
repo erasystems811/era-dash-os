@@ -1,0 +1,470 @@
+import React, { useEffect, useState } from 'react';
+import { api } from './api.js';
+
+// Posts the rider's own position on whatever interval the caller picks --
+// 15s during an active delivery, 60s on-duty idle, and simply not called
+// at all off duty (spec B3/B6: the rider pays for his own data and can't
+// always charge his phone, so continuous/high-frequency location is a cost
+// passed to the person earning least in the chain). intervalMs === null
+// means "don't report at all".
+function useLocationReporting(intervalMs) {
+  useEffect(() => {
+    if (!intervalMs || !navigator.geolocation) return;
+    const report = () => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          api.post('/location', { lat: pos.coords.latitude, lng: pos.coords.longitude }).catch(() => {});
+        },
+        () => {}, // permission denied or unavailable -- silently skip this tick, never block the rest of the app over it
+        { enableHighAccuracy: false, maximumAge: intervalMs, timeout: 10_000 }
+      );
+    };
+    report();
+    const id = setInterval(report, intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+}
+
+function PhoneEntry({ onSent }) {
+  const [phone, setPhone] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null);
+    setSending(true);
+    try {
+      await api.post('/otp/request', { phone: phone.trim() });
+      onSent(phone.trim());
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="screen">
+      <div className="brand">Rider</div>
+      <h1>Sign in</h1>
+      <p className="hint">Enter your phone number. We'll send a code on WhatsApp.</p>
+      {error && <div className="error">{error}</div>}
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <input
+          type="tel"
+          inputMode="tel"
+          autoFocus
+          placeholder="e.g. 2348030000000"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          required
+        />
+        <button type="submit" disabled={sending || !phone.trim()}>
+          {sending ? 'Sending...' : 'Send code'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function OtpVerify({ phone, onVerified, onBack }) {
+  const [code, setCode] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null);
+    setVerifying(true);
+    try {
+      const { rider } = await api.post('/otp/verify', { phone, code: code.trim() });
+      onVerified(rider);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  return (
+    <div className="screen">
+      <div className="brand">Rider</div>
+      <h1>Enter the code</h1>
+      <p className="hint">We sent a 6-digit code to {phone} on WhatsApp.</p>
+      {error && <div className="error">{error}</div>}
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <input
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          maxLength={6}
+          autoFocus
+          placeholder="000000"
+          style={{ textAlign: 'center', letterSpacing: '8px', fontSize: 28 }}
+          value={code}
+          onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+          required
+        />
+        <button type="submit" disabled={verifying || code.length < 4}>
+          {verifying ? 'Checking...' : 'Verify'}
+        </button>
+        <button type="button" className="link" onClick={onBack}>
+          Use a different number
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function naira(amount) {
+  return `₦${Number(amount).toLocaleString()}`;
+}
+
+// A short, loud beep synthesised in-browser (no audio file to fetch/cache,
+// which matters on a cheap phone with full storage and patchy data -- spec
+// 0.2/0.3) -- plus real vibration. Both fire the moment an offer event
+// arrives, whether or not the app is in the foreground.
+function playAlarm() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = 880;
+    gain.gain.value = 0.3;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    setTimeout(() => {
+      osc.stop();
+      ctx.close();
+    }, 700);
+  } catch {
+    // Some browsers refuse to start audio without a prior user gesture --
+    // vibration below still fires either way, never worth failing loudly
+    // over a missed beep.
+  }
+  if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
+}
+
+// A plain Google Maps search link -- opens the phone's own installed maps
+// app on a tap (no API key, no embedded map view needed for this, just a
+// handoff -- spec B3's "navigation handoff", not turn-by-turn built into
+// this app itself).
+function navHandoffUrl(address) {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address || '')}`;
+}
+
+// The three lifecycle steps after accepting (spec B4/screen 5-6): picked
+// up, arrived (with a maps handoff to get there), then the customer's code
+// to close the job. One screen, its own local status so a lost connection
+// or a refresh doesn't lose where the rider actually is -- /assignments/:id
+// itself is the source of truth on the server, this is just tracking the
+// same thing client-side between taps.
+function ActiveDelivery({ assignment: initialAssignment, offer, dropoffAddress, onFinished }) {
+  const [assignment, setAssignment] = useState(initialAssignment);
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [delivered, setDelivered] = useState(false);
+
+  // 15s -- an active delivery is the one case worth tighter reporting, so
+  // the customer's tracking page (routes/tracking.js) and the restaurant's
+  // live map both stay meaningfully current while a job is actually moving.
+  useLocationReporting(delivered ? null : 15_000);
+
+  async function markPickedUp() {
+    setError(null);
+    setBusy(true);
+    try {
+      setAssignment(await api.post(`/assignments/${assignment.id}/picked-up`, {}));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function markArrived() {
+    setError(null);
+    setBusy(true);
+    try {
+      setAssignment(await api.post(`/assignments/${assignment.id}/arrived`, {}));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deliver(e) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      await api.post(`/assignments/${assignment.id}/deliver`, { code: code.trim() });
+      setDelivered(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (delivered) {
+    return (
+      <div className="screen">
+        <div className="brand">Rider</div>
+        <h1>Delivered</h1>
+        <p className="hint">Nice work. Back on duty for the next one.</p>
+        <button onClick={onFinished}>Back to duty</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="screen">
+      <div className="brand">{offer.zoneName}</div>
+      {error && <div className="error">{error}</div>}
+
+      {assignment.status === 'ASSIGNED' && (
+        <>
+          <h1>Head to pickup</h1>
+          <p className="hint">{offer.pickupName || 'The restaurant'}{offer.pickupAddress ? `, ${offer.pickupAddress}` : ''}</p>
+          <a href={navHandoffUrl(offer.pickupAddress)} target="_blank" rel="noreferrer">
+            <button type="button">Open in Maps</button>
+          </a>
+          <button onClick={markPickedUp} disabled={busy}>
+            {busy ? 'Updating...' : "I've picked it up"}
+          </button>
+        </>
+      )}
+
+      {assignment.status === 'PICKED_UP' && (
+        <>
+          <h1>On the way</h1>
+          <p className="hint">
+            Delivering to {offer.zoneName}
+            {dropoffAddress ? `: ${dropoffAddress}` : ''}.
+          </p>
+          {dropoffAddress && (
+            <a href={navHandoffUrl(dropoffAddress)} target="_blank" rel="noreferrer">
+              <button type="button">Open in Maps</button>
+            </a>
+          )}
+          <button onClick={markArrived} disabled={busy}>
+            {busy ? 'Updating...' : "I've arrived"}
+          </button>
+        </>
+      )}
+
+      {assignment.status === 'ARRIVED' && (
+        <>
+          <h1>Enter their code</h1>
+          <p className="hint">Ask the customer for the code they were sent, to close out this delivery.</p>
+          <form onSubmit={deliver} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={4}
+              autoFocus
+              placeholder="0000"
+              style={{ textAlign: 'center', letterSpacing: '8px', fontSize: 28 }}
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+              required
+            />
+            <button type="submit" disabled={busy || code.length < 4}>
+              {busy ? 'Checking...' : 'Complete delivery'}
+            </button>
+          </form>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Shown the instant an offer event arrives, over whatever screen the rider
+// was already on. Accept is a race (spec B4) -- the request either wins
+// (200) or a rival rider already took it (409), never anything in between.
+function OfferScreen({ offer, onAccepted, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [declined, setDeclined] = useState(null);
+
+  useEffect(() => {
+    playAlarm();
+  }, [offer.id]);
+
+  async function accept() {
+    setBusy(true);
+    try {
+      const data = await api.post(`/offers/${offer.id}/accept`, {});
+      onAccepted(data.assignment, data.dropoffAddress);
+    } catch (err) {
+      setDeclined(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (declined) {
+    return (
+      <div className="screen">
+        <div className="brand">Rider</div>
+        <h1>Too late</h1>
+        <p className="hint">{declined}</p>
+        <button onClick={onDone}>Back to duty</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="screen">
+      <div className="brand">{offer.urgent ? '⚠ URGENT DELIVERY' : 'New delivery'}</div>
+      <h1>{offer.zoneName}</h1>
+      <p className="hint">Pickup: {offer.pickupName || 'the restaurant'}{offer.pickupAddress ? `, ${offer.pickupAddress}` : ''}</p>
+      <div style={{ textAlign: 'center', fontSize: 36, fontWeight: 700 }}>{naira(offer.payout)}</div>
+      <button onClick={accept} disabled={busy}>
+        {busy ? 'Accepting...' : 'Accept'}
+      </button>
+      <button type="button" className="link" onClick={onDone}>
+        Ignore
+      </button>
+    </div>
+  );
+}
+
+function Duty({ rider, onLoggedOut }) {
+  const [status, setStatus] = useState(rider.status || 'off_duty');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [offer, setOffer] = useState(null);
+  // Set once an offer is actually accepted -- takes over the whole screen
+  // until the delivery is closed out, independent of on/off duty (a rider
+  // mid-delivery isn't listening for new offers anyway, see below).
+  const [active, setActive] = useState(null);
+
+  const onDuty = status === 'on_duty';
+
+  // 60s while on duty and idle (ActiveDelivery's own 15s takes over once a
+  // job is accepted, see there) -- none at all off duty. This is what
+  // makes "go off duty" actually mean something on the data bill, not just
+  // on the offer feed.
+  useLocationReporting(onDuty && !active ? 60_000 : null);
+
+  // Only holds the connection open while actually on duty AND not already
+  // in the middle of a delivery -- spec 0.3/B6: the rider pays for his own
+  // data, so nothing streams while off duty or busy with a job he can't
+  // take another one during anyway. Reconnects automatically (EventSource's
+  // own built-in behaviour) if the connection drops, and immediately
+  // replays any still-OPEN offer for this rider on (re)connect
+  // (routes/rider.js's own /offers/stream).
+  useEffect(() => {
+    if (!onDuty || active) return;
+    const source = new EventSource('/rider/api/offers/stream');
+    source.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      setOffer((current) => current || data); // never interrupt an offer already being decided
+    };
+    return () => source.close();
+  }, [onDuty, active]);
+
+  async function toggleDuty() {
+    setError(null);
+    setBusy(true);
+    const next = onDuty ? 'off_duty' : 'on_duty';
+    try {
+      const updated = await api.post('/duty', { status: next });
+      setStatus(updated.status);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout() {
+    await api.post('/logout');
+    onLoggedOut();
+  }
+
+  if (active) {
+    return (
+      <ActiveDelivery
+        assignment={active.assignment}
+        offer={active.offer}
+        dropoffAddress={active.dropoffAddress}
+        onFinished={() => {
+          setActive(null);
+          setOffer(null);
+        }}
+      />
+    );
+  }
+
+  if (offer) {
+    return (
+      <OfferScreen
+        offer={offer}
+        onAccepted={(assignment, dropoffAddress) => setActive({ assignment, offer, dropoffAddress })}
+        onDone={() => setOffer(null)}
+      />
+    );
+  }
+
+  return (
+    <div className="screen">
+      <div className="brand">Rider</div>
+      <h1>Hi, {rider.name}</h1>
+      {error && <div className="error">{error}</div>}
+      <div style={{ textAlign: 'center', margin: '12px 0' }}>
+        <span className={`status-badge ${onDuty ? 'on' : 'off'}`}>{onDuty ? 'ON DUTY' : 'OFF DUTY'}</span>
+      </div>
+      <p className="hint" style={{ textAlign: 'center' }}>
+        {onDuty ? "You'll get an alarm when a delivery comes in nearby." : 'Go on duty to start receiving delivery offers.'}
+      </p>
+      <button className={onDuty ? 'off' : ''} onClick={toggleDuty} disabled={busy}>
+        {busy ? 'Updating...' : onDuty ? 'Go off duty' : 'Go on duty'}
+      </button>
+      <button type="button" className="link" onClick={logout}>
+        Sign out
+      </button>
+    </div>
+  );
+}
+
+export default function App() {
+  // undefined = still checking /me, null = signed out, object = signed in
+  const [rider, setRider] = useState(undefined);
+  const [pendingPhone, setPendingPhone] = useState(null);
+
+  useEffect(() => {
+    api
+      .get('/me')
+      .then((d) => setRider(d.rider))
+      .catch(() => setRider(null));
+  }, []);
+
+  if (rider === undefined) return null;
+
+  if (rider) {
+    return <Duty rider={rider} onLoggedOut={() => setRider(null)} />;
+  }
+
+  if (pendingPhone) {
+    return (
+      <OtpVerify
+        phone={pendingPhone}
+        onVerified={(r) => {
+          setRider(r);
+          setPendingPhone(null);
+        }}
+        onBack={() => setPendingPhone(null)}
+      />
+    );
+  }
+
+  return <PhoneEntry onSent={setPendingPhone} />;
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Rider",
+  "short_name": "Rider",
+  "start_url": "/rider/",
+  "scope": "/rider/",
+  "display": "standalone",
+  "background_color": "#111827",
+  "theme_color": "#111827",
+  "orientation": "portrait"
+}

@@ -36,6 +36,13 @@ create table if not exists business (
   -- click in Meta Business Suite has happened yet.
   whatsapp_catalog_id text,
   whatsapp_catalog_connected boolean not null default false,
+  -- Decides where the menu and the customer list live once a business has
+  -- more than one branch: 'independent' (default) scopes both to the
+  -- branch a conversation resolved to; 'merged' shares both at the business
+  -- level regardless of branch. Operations (orders, staff, delivery) are
+  -- always per branch in both modes -- see engine/fields.js's menu/customer
+  -- resolvers. Meaningless with zero or one branch row.
+  sharing_mode text not null default 'independent' check (sharing_mode in ('independent', 'merged')),
   created_at timestamptz not null default now()
 );
 -- Optional. Most businesses are single-location and just use business.address
@@ -45,11 +52,109 @@ create table if not exists business (
 -- and answers "where are you" from these instead of business.address.
 create table if not exists branch (
   id uuid primary key default gen_random_uuid(),
+  business_id uuid references business(id),
   name text not null,
   address text not null,
+  area text,
   phone_number text,
+  -- The number the assistant answers on for this branch (engine/webhook-
+  -- whatsapp.js resolves an inbound message's branch from this once a
+  -- business has real per-branch numbers -- see branch_channel). Null means
+  -- this branch has no dedicated number yet and falls back to the
+  -- business's single shared number.
+  whatsapp_number text,
+  instagram_handle text,
   operating_hours text,
+  opening_hours jsonb,
+  timezone text not null default 'Africa/Lagos',
+  -- 'paused' lets a branch stop taking orders (renovation, an outage)
+  -- without deleting it or reconfiguring the assistant.
+  status text not null default 'active' check (status in ('active', 'paused', 'closed')),
+  -- Exactly one true per business -- the default scope, and where a
+  -- zero/one-branch business's product/customers rows point (see below).
+  is_primary boolean not null default false,
   created_at timestamptz not null default now()
+);
+
+-- Per-branch WhatsApp (and later voice/Instagram) credentials. A separate
+-- table from `branch` -- a channel's number/token pair is its own config,
+-- not a property of the location. Zero rows means every business behaves
+-- exactly as today (single shared number from .env) -- see
+-- engine/branch-channel.js. Plaintext access_token, same trust boundary as
+-- Paystack's key in .env below -- no encryption-at-rest exists elsewhere in
+-- EBOS to be consistent with.
+create table if not exists branch_channel (
+  id uuid primary key default gen_random_uuid(),
+  branch_id uuid not null references branch(id) on delete cascade,
+  channel text not null default 'whatsapp' check (channel in ('whatsapp', 'instagram', 'voice')),
+  phone_number_id text,
+  access_token text,
+  verify_token text,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists branch_channel_branch_channel_idx on branch_channel (branch_id, channel);
+create unique index if not exists branch_channel_phone_number_id_idx on branch_channel (phone_number_id) where phone_number_id is not null;
+
+-- ---------------------------------------------------------------------------
+-- Delivery add-on (own_riders mode) -- optional, per business, off by
+-- default (delivery_config.mode = 'none', defined further below). See
+-- EBOS-Addon-Schema-Voice-and-Delivery.md, Capability B. The restaurant's
+-- own riders, dispatched through a platform ERA provides -- money never
+-- passes through an ERA account (B2). Every table here follows the same
+-- branch_id-not-business_id idiom this file already established for branch
+-- (business is a locked singleton per database -- see this file's header --
+-- so a literal business_id would carry no information; branch_id is the
+-- real per-location scope, exactly like order/customers/product/staff).
+-- rider and delivery_zone are defined here, before "order", because
+-- order.delivery_zone_id references delivery_zone -- the rest of this
+-- capability's tables (which reference "order") live further below, after
+-- it's defined.
+-- ---------------------------------------------------------------------------
+
+create table if not exists rider (
+  id uuid primary key default gen_random_uuid(),
+  branch_id uuid references branch(id),
+  name text not null,
+  phone text not null unique,
+  status text not null default 'off_duty' check (status in ('on_duty', 'off_duty', 'suspended')),
+  -- Encrypted with lib/crypto.js before insert (AES-256-GCM, keyed off
+  -- PAYMENT_ENCRYPTION_KEY -- already generated per deployment by
+  -- create-client.mjs, unused until now). Same trust boundary as
+  -- delivery_config.provider_keys below, not plaintext like
+  -- branch_channel's access_token: unlike a business's own WhatsApp token,
+  -- this is many individual people's real bank details sitting in one
+  -- database.
+  bank_account_number text,
+  bank_code text,
+  account_name text,
+  -- Sign-in OTP (see engine/rider-auth.js) -- sent as a WhatsApp
+  -- AUTHENTICATION-category template, not the shared env credentials,
+  -- since a rider has never messaged the business number before their
+  -- first sign-in.
+  otp_code text,
+  otp_expires_at timestamptz,
+  last_lat numeric,
+  last_lng numeric,
+  last_seen_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+-- The restaurant's own delivery areas and what each one costs -- set once,
+-- like a catalogue, edited rarely (spec B5). customer_fee and rider_payout
+-- default equal but are kept as two columns on purpose: a restaurant may
+-- later subsidise a far zone to keep riders willing to go there, or take a
+-- small margin, and that must be a settings change, never a migration.
+create table if not exists delivery_zone (
+  id uuid primary key default gen_random_uuid(),
+  branch_id uuid references branch(id),
+  name text not null,
+  -- Customers do not write addresses the way a database expects -- one
+  -- area has several names in common use. Matched against these before an
+  -- address is ever sent to the "unresolved, ask a human" queue.
+  aliases text[] not null default '{}',
+  customer_fee numeric(12, 2) not null,
+  rider_payout numeric(12, 2) not null,
+  active boolean not null default true
 );
 
 -- Payment provider keys (Paystack) live in this deployment's own .env, set
@@ -70,6 +175,13 @@ create table if not exists staff (
   password_hash text not null,
   role text not null check (role in ('owner', 'manager', 'staff')),
   status text not null default 'active' check (status in ('active', 'disabled')),
+  -- Null = all branches (the only sensible value for role = 'owner', and
+  -- every login today). A real branch = this staff member is locked to it
+  -- -- no branch control anywhere in their dashboard, not just a filtered
+  -- view. Not a new role: "branch staff"/"branch manager" from the branch
+  -- addendum are just staff/manager with this set. See lib/auth.js's
+  -- scopeToBranch.
+  branch_id uuid references branch(id),
   -- Any number of staff can opt into handover alerts, not just the single
   -- business.handover_number -- a handover goes to all of them at once, and
   -- when one of them actually replies, the rest get told who's got it so
@@ -81,12 +193,25 @@ create table if not exists staff (
 create table if not exists customers (
   id uuid primary key default gen_random_uuid(),
   name text,
+  -- Voice add-on only (see voice_call below) -- what the caller said to be
+  -- called, captured naturally during a call, not asked for on WhatsApp.
+  -- Separate from `name` because `name` is never written by any engine
+  -- code today (dashboard-editable only); this is voice's own field so it
+  -- can't collide with that.
+  preferred_name text,
   phone_number text,
-  channel text not null default 'whatsapp' check (channel in ('whatsapp', 'instagram', 'tiktok', 'website')),
+  channel text not null default 'whatsapp' check (channel in ('whatsapp', 'instagram', 'tiktok', 'website', 'voice')),
   channel_id text,
   address text,
   handled_by text not null default 'bot' check (handled_by in ('bot', 'staff')),
   handled_by_staff_id uuid references staff(id),
+  -- Null when the business has zero branches or sharing_mode = 'merged'
+  -- (customer is shared at the business level). Set to the branch a
+  -- conversation resolved to when sharing_mode = 'independent' -- under
+  -- that mode the same phone number ordering from two branches is
+  -- deliberately two separate customer rows. See engine's customer
+  -- resolver (wraps findOrCreateCustomer).
+  branch_id uuid references branch(id),
   -- A real human took over via the WhatsApp Business app itself (Meta's
   -- coexistence mode -- Settings' "WhatsApp connection"), not via this
   -- dashboard, so there's no staff row to point handled_by_staff_id at
@@ -103,6 +228,9 @@ create table if not exists customers (
   -- customers this business has on file.
   last_message text,
   last_message_at timestamptz,
+  -- Voice add-on only -- drives the "welcome back" greeting (A6). Null
+  -- means never called, or voice isn't enabled for this business.
+  last_voice_call_at timestamptz,
   created_at timestamptz not null default now()
 );
 create unique index if not exists customers_phone_idx on customers (phone_number) where phone_number is not null;
@@ -149,6 +277,11 @@ create table if not exists product (
   -- real image per item -- an item with no photo here is skipped on sync
   -- (engine/whatsapp-catalog.js) rather than sent looking broken.
   image_data_url text,
+  -- Null when the business has zero branches or sharing_mode = 'merged'
+  -- (product is shared at the business level). Set to a specific branch
+  -- when sharing_mode = 'independent' -- see engine's menu resolver
+  -- (resolveMenu), the one place this table is queried from a feature.
+  branch_id uuid references branch(id),
   created_at timestamptz not null default now()
 );
 
@@ -236,6 +369,14 @@ create table if not exists "order" (
   -- table's comment. Which branch fulfils this order, so pickup/delivery
   -- source address is that branch's, not a guess.
   branch_id uuid references branch(id),
+  -- Own-riders delivery only (delivery_config.mode = 'own_riders') -- the
+  -- delivery_zone this order's address matched at handleCollectFulfilment
+  -- time (engine/flow.js), persisted so dispatch later uses the exact same
+  -- zone/price the customer was already charged, not a fresh re-match that
+  -- could drift. Null for every other provider and for an unresolved
+  -- address (see engine/delivery-zones.js -- unresolved always goes to a
+  -- human, never a guess).
+  delivery_zone_id uuid references delivery_zone(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -277,15 +418,213 @@ create table if not exists delivery (
   customer_id uuid not null references customers(id),
   address text,
   phone_number text,
-  provider text check (provider in ('chowdeck', 'bolt', 'manual')),
+  provider text check (provider in ('chowdeck', 'bolt', 'manual', 'own_riders')),
   provider_delivery_id text,
   rider_name text,
   rider_phone text,
   tracking_url text,
   status text not null default 'pending' check (status in ('pending', 'dispatched', 'delivered')),
   price numeric(12, 2) not null default 0,
+  -- Always per branch, in both sharing modes -- copied from the parent
+  -- order/booking's already-resolved branch_id at insert time (see
+  -- engine/delivery.js), not re-resolved here.
+  branch_id uuid references branch(id),
   check (order_id is not null or booking_id is not null)
 );
+
+-- ---------------------------------------------------------------------------
+-- Delivery add-on (own_riders mode) -- optional, per business, off by
+-- default (delivery_config.mode = 'none'). See
+-- EBOS-Addon-Schema-Voice-and-Delivery.md, Capability B. The restaurant's
+-- own riders, dispatched through a platform ERA provides -- money never
+-- passes through an ERA account (B2). Every table here follows the same
+-- branch_id-not-business_id idiom the branch addendum already established
+-- (business is a locked singleton per database -- see this file's header --
+-- so a literal business_id would carry no information; branch_id is the
+-- real per-location scope, exactly like order/customers/product/staff).
+-- ---------------------------------------------------------------------------
+
+-- One broadcast to every on-duty rider for one order. status='OPEN' is the
+-- only claimable state -- claiming is a single atomic UPDATE ... WHERE
+-- status = 'OPEN', never a read then a separate write, or two riders can
+-- both "win" the same job (spec B4 -- the failure this exists to prevent
+-- outright, not just discourage).
+create table if not exists delivery_offer (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references "order"(id),
+  branch_id uuid references branch(id),
+  zone_id uuid not null references delivery_zone(id),
+  status text not null default 'OPEN' check (status in ('OPEN', 'CLAIMED', 'EXPIRED', 'CANCELLED')),
+  broadcast_at timestamptz not null default now(),
+  escalated_at timestamptz,
+  -- Separate from escalated_at so the staff-alert sweep never re-alerts on
+  -- every tick for the same still-unaccepted offer.
+  staff_alerted_at timestamptz,
+  claimed_by uuid references rider(id),
+  claimed_at timestamptz
+);
+
+-- The operational detail underneath one claimed offer -- delivery (above)
+-- stays the summary row every provider (chowdeck/manual/own_riders) writes
+-- to, so the existing dashboard Delivery card keeps working unmodified for
+-- every provider; this is where the own_riders-specific lifecycle lives.
+create table if not exists delivery_assignment (
+  id uuid primary key default gen_random_uuid(),
+  offer_id uuid not null references delivery_offer(id),
+  order_id uuid not null references "order"(id),
+  rider_id uuid not null references rider(id),
+  status text not null default 'ASSIGNED' check (status in ('ASSIGNED', 'PICKED_UP', 'ARRIVED', 'DELIVERED', 'FAILED')),
+  delivery_code text not null,
+  code_entered_at timestamptz,
+  -- Set on a staff human-override release (spec B7 -- lost code, dead
+  -- phone, given to a neighbour). A system with no override strands a
+  -- rider who genuinely did the job.
+  released_by_staff uuid references staff(id),
+  override_reason text,
+  tracking_token text not null unique,
+  picked_up_at timestamptz,
+  delivered_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+-- One row per delivery a rider is owed. amount is copied from
+-- delivery_zone.rider_payout the moment the offer is claimed (ASSIGNED),
+-- never re-read at payout time -- if the restaurant edits a zone's price
+-- mid shift, a delivery already accepted keeps the rate the rider actually
+-- saw and agreed to (spec B7). A rider paid less than that figure is a
+-- trust problem this system does not get a second chance to recover from.
+create table if not exists rider_payout (
+  id uuid primary key default gen_random_uuid(),
+  assignment_id uuid not null references delivery_assignment(id),
+  rider_id uuid not null references rider(id),
+  branch_id uuid references branch(id),
+  amount numeric(12, 2) not null,
+  status text not null default 'PENDING' check (status in ('PENDING', 'SENT', 'FAILED', 'PAID_MANUALLY')),
+  provider text check (provider in ('paystack', 'flutterwave', 'moniepoint', 'manual')),
+  provider_reference text,
+  error text,
+  created_at timestamptz not null default now(),
+  settled_at timestamptz
+);
+
+-- One row per business (a true whole-deployment toggle, same as `business`
+-- itself, not a per-branch setting -- unlike every other table above).
+-- mode='none' is the default and must be genuinely inert: no nav item, no
+-- background job doing real work, no cost, and the order engine/WhatsApp/
+-- dashboard behave exactly as they do today (branch addendum's own "off is
+-- the default" rule, restated here for this capability). ERA switches
+-- mode, never the client (see routes/api.js's requireEraAdmin gate) --
+-- payout_mode/provider/provider_keys are the restaurant's own to set, once
+-- on.
+create table if not exists delivery_config (
+  business_id uuid primary key references business(id),
+  mode text not null default 'none' check (mode in ('none', 'relay', 'own_riders')),
+  payout_mode text not null default 'manual' check (payout_mode in ('automatic', 'manual')),
+  provider text check (provider in ('paystack', 'flutterwave', 'moniepoint')),
+  -- Encrypted with lib/crypto.js, same as rider.bank_account_number above --
+  -- a real transfer-API secret, not a business's already-.env-stored key.
+  -- text, not jsonb: lib/crypto.js's encrypt() output is an opaque
+  -- "iv:authTag:ciphertext" string, not itself valid JSON -- the real JSON
+  -- (whatever shape a given provider's keys take) only exists again after
+  -- decrypt() at call time (engine/payout-providers.js).
+  provider_keys text,
+  offer_timeout_seconds int not null default 90
+);
+
+-- ---------------------------------------------------------------------------
+-- Voice ordering add-on -- optional, per business, off by default
+-- (voice_config.enabled = false). See EBOS-Addon-Schema-Voice-and-Delivery.md,
+-- Capability A. A phone call is a new front door onto the SAME order engine
+-- WhatsApp already uses (engine/flow.js's dispatch layer) -- nothing here
+-- duplicates order-taking logic. voice_config follows delivery_config's own
+-- shape immediately above: one row per business, a true whole-deployment
+-- toggle, ERA-switches-it-not-the-client. voice_call/call_turn/callback_task
+-- are per-call operational data and follow the branch_id-not-business_id
+-- idiom the rest of this file uses (see the delivery add-on's comment above
+-- rider/delivery_zone for why).
+-- ---------------------------------------------------------------------------
+
+create table if not exists voice_config (
+  business_id uuid primary key references business(id),
+  enabled boolean not null default false,
+  transport text not null default 'forwarding' check (transport in ('forwarding', 'gateway')),
+  -- The number the voice provider terminates the restaurant's forwarded
+  -- calls on (A2) -- not the restaurant's own number, which stays
+  -- business.phone_number/branch.phone_number.
+  inbound_number text,
+  -- The cloned voice model to speak with (A3) -- one value at launch,
+  -- ERA-wide, not a per-business recording. Nullable until the voice asset
+  -- exists.
+  voice_id text,
+  -- Restaurant's own to edit (A8) -- staff phones tried in order on a
+  -- Phase 2 (gateway) live transfer. An empty array is valid and falls
+  -- back to the callback path, exactly as under Phase 1.
+  transfer_numbers text[] not null default '{}',
+  operating_hours jsonb,
+  greeting_override text,
+  -- Soft cap, alerts only (A10) -- never cuts a call off mid-order.
+  max_minutes_per_month int,
+  -- Off by default (A11) -- the Nigeria Data Protection Act makes the
+  -- restaurant the data controller, so recording needs their opt-in, not
+  -- ERA's.
+  recording_enabled boolean not null default false,
+  recording_retention_days int not null default 30
+);
+
+create table if not exists voice_call (
+  id uuid primary key default gen_random_uuid(),
+  branch_id uuid references branch(id),
+  customer_id uuid references customers(id),
+  direction text not null default 'inbound' check (direction in ('inbound', 'outbound_callback')),
+  caller_number text,
+  started_at timestamptz not null default now(),
+  answered_at timestamptz,
+  ended_at timestamptz,
+  -- Derived, stored for billing (A10) rather than computed from
+  -- started_at/ended_at on every read.
+  duration_seconds int,
+  outcome text check (outcome in ('order_placed', 'enquiry_answered', 'handover_transferred', 'handover_callback', 'abandoned', 'failed')),
+  order_id uuid references "order"(id),
+  transport text not null default 'forwarding' check (transport in ('forwarding', 'gateway')),
+  -- Null unless voice_config.recording_enabled was true for this call.
+  recording_url text,
+  cost_estimate numeric(12, 2)
+);
+create index if not exists voice_call_branch_started_idx on voice_call (branch_id, started_at desc);
+
+create table if not exists call_turn (
+  id uuid primary key default gen_random_uuid(),
+  call_id uuid not null references voice_call(id),
+  seq int not null,
+  speaker text not null check (speaker in ('caller', 'system', 'staff')),
+  transcript text,
+  -- Recogniser confidence, 0 to 1 -- drives handover trigger 3 (A8: two
+  -- consecutive low-confidence turns) and is the real evidence for whether
+  -- a given restaurant's call quality actually works, not just testing.
+  confidence numeric,
+  started_at timestamptz not null default now()
+);
+create index if not exists call_turn_call_seq_idx on call_turn (call_id, seq);
+
+-- Voice's own "needs a person" row (A8/A12) -- deliberately not a call to
+-- the existing WhatsApp handover() (engine/flow.js), which sends an ack
+-- into a chat thread and waits; a live call needs an answer inside the same
+-- call, not a later reply. Surfaces in the same Needs Attention panel as
+-- WhatsApp handovers and unaccepted delivery offers (C1's "one queue"),
+-- tagged via routes/api.js's kind-tagged UNION ALL.
+create table if not exists callback_task (
+  id uuid primary key default gen_random_uuid(),
+  branch_id uuid references branch(id),
+  call_id uuid not null references voice_call(id),
+  customer_id uuid references customers(id),
+  reason text,
+  context_summary text,
+  status text not null default 'open' check (status in ('open', 'in_progress', 'done', 'abandoned')),
+  claimed_by uuid references staff(id),
+  created_at timestamptz not null default now(),
+  resolved_at timestamptz
+);
+create index if not exists callback_task_status_idx on callback_task (status) where status = 'open';
 
 create table if not exists knowledge_base (
   id uuid primary key default gen_random_uuid(),
@@ -329,7 +668,7 @@ create table if not exists message (
   id uuid primary key default gen_random_uuid(),
   customer_id uuid not null references customers(id),
   direction text not null check (direction in ('inbound', 'outbound')),
-  channel text not null check (channel in ('whatsapp', 'instagram', 'tiktok', 'website')),
+  channel text not null check (channel in ('whatsapp', 'instagram', 'tiktok', 'website', 'voice')),
   sender text not null,
   body text not null,
   trigger text,

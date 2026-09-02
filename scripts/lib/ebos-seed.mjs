@@ -32,18 +32,31 @@ function sqlArrayNotNull(values) {
   return `array[${values.map(sqlString).join(', ')}]::text[]`;
 }
 
-export function buildEbosSeedSql({ business, owner, ownerPassword, catalogue, botFields, botStates, knowledgeBase }) {
+export function buildEbosSeedSql({ business, owner, ownerPassword, catalogue, botFields, botStates, knowledgeBase, branches }) {
   const lines = [];
 
   lines.push(
-    `insert into business (name, type, address, phone_number, delivery_enabled, whatsapp_connection, handover_number, bank_name, bank_account_number, bank_account_name, logo_data_url, brand_color)
-     values (${sqlString(business.name)}, ${sqlString(business.type)}, ${sqlString(business.address)}, ${sqlString(business.phone_number)}, ${sqlBool(business.delivery_enabled)}, ${sqlString(business.whatsapp_connection)}, ${sqlString(business.handover_number)}, ${sqlString(business.bank_name)}, ${sqlString(business.bank_account_number)}, ${sqlString(business.bank_account_name)}, ${sqlString(business.logo_data_url)}, ${sqlString(business.brand_color) === 'null' ? "'#111827'" : sqlString(business.brand_color)});`
+    `insert into business (name, type, address, phone_number, delivery_enabled, whatsapp_connection, handover_number, bank_name, bank_account_number, bank_account_name, logo_data_url, brand_color, sharing_mode)
+     values (${sqlString(business.name)}, ${sqlString(business.type)}, ${sqlString(business.address)}, ${sqlString(business.phone_number)}, ${sqlBool(business.delivery_enabled)}, ${sqlString(business.whatsapp_connection)}, ${sqlString(business.handover_number)}, ${sqlString(business.bank_name)}, ${sqlString(business.bank_account_number)}, ${sqlString(business.bank_account_name)}, ${sqlString(business.logo_data_url)}, ${sqlString(business.brand_color) === 'null' ? "'#111827'" : sqlString(business.brand_color)}, ${sqlString(business.sharing_mode) === 'null' ? "'independent'" : sqlString(business.sharing_mode)});`
   );
 
   lines.push(
     `insert into staff (name, email, password_hash, role)
      values (${sqlString(owner.name)}, ${sqlString(String(owner.email).trim().toLowerCase())}, crypt(${sqlString(ownerPassword)}, gen_salt('bf')), 'owner');`
   );
+
+  // Optional -- absent (every seed config before the branch addendum, and
+  // any single-location client after it) means zero branch rows, exactly
+  // today's "this business is treated as a single location" default. When
+  // present, one row per location the client gave, is_primary on the
+  // first -- business_id looked up via subquery since this is all one
+  // batch of raw SQL, not real inserts returning real ids to chain from.
+  for (const [i, b] of (branches || []).entries()) {
+    lines.push(
+      `insert into branch (business_id, name, address, area, phone_number, whatsapp_number, instagram_handle, operating_hours, timezone, is_primary)
+       values ((select id from business limit 1), ${sqlString(b.name)}, ${sqlString(b.address)}, ${sqlString(b.area)}, ${sqlString(b.phone_number)}, ${sqlString(b.whatsapp_number)}, ${sqlString(b.instagram_handle)}, ${sqlString(b.operating_hours)}, ${sqlString(b.timezone) === 'null' ? "'Africa/Lagos'" : sqlString(b.timezone)}, ${sqlBool(i === 0)});`
+    );
+  }
 
   for (const item of catalogue || []) {
     lines.push(

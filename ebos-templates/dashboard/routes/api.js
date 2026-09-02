@@ -3,12 +3,16 @@
 // the real source of truth for what a business's own dashboard can do.
 import express from 'express';
 import { pool } from '../lib/db.js';
-import { findStaffByEmail, verifyPassword, hashPassword, requireStaffApi, requireEditorApi, requireEraAdmin, canEdit } from '../lib/auth.js';
+import { findStaffByEmail, verifyPassword, hashPassword, requireStaffApi, requireEditorApi, requireEraAdmin, canEdit, scopeToBranch } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
 import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation } from '../engine/flow.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
 import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../engine/whatsapp-profile.js';
 import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort, deleteBestEffort } from '../engine/whatsapp-catalog.js';
+import { router as deliveryRoutes } from './delivery.js';
+import { router as voiceRoutes } from './voice.js';
+import { encrypt } from '../lib/crypto.js';
+import { maybeDispatchOwnRiders } from '../engine/delivery-dispatch.js';
 
 export const router = express.Router();
 
@@ -20,7 +24,7 @@ router.post('/login', async (req, res) => {
   if (!staff || !(await verifyPassword(staff, password || ''))) {
     return res.status(401).json({ error: 'Incorrect email or password.' });
   }
-  req.session.staff = { id: staff.id, name: staff.name, role: staff.role };
+  req.session.staff = { id: staff.id, name: staff.name, role: staff.role, branch_id: staff.branch_id, branch_name: staff.branch_name };
   res.json({ staff: req.session.staff });
 });
 
@@ -244,7 +248,131 @@ router.post('/whatsapp-catalog/confirm-connected', requireEraAdmin, async (req, 
   res.json({ ok: true });
 });
 
+// Delivery add-on config (own_riders/relay/none). Two legitimate callers,
+// same dual-check shape as /export above: the panel (ERA admin token, no
+// staff session of its own -- it's what decides the mode) and this
+// business's own logged-in staff (Layout.jsx's nav check, which needs to
+// read the mode to know whether "Delivery" should appear at all). Sits
+// above the router.use(requireStaffApi) line below for the same reason
+// /export and the WhatsApp Catalogue toggles do.
+router.get('/delivery-config', async (req, res) => {
+  const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
+  if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  const { rows } = await pool.query(
+    'select business_id, mode, payout_mode, provider, offer_timeout_seconds from delivery_config limit 1'
+  );
+  res.json(rows[0] || { mode: 'none', payout_mode: 'manual', provider: null, offer_timeout_seconds: 90 });
+});
+
+// mode itself is ERA's to flip, never the client's (0.7 of the addon spec:
+// "ERA switches these, not the client" -- each one maps to something the
+// client is paying for).
+router.post('/delivery-config', requireEraAdmin, async (req, res) => {
+  const { mode } = req.body;
+  const { rows } = await pool.query(
+    `insert into delivery_config (business_id, mode) values ((select id from business limit 1), $1)
+     on conflict (business_id) do update set mode = excluded.mode returning *`,
+    [mode]
+  );
+  res.json(rows[0]);
+});
+
+// Voice add-on toggle -- same dual-auth/ERA-switches-it shape as
+// delivery-config immediately above, for the same reason (0.7 of the addon
+// spec: "ERA switches these, not the client").
+router.get('/voice-config', async (req, res) => {
+  const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
+  if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  const { rows } = await pool.query(
+    `select business_id, enabled, transport, inbound_number, voice_id, transfer_numbers, operating_hours,
+       greeting_override, max_minutes_per_month, recording_enabled, recording_retention_days
+     from voice_config limit 1`
+  );
+  res.json(rows[0] || {
+    enabled: false, transport: 'forwarding', inbound_number: null, voice_id: null, transfer_numbers: [],
+    operating_hours: null, greeting_override: null, max_minutes_per_month: null,
+    recording_enabled: false, recording_retention_days: 30,
+  });
+});
+
+router.post('/voice-config', requireEraAdmin, async (req, res) => {
+  const { enabled } = req.body;
+  const { rows } = await pool.query(
+    `insert into voice_config (business_id, enabled) values ((select id from business limit 1), $1)
+     on conflict (business_id) do update set enabled = excluded.enabled returning *`,
+    [enabled]
+  );
+  res.json(rows[0]);
+});
+
 router.use(requireStaffApi);
+router.use(scopeToBranch);
+
+router.use('/delivery', deliveryRoutes);
+router.use('/voice', voiceRoutes);
+
+// payout_mode/provider/provider_keys are the restaurant's own to set, once
+// mode is on -- same level of trust as them already self-managing
+// bank_name/bank_account_number in Settings today.
+// Automatic payout is deliberately locked off at the code level right now
+// (Chidera's explicit call, 2026-09-01: "don't put any money yet") -- not
+// just an unchecked box in the UI. Manual is the only real payout path
+// until this is lifted on purpose; provider/provider_keys can still be
+// saved ahead of time (so the form isn't wasted work), they just can't be
+// switched live yet.
+router.post('/delivery-config/payout', requireEditorApi, async (req, res) => {
+  const { payout_mode, provider, provider_keys } = req.body;
+  if (payout_mode === 'automatic') {
+    return res.status(403).json({ error: 'Automatic payout is not enabled yet -- deliveries pay out manually for now.' });
+  }
+  const { rows } = await pool.query(
+    `insert into delivery_config (business_id, payout_mode, provider, provider_keys)
+     values ((select id from business limit 1), 'manual', $1, $2)
+     on conflict (business_id) do update set payout_mode = 'manual', provider = excluded.provider,
+       provider_keys = coalesce(excluded.provider_keys, delivery_config.provider_keys)
+     returning business_id, mode, payout_mode, provider, offer_timeout_seconds`,
+    [provider || null, provider_keys ? encrypt(JSON.stringify(provider_keys)) : null]
+  );
+  res.json(rows[0]);
+});
+
+// The restaurant's own to edit once voice is on -- transfer_numbers,
+// operating_hours, greeting_override, usage cap, recording opt-in. Same
+// trust level as them already self-managing delivery zone prices. `enabled`
+// itself is deliberately not accepted here -- that stays ERA-only, above.
+router.post('/voice-config/settings', requireEditorApi, async (req, res) => {
+  const { transfer_numbers, operating_hours, greeting_override, max_minutes_per_month, recording_enabled, recording_retention_days } = req.body;
+  // { open: "HH:MM", close: "HH:MM" } or null (always open) -- see
+  // engine/voice-hours.js's own comment for why this is a small structured
+  // shape rather than the free-text convention business.operating_hours
+  // uses elsewhere. Validated here, not just trusted from the client, since
+  // a malformed value would silently break every future hours check.
+  const validHours = operating_hours && typeof operating_hours.open === 'string' && typeof operating_hours.close === 'string'
+    ? { open: operating_hours.open, close: operating_hours.close }
+    : null;
+  const { rows } = await pool.query(
+    `insert into voice_config (business_id, transfer_numbers, operating_hours, greeting_override, max_minutes_per_month, recording_enabled, recording_retention_days)
+     values ((select id from business limit 1), $1, $2, $3, $4, $5, $6)
+     on conflict (business_id) do update set
+       transfer_numbers = excluded.transfer_numbers,
+       operating_hours = excluded.operating_hours,
+       greeting_override = excluded.greeting_override,
+       max_minutes_per_month = excluded.max_minutes_per_month,
+       recording_enabled = excluded.recording_enabled,
+       recording_retention_days = excluded.recording_retention_days
+     returning business_id, enabled, transport, inbound_number, voice_id, transfer_numbers, operating_hours,
+       greeting_override, max_minutes_per_month, recording_enabled, recording_retention_days`,
+    [
+      Array.isArray(transfer_numbers) ? transfer_numbers : [],
+      validHours ? JSON.stringify(validHours) : null,
+      greeting_override || null,
+      max_minutes_per_month || null,
+      Boolean(recording_enabled),
+      recording_retention_days || 30,
+    ]
+  );
+  res.json(rows[0]);
+});
 
 router.post('/change-password', async (req, res) => {
   const { currentPassword, newPassword } = req.body;
@@ -265,12 +393,18 @@ router.post('/change-password', async (req, res) => {
 // --- Orders ---------------------------------------------------------------
 
 router.get('/orders', async (req, res) => {
+  // Orders are always per branch, in both sharing modes (branch addendum
+  // section 4) -- unlike customers/menu, there's no mode-dependent case
+  // here, so this is a plain filter, not a resolver call. null (no branch
+  // lock, no ?branch_id= requested) means "see everything", same as today.
   const { rows } = await pool.query(
     `select o.*, c.name as customer_name, c.phone_number as customer_phone, c.channel as customer_channel,
             (select coalesce(json_agg(json_build_object('name', p.name, 'quantity', oi.quantity)), '[]')
              from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
      from "order" o join customers c on c.id = o.customer_id
-     order by o.created_at desc limit 200`
+     where $1::uuid is null or o.branch_id = $1
+     order by o.created_at desc limit 200`,
+    [req.branchId]
   );
   res.json(rows);
 });
@@ -290,13 +424,17 @@ router.get('/orders/stats/today', async (req, res) => {
     // same-day summary card, not meant as an accounting close.
     pool.query(
       `select count(*) as orders, coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as collected
-       from "order" where created_at >= date_trunc('day', now())`
+       from "order" where created_at >= date_trunc('day', now()) and ($1::uuid is null or branch_id = $1)`,
+      [req.branchId]
     ),
     // "Answered in": for every bot/staff reply sent today, how long since
     // that same customer's most recent prior inbound message -- i.e. how
     // long the customer actually waited for that reply. Capped at 1 hour
     // so a reply to a customer who went quiet for days (picked back up
     // much later) doesn't skew the average into meaninglessness.
+    // Not branch-filtered -- message has no branch_id (not every message
+    // ties to one order, so there's no clean column to add it to), so this
+    // one stat stays business-wide even inside a single-branch scope view.
     pool.query(
       `select avg(extract(epoch from (m.created_at - prior.created_at))) as avg_seconds
        from message m
@@ -310,8 +448,9 @@ router.get('/orders/stats/today', async (req, res) => {
     ),
     pool.query(
       `select date_trunc('hour', created_at) as hour, count(*) as count
-       from "order" where created_at >= date_trunc('day', now())
-       group by hour order by count desc limit 1`
+       from "order" where created_at >= date_trunc('day', now()) and ($1::uuid is null or branch_id = $1)
+       group by hour order by count desc limit 1`,
+      [req.branchId]
     ),
   ]);
 
@@ -338,7 +477,14 @@ router.get('/orders/:id', async (req, res) => {
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
   const { rows: documents } = await pool.query('select * from generated_document where order_id = $1 order by created_at', [order.id]);
   const { rows: delivery } = await pool.query('select * from delivery where order_id = $1', [order.id]);
-  res.json({ order, items, customer: customerRows[0] || null, documents, delivery: delivery[0] || null });
+  // Own_riders only -- the id staff need to call the /release override on
+  // (routes/delivery.js), since `delivery` above is just the summary row
+  // every provider shares and has no assignment id of its own.
+  const { rows: assignment } = await pool.query(
+    `select id, status from delivery_assignment where order_id = $1 order by created_at desc limit 1`,
+    [order.id]
+  );
+  res.json({ order, items, customer: customerRows[0] || null, documents, delivery: delivery[0] || null, deliveryAssignment: assignment[0] || null });
 });
 
 // Staff-triggered, not automatic -- "I'll let you know when to pick up" (the
@@ -363,6 +509,13 @@ router.post('/orders/:id/status', requireEditorApi, async (req, res) => {
   // right up until staff says the order is genuinely done.
   if (status === 'completed' || status === 'cancelled') {
     await pool.query('update "order" set engine_state = $1 where id = $2', [status, req.params.id]);
+  }
+  // "Order reaches READY" is the delivery add-on's own dispatch trigger
+  // (own_riders mode) -- a no-op for pickup orders, non-delivery-add-on
+  // businesses, and any order that's already been dispatched once (see
+  // maybeDispatchOwnRiders's own idempotency check).
+  if (status === 'ready') {
+    await maybeDispatchOwnRiders(req.params.id);
   }
   res.json({ ok: true });
 });
@@ -568,9 +721,41 @@ router.get('/conversations', async (req, res) => {
 // not most-recent-message first, so whoever's been waiting longest surfaces
 // at the top instead of getting buried by newer chatter elsewhere.
 // Deliberately defined before the /:id route below, same reason as /search.
+// One shared queue (spec C1), not one per capability -- a delivery offer
+// nobody accepted is a different SHAPE of fact than a customer handover
+// (no name/phone_number/channel of its own, a zone and an order instead),
+// so this is a kind-tagged UNION rather than forcing it to pretend to be a
+// customer row. Only surfaces an offer once it's already crossed the
+// staff-alert threshold (engine/delivery-dispatch.js's sweepOfferEscalation)
+// -- the same real signal that already triggered a WhatsApp ping, not a
+// second, earlier definition of "needs attention" invented here.
 router.get('/conversations/needs-attention', async (req, res) => {
   const { rows } = await pool.query(
-    `select * from customers where handled_by = 'staff' order by handover_at asc nulls last limit 200`
+    `select 'conversation' as kind, c.id, c.name, c.phone_number, c.channel, c.channel_id,
+            c.handover_reason as reason, c.handover_at as at, null::uuid as order_id, null as order_reference, null as zone_name, null::uuid as callback_task_id
+     from customers c
+     -- Voice channel excluded here on purpose: a voice handover shows up
+     -- below instead, as its own richer 'callback' row (with a real
+     -- context_summary and a claim/resolve workflow this generic
+     -- customers.handled_by flag has none of) -- not both, which would
+     -- show the same caller twice in the one queue staff watch (C1).
+     where c.handled_by = 'staff' and c.channel != 'voice' and ($1::uuid is null or c.branch_id = $1)
+     union all
+     select 'delivery' as kind, o.id, null, null, null, null,
+            'No rider has accepted this delivery' as reason, o.staff_alerted_at as at, o.order_id, ord.reference as order_reference, z.name as zone_name, null::uuid as callback_task_id
+     from delivery_offer o
+     join delivery_zone z on z.id = o.zone_id
+     join "order" ord on ord.id = o.order_id
+     where o.status = 'OPEN' and o.staff_alerted_at is not null and ($1::uuid is null or o.branch_id = $1)
+     union all
+     select 'callback' as kind, c.id, c.name, c.phone_number, c.channel, c.channel_id,
+            ct.reason as reason, ct.created_at as at, null::uuid as order_id, null as order_reference, null as zone_name, ct.id as callback_task_id
+     from callback_task ct
+     join customers c on c.id = ct.customer_id
+     where ct.status = 'open' and ($1::uuid is null or ct.branch_id = $1)
+     order by at asc nulls last
+     limit 200`,
+    [req.branchId]
   );
   res.json(rows);
 });
@@ -704,22 +889,49 @@ router.post('/bot-states/:key/transitions', requireEraAdmin, async (req, res) =>
 // --- Roles and numbers (staff) -----------------------------------------
 
 router.get('/staff', async (req, res) => {
-  const { rows } = await pool.query('select id, name, phone_number, email, role, status, handover_alerts, created_at from staff order by created_at');
+  const { rows } = await pool.query(
+    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.created_at, s.branch_id, b.name as branch_name
+     from staff s left join branch b on b.id = s.branch_id
+     where $1::uuid is null or s.branch_id = $1
+     order by s.created_at`,
+    [req.branchId]
+  );
   res.json(rows);
 });
 
 router.post('/staff', requireEditorApi, async (req, res) => {
   const f = req.body;
   const passwordHash = await hashPassword(f.password);
+  // A branch-locked manager can only ever create staff inside their own
+  // branch -- req.branchId (their own, from scopeToBranch) wins over
+  // whatever branch_id they sent, the same "locking is enforced, not just
+  // defaulted" rule as scopeToBranch itself. An owner/admin (branchId null)
+  // can set any branch, including none.
+  const branchId = req.branchId || f.branch_id || null;
   const { rows } = await pool.query(
-    'insert into staff (name, phone_number, email, password_hash, role) values ($1, $2, $3, $4, $5) returning id, name, phone_number, email, role, status',
-    [f.name, f.phone_number || null, f.email.trim().toLowerCase(), passwordHash, f.role]
+    'insert into staff (name, phone_number, email, password_hash, role, branch_id) values ($1, $2, $3, $4, $5, $6) returning id, name, phone_number, email, role, status, branch_id',
+    [f.name, f.phone_number || null, f.email.trim().toLowerCase(), passwordHash, f.role, branchId]
   );
   res.status(201).json(rows[0]);
 });
 
 router.post('/staff/:id/status', requireEditorApi, async (req, res) => {
   const { rows } = await pool.query('update staff set status = $1 where id = $2 returning id, status', [req.body.status, req.params.id]);
+  res.json(rows[0]);
+});
+
+// Only an owner/admin (branchId null) can move someone between branches --
+// a branch-locked manager reassigning their own staff elsewhere would be
+// exactly the branch-control gap the lock exists to close. Sending
+// branch_id: null clears the lock (that staff member becomes "all
+// branches" -- effectively promotion to an owner-style scope, so this
+// stays owner-only, not just requireEditorApi).
+router.post('/staff/:id/branch', requireEditorApi, async (req, res) => {
+  if (req.branchId) return res.status(403).json({ error: 'Only an owner can reassign a branch.' });
+  const { rows } = await pool.query(
+    `update staff set branch_id = $1 where id = $2 returning id, branch_id`,
+    [req.body.branch_id || null, req.params.id]
+  );
   res.json(rows[0]);
 });
 
@@ -836,20 +1048,112 @@ router.get('/branches', async (req, res) => {
   res.json(rows);
 });
 
+// Powers the dashboard's "compare branches" scope -- deliberately no order
+// rail here (see client/src/pages/AllBranches.jsx), just the side-by-side
+// numbers an owner with several locations genuinely can't get today.
+// "Needs attention" is bucketed by customers.branch_id, which is only ever
+// set under sharing_mode = 'independent' with a resolved branch (see
+// fields.js's customer resolver) -- under 'merged', or before a branch is
+// known, those conversations land in the null bucket below rather than
+// being force-attributed to a branch that didn't actually handle them.
+router.get('/branches/summary', async (req, res) => {
+  const [{ rows: branches }, { rows: orders }, { rows: deliveries }, { rows: attention }, { rows: hourly }] = await Promise.all([
+    pool.query('select id, name from branch order by name'),
+    pool.query(
+      `select branch_id, count(*) as orders_today, coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as revenue_today
+       from "order" where created_at >= date_trunc('day', now()) group by branch_id`
+    ),
+    pool.query(`select branch_id, count(*) as in_progress from delivery where status = 'dispatched' group by branch_id`),
+    pool.query(`select branch_id, count(*) as needs_attention from customers where handled_by = 'staff' group by branch_id`),
+    pool.query(
+      `select branch_id, date_trunc('hour', created_at) as hour, count(*) as count
+       from "order" where created_at >= date_trunc('day', now()) group by branch_id, hour`
+    ),
+  ]);
+  const byBranch = (rows) => new Map(rows.map((r) => [r.branch_id, r]));
+  const ordersByBranch = byBranch(orders);
+  const deliveriesByBranch = byBranch(deliveries);
+  const attentionByBranch = byBranch(attention);
+  // Picking the busiest hour per branch in JS, not SQL -- today's volume
+  // per branch is small enough that a DISTINCT ON/window-function query
+  // isn't worth the extra SQL complexity for a same-day dashboard stat.
+  const busiestByBranch = new Map();
+  for (const row of hourly) {
+    const current = busiestByBranch.get(row.branch_id);
+    if (!current || Number(row.count) > Number(current.count)) busiestByBranch.set(row.branch_id, row);
+  }
+  res.json(
+    branches.map((b) => {
+      const o = ordersByBranch.get(b.id);
+      const busiest = busiestByBranch.get(b.id);
+      return {
+        id: b.id,
+        name: b.name,
+        ordersToday: Number(o?.orders_today || 0),
+        revenueToday: Number(o?.revenue_today || 0),
+        deliveriesInProgress: Number(deliveriesByBranch.get(b.id)?.in_progress || 0),
+        needsAttention: Number(attentionByBranch.get(b.id)?.needs_attention || 0),
+        busiestHour: busiest ? { start: busiest.hour, count: Number(busiest.count) } : null,
+      };
+    })
+  );
+});
+
+// A new branch never starts primary on its own -- the first branch a
+// business ever creates becomes primary automatically (there's nothing
+// else for "the default scope" to mean yet); after that, is_primary only
+// moves when someone explicitly sets it on another branch (see below).
 router.post('/branches', requireEditorApi, async (req, res) => {
   const f = req.body;
+  const { rows: existing } = await pool.query('select count(*) from branch');
+  const isFirst = Number(existing[0].count) === 0;
   const { rows } = await pool.query(
-    'insert into branch (name, address, phone_number, operating_hours) values ($1, $2, $3, $4) returning *',
-    [f.name, f.address, f.phone_number || null, f.operating_hours || null]
+    `insert into branch (name, address, phone_number, operating_hours, area, whatsapp_number, instagram_handle, opening_hours, timezone, status, is_primary)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) returning *`,
+    [
+      f.name,
+      f.address,
+      f.phone_number || null,
+      f.operating_hours || null,
+      f.area || null,
+      f.whatsapp_number || null,
+      f.instagram_handle || null,
+      f.opening_hours || null,
+      f.timezone || 'Africa/Lagos',
+      f.status || 'active',
+      isFirst,
+    ]
   );
   res.status(201).json(rows[0]);
 });
 
 router.post('/branches/:id', requireEditorApi, async (req, res) => {
   const f = req.body;
+  // Exactly one primary branch at a time -- setting this one true clears
+  // every other branch's flag first, in the same request, so there's never
+  // a moment with two (or zero, once one exists) primary branches.
+  if (f.is_primary) {
+    await pool.query('update branch set is_primary = false where id != $1', [req.params.id]);
+  }
   const { rows } = await pool.query(
-    'update branch set name = $1, address = $2, phone_number = $3, operating_hours = $4 where id = $5 returning *',
-    [f.name, f.address, f.phone_number || null, f.operating_hours || null, req.params.id]
+    `update branch set name = $1, address = $2, phone_number = $3, operating_hours = $4,
+       area = $5, whatsapp_number = $6, instagram_handle = $7, opening_hours = $8,
+       timezone = $9, status = $10, is_primary = $11
+     where id = $12 returning *`,
+    [
+      f.name,
+      f.address,
+      f.phone_number || null,
+      f.operating_hours || null,
+      f.area || null,
+      f.whatsapp_number || null,
+      f.instagram_handle || null,
+      f.opening_hours || null,
+      f.timezone || 'Africa/Lagos',
+      f.status || 'active',
+      Boolean(f.is_primary),
+      req.params.id,
+    ]
   );
   res.json(rows[0]);
 });

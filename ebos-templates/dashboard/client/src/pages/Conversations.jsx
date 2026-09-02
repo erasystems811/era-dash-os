@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useStaff, canEdit } from '../StaffContext.jsx';
 
 // Human-readable time-since, for how long a handover has been waiting --
 // staff scanning the attention queue care about "how stale is this", not
@@ -96,12 +97,33 @@ function AllConversations() {
   );
 }
 
+// Two different SHAPES of "needs a person" in one list (spec C1) --
+// a customer handover (routes/api.js's own signal) and an unaccepted
+// delivery offer (engine/delivery-dispatch.js's escalation sweep), tagged
+// by `kind` rather than forced to look like the same thing. A delivery row
+// routes to the order, never /conversations/:id -- there is no
+// conversation to open for an offer nobody accepted.
 function NeedsAttention() {
+  const { staff } = useStaff();
+  const editable = canEdit(staff);
   const [rows, setRows] = useState(null);
 
-  useEffect(() => {
+  function load() {
     api.get('/conversations/needs-attention').then(setRows);
-  }, []);
+  }
+  useEffect(load, []);
+
+  async function cancelOffer(id, e) {
+    e.stopPropagation();
+    await api.post(`/delivery/offers/${id}/cancel`);
+    load();
+  }
+
+  async function resolveCallback(callbackTaskId, e) {
+    e.stopPropagation();
+    await api.post(`/voice/callbacks/${callbackTaskId}/resolve`);
+    load();
+  }
 
   if (!rows) return null;
 
@@ -110,30 +132,47 @@ function NeedsAttention() {
       <table>
         <thead>
           <tr>
-            <th>Customer</th>
+            <th>Who</th>
             <th>Channel</th>
             <th>Reason</th>
             <th>Waiting</th>
+            {editable && <th></th>}
           </tr>
         </thead>
         <tbody>
-          {rows.map((c) => (
-            <tr key={c.id} className="clickable" onClick={() => (window.location.href = `/conversations/${c.id}`)}>
-              <td>
-                <Link to={`/conversations/${c.id}`}>{c.name || c.phone_number || c.channel_id}</Link>
-              </td>
-              <td>
-                <span className={`badge ${c.channel}`}>{c.channel}</span>
-              </td>
-              <td style={{ color: 'var(--text-muted)' }}>{c.handover_reason || '(taken over from the app)'}</td>
-              <td>
-                <span className="badge new">{timeSince(c.handover_at)}</span>
-              </td>
-            </tr>
-          ))}
+          {rows.map((r) => {
+            const isDelivery = r.kind === 'delivery';
+            const href = isDelivery ? `/orders/${r.order_id}` : `/conversations/${r.id}`;
+            return (
+              <tr key={`${r.kind}-${r.id}`} className="clickable" onClick={() => (window.location.href = href)}>
+                <td>
+                  <Link to={href}>{isDelivery ? `Order ${r.order_reference} (${r.zone_name})` : r.name || r.phone_number || r.channel_id}</Link>
+                </td>
+                <td>{isDelivery ? <span className="badge new">delivery</span> : <span className={`badge ${r.channel}`}>{r.channel}</span>}</td>
+                <td style={{ color: 'var(--text-muted)' }}>{r.reason || '(taken over from the app)'}</td>
+                <td>
+                  <span className="badge new">{timeSince(r.at)}</span>
+                </td>
+                {editable && (
+                  <td>
+                    {isDelivery && (
+                      <button className="secondary" onClick={(e) => cancelOffer(r.id, e)}>
+                        Cancel offer
+                      </button>
+                    )}
+                    {r.kind === 'callback' && (
+                      <button className="secondary" onClick={(e) => resolveCallback(r.callback_task_id, e)}>
+                        Mark resolved
+                      </button>
+                    )}
+                  </td>
+                )}
+              </tr>
+            );
+          })}
           {!rows.length && (
             <tr>
-              <td colSpan={4} className="empty-state">Nothing waiting on staff right now.</td>
+              <td colSpan={editable ? 5 : 4} className="empty-state">Nothing waiting on staff right now.</td>
             </tr>
           )}
         </tbody>

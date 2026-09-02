@@ -1,0 +1,545 @@
+import React, { useEffect, useState } from 'react';
+import { api } from '../api.js';
+import { useStaff, canEdit } from '../StaffContext.jsx';
+
+const EMPTY_ZONE = { name: '', aliases: '', customer_fee: '', rider_payout: '', active: true };
+const EMPTY_RIDER = { name: '', phone: '', bank_account_number: '', bank_code: '', account_name: '' };
+
+function naira(amount) {
+  return `₦${Number(amount).toLocaleString()}`;
+}
+
+function Zones() {
+  const { staff } = useStaff();
+  const editable = canEdit(staff);
+  const [zones, setZones] = useState(null);
+  const [form, setForm] = useState(EMPTY_ZONE);
+  const [error, setError] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(EMPTY_ZONE);
+  // The zone editor shows one field, "delivery fee to this area" -- it
+  // writes the same number to both customer_fee and rider_payout (spec
+  // B5: the rider is paid the full fee the customer paid, no margin taken
+  // by default). Kept as two columns in the database so a restaurant can
+  // later subsidise a far zone or take a small margin as a pure settings
+  // change -- not exposed as two fields here yet since no business has
+  // asked to split them.
+  function feeToPayload(fee) {
+    return { customer_fee: fee, rider_payout: fee };
+  }
+
+  function load() {
+    api.get('/delivery/zones').then(setZones);
+  }
+  useEffect(load, []);
+
+  async function add(e) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await api.post('/delivery/zones', {
+        name: form.name,
+        aliases: form.aliases ? form.aliases.split(',').map((s) => s.trim()).filter(Boolean) : [],
+        ...feeToPayload(form.customer_fee),
+      });
+      setForm(EMPTY_ZONE);
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  function startEdit(z) {
+    setEditingId(z.id);
+    setEditForm({ name: z.name, aliases: (z.aliases || []).join(', '), customer_fee: z.customer_fee, rider_payout: z.rider_payout, active: z.active });
+  }
+
+  async function saveEdit(id) {
+    await api.post(`/delivery/zones/${id}`, {
+      name: editForm.name,
+      aliases: editForm.aliases ? editForm.aliases.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      ...feeToPayload(editForm.customer_fee),
+      active: editForm.active,
+    });
+    setEditingId(null);
+    load();
+  }
+
+  async function toggleActive(z) {
+    await api.post(`/delivery/zones/${z.id}`, { name: z.name, aliases: z.aliases, customer_fee: z.customer_fee, rider_payout: z.rider_payout, active: !z.active });
+    load();
+  }
+
+  async function remove(id) {
+    await api.delete(`/delivery/zones/${id}`);
+    load();
+  }
+
+  if (!zones) return null;
+
+  return (
+    <div>
+      <div className="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Also known as</th>
+              <th>Delivery fee</th>
+              <th>Status</th>
+              {editable && <th></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {zones.map((z) =>
+              editingId === z.id ? (
+                <tr key={z.id}>
+                  <td colSpan={editable ? 5 : 4}>
+                    <div className="form-row">
+                      <div className="field">
+                        <label>Area name</label>
+                        <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+                      </div>
+                      <div className="field">
+                        <label>Delivery fee to this area</label>
+                        <input type="number" min="0" value={editForm.customer_fee} onChange={(e) => setEditForm({ ...editForm, customer_fee: e.target.value })} />
+                      </div>
+                    </div>
+                    <div className="field">
+                      <label>Also known as (comma separated)</label>
+                      <input value={editForm.aliases} onChange={(e) => setEditForm({ ...editForm, aliases: e.target.value })} placeholder="e.g. Wuse, Wuse Zone 2" />
+                    </div>
+                    <button onClick={() => saveEdit(z.id)} style={{ marginRight: 8 }}>
+                      Save
+                    </button>
+                    <button className="secondary" onClick={() => setEditingId(null)}>
+                      Cancel
+                    </button>
+                  </td>
+                </tr>
+              ) : (
+                <tr key={z.id}>
+                  <td>{z.name}</td>
+                  <td style={{ color: 'var(--text-muted)' }}>{(z.aliases || []).join(', ')}</td>
+                  <td>{naira(z.customer_fee)}</td>
+                  <td>
+                    <span className={`badge ${z.active ? 'active' : 'disabled'}`}>{z.active ? 'active' : 'inactive'}</span>
+                  </td>
+                  {editable && (
+                    <td>
+                      <button className="secondary" onClick={() => startEdit(z)} style={{ marginRight: 8 }}>
+                        Edit
+                      </button>
+                      <button className="secondary" onClick={() => toggleActive(z)} style={{ marginRight: 8 }}>
+                        {z.active ? 'Deactivate' : 'Activate'}
+                      </button>
+                      <button className="danger" onClick={() => remove(z.id)}>
+                        Delete
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              )
+            )}
+            {!zones.length && (
+              <tr>
+                <td colSpan={editable ? 5 : 4} className="empty-state">
+                  No delivery areas yet -- an order can't be dispatched to a rider until at least one exists.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {editable && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Add delivery area</h3>
+          {error && <div className="error-banner">{error}</div>}
+          <form onSubmit={add}>
+            <div className="form-row">
+              <div className="field">
+                <label>Area name</label>
+                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Gwarimpa" required />
+              </div>
+              <div className="field">
+                <label>Delivery fee to this area</label>
+                <input type="number" min="0" value={form.customer_fee} onChange={(e) => setForm({ ...form, customer_fee: e.target.value })} required />
+              </div>
+            </div>
+            <div className="field">
+              <label>Also known as (comma separated)</label>
+              <input value={form.aliases} onChange={(e) => setForm({ ...form, aliases: e.target.value })} placeholder="Other names customers use for this area" />
+            </div>
+            <button type="submit">Add area</button>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Riders() {
+  const { staff } = useStaff();
+  const editable = canEdit(staff);
+  const [riders, setRiders] = useState(null);
+  const [form, setForm] = useState(EMPTY_RIDER);
+  const [error, setError] = useState(null);
+
+  function load() {
+    api.get('/delivery/riders').then(setRiders);
+  }
+  useEffect(load, []);
+
+  async function add(e) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await api.post('/delivery/riders', form);
+      setForm(EMPTY_RIDER);
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function toggleStatus(r) {
+    await api.post(`/delivery/riders/${r.id}/status`, { status: r.status === 'suspended' ? 'off_duty' : 'suspended' });
+    load();
+  }
+
+  async function remove(id) {
+    await api.delete(`/delivery/riders/${id}`);
+    load();
+  }
+
+  if (!riders) return null;
+
+  return (
+    <div>
+      <div className="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Phone</th>
+              <th>Bank details</th>
+              <th>Status</th>
+              {editable && <th></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {riders.map((r) => (
+              <tr key={r.id}>
+                <td>{r.name}</td>
+                <td>{r.phone}</td>
+                <td>{r.hasBankDetails ? 'On file' : 'Not set'}</td>
+                <td>
+                  <span className={`badge ${r.status === 'on_duty' ? 'active' : r.status === 'suspended' ? 'disabled' : ''}`}>{r.status}</span>
+                </td>
+                {editable && (
+                  <td>
+                    <button className="secondary" onClick={() => toggleStatus(r)} style={{ marginRight: 8 }}>
+                      {r.status === 'suspended' ? 'Reinstate' : 'Suspend'}
+                    </button>
+                    <button className="danger" onClick={() => remove(r.id)}>
+                      Delete
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+            {!riders.length && (
+              <tr>
+                <td colSpan={editable ? 5 : 4} className="empty-state">
+                  No riders added yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {editable && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Add rider</h3>
+          <p className="hint">
+            They sign in to the rider app themselves with this phone number. Bank details are needed before they can be paid automatically --
+            optional for now if you're paying manually.
+          </p>
+          {error && <div className="error-banner">{error}</div>}
+          <form onSubmit={add}>
+            <div className="form-row">
+              <div className="field">
+                <label>Name</label>
+                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+              </div>
+              <div className="field">
+                <label>Phone number</label>
+                <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} required />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="field">
+                <label>Bank account number</label>
+                <input value={form.bank_account_number} onChange={(e) => setForm({ ...form, bank_account_number: e.target.value })} />
+              </div>
+              <div className="field">
+                <label>Account name</label>
+                <input value={form.account_name} onChange={(e) => setForm({ ...form, account_name: e.target.value })} />
+              </div>
+            </div>
+            <button type="submit">Add rider</button>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Loaded once and reused -- a second <script> tag for the same Maps API
+// would redefine window.google and throw. mapsScriptPromise is module-level
+// so remounting this tab (switching away and back) never re-fetches it.
+let mapsScriptPromise = null;
+function loadMapsScript(apiKey) {
+  if (window.google?.maps) return Promise.resolve();
+  if (!mapsScriptPromise) {
+    mapsScriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}`;
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => {
+        mapsScriptPromise = null; // allow a retry on the next mount
+        reject(new Error('Could not load Google Maps.'));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return mapsScriptPromise;
+}
+
+// Every on-duty rider with a real position on file -- riders who haven't
+// reported one yet (just signed up, or genuinely off duty) are left off
+// entirely rather than plotted at some meaningless default point.
+function LiveMap() {
+  const mapDivRef = React.useRef(null);
+  const mapRef = React.useRef(null);
+  const markersRef = React.useRef(new Map());
+  const [error, setError] = useState(null);
+  const [riderCount, setRiderCount] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let poll;
+
+    async function init() {
+      try {
+        const { apiKey } = await api.get('/delivery/maps-key');
+        await loadMapsScript(apiKey);
+        if (cancelled || !mapDivRef.current) return;
+        mapRef.current = new window.google.maps.Map(mapDivRef.current, {
+          center: { lat: 9.0765, lng: 7.3986 }, // Abuja -- a reasonable default until real riders place it themselves
+          zoom: 12,
+        });
+        await refresh();
+        poll = setInterval(refresh, 15_000);
+      } catch (err) {
+        if (!cancelled) setError(err.message);
+      }
+    }
+
+    async function refresh() {
+      const riders = await api.get('/delivery/riders');
+      const withPosition = riders.filter((r) => r.status === 'on_duty' && r.last_lat && r.last_lng);
+      setRiderCount(withPosition.length);
+      const seen = new Set();
+      for (const r of withPosition) {
+        seen.add(r.id);
+        const position = { lat: Number(r.last_lat), lng: Number(r.last_lng) };
+        const existing = markersRef.current.get(r.id);
+        if (existing) {
+          existing.setPosition(position);
+        } else {
+          markersRef.current.set(
+            r.id,
+            new window.google.maps.Marker({ map: mapRef.current, position, title: r.name })
+          );
+        }
+      }
+      // Drop the marker for anyone no longer on duty / no longer reporting.
+      for (const [id, marker] of markersRef.current) {
+        if (!seen.has(id)) {
+          marker.setMap(null);
+          markersRef.current.delete(id);
+        }
+      }
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+      clearInterval(poll);
+    };
+  }, []);
+
+  if (error) return <div className="card error-banner">{error}</div>;
+
+  return (
+    <div className="card">
+      <p className="hint" style={{ marginTop: 0 }}>
+        {riderCount == null ? 'Loading...' : `${riderCount} on-duty rider${riderCount === 1 ? '' : 's'} reporting a position.`}
+      </p>
+      <div ref={mapDivRef} style={{ height: 480, borderRadius: 10 }} />
+    </div>
+  );
+}
+
+const PAYOUT_STATUS_LABEL = { PENDING: 'Pending', SENT: 'Sent', FAILED: 'Failed', PAID_MANUALLY: 'Paid' };
+
+// payout_mode/provider/keys are the restaurant's own to set, once own_riders
+// mode is already on (ERA's call) -- same trust level as the business
+// already self-managing bank_name/bank_account_number in Settings today.
+// Manual is the default and stays perfectly usable forever; automatic is an
+// optimisation on top, never a requirement to use this feature at all.
+// Automatic payout is switched off at the code level for now (not just this
+// UI) -- routes/api.js's /delivery-config/payout refuses payout_mode:
+// 'automatic' outright. This is a plain status notice, not a working
+// toggle, until that's deliberately lifted.
+function PayoutSettings() {
+  const [config, setConfig] = useState(null);
+
+  useEffect(() => {
+    api.get('/delivery-config').then(setConfig);
+  }, []);
+
+  if (!config) return null;
+
+  return (
+    <div className="card">
+      <h3 style={{ marginTop: 0 }}>Payout method</h3>
+      <p className="hint" style={{ marginBottom: 0 }}>
+        Manual for now -- every completed delivery lands on the list below, and you mark it paid yourself once you've sent the money.
+        Automatic bank payouts aren't turned on yet.
+      </p>
+    </div>
+  );
+}
+
+function Payouts() {
+  const { staff } = useStaff();
+  const editable = canEdit(staff);
+  const [payouts, setPayouts] = useState(null);
+  const [error, setError] = useState(null);
+
+  function load() {
+    api.get('/delivery/payouts').then(setPayouts);
+  }
+  useEffect(load, []);
+
+  async function markPaid(id) {
+    setError(null);
+    try {
+      await api.post(`/delivery/payouts/${id}/mark-paid`);
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  if (!payouts) return null;
+
+  const totalOwed = payouts.filter((p) => p.status === 'PENDING' || p.status === 'FAILED').reduce((sum, p) => sum + Number(p.amount), 0);
+
+  return (
+    <div>
+      <PayoutSettings />
+      {totalOwed > 0 && (
+        <div className="card" style={{ maxWidth: 320 }}>
+          <div className="label" style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.04em' }}>
+            OUTSTANDING TO RIDERS
+          </div>
+          <div style={{ fontSize: 24, fontWeight: 800 }}>{naira(totalOwed)}</div>
+        </div>
+      )}
+      <div className="card">
+        {error && <div className="error-banner">{error}</div>}
+        <table>
+          <thead>
+            <tr>
+              <th>Order</th>
+              <th>Rider</th>
+              <th>Amount</th>
+              <th>Status</th>
+              {editable && <th></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {payouts.map((p) => (
+              <tr key={p.id}>
+                <td>{p.order_reference}</td>
+                <td>{p.rider_name}</td>
+                <td>{naira(p.amount)}</td>
+                <td>
+                  <span className={`badge ${p.status === 'PAID_MANUALLY' || p.status === 'SENT' ? 'active' : p.status === 'FAILED' ? 'disabled' : 'new'}`}>
+                    {PAYOUT_STATUS_LABEL[p.status] || p.status}
+                  </span>
+                  {p.error && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{p.error}</div>}
+                </td>
+                {editable && (
+                  <td>
+                    {(p.status === 'PENDING' || p.status === 'FAILED') && (
+                      <button className="secondary" onClick={() => markPaid(p.id)}>
+                        Mark paid
+                      </button>
+                    )}
+                  </td>
+                )}
+              </tr>
+            ))}
+            {!payouts.length && (
+              <tr>
+                <td colSpan={editable ? 5 : 4} className="empty-state">
+                  No payouts yet -- these appear the moment a rider accepts a delivery.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+export default function Delivery() {
+  const [tab, setTab] = useState('zones');
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Delivery</h1>
+          <p className="subtitle">Your own riders, dispatched automatically when an order is marked ready.</p>
+        </div>
+      </div>
+      <div className="card" style={{ display: 'flex', gap: 8, padding: 6, width: 'fit-content' }}>
+        <button className={tab === 'zones' ? '' : 'secondary'} onClick={() => setTab('zones')}>
+          Delivery areas
+        </button>
+        <button className={tab === 'riders' ? '' : 'secondary'} onClick={() => setTab('riders')}>
+          Riders
+        </button>
+        <button className={tab === 'map' ? '' : 'secondary'} onClick={() => setTab('map')}>
+          Live map
+        </button>
+        <button className={tab === 'payouts' ? '' : 'secondary'} onClick={() => setTab('payouts')}>
+          Payouts
+        </button>
+      </div>
+      {tab === 'zones' && <Zones />}
+      {tab === 'riders' && <Riders />}
+      {tab === 'map' && <LiveMap />}
+      {tab === 'payouts' && <Payouts />}
+    </div>
+  );
+}

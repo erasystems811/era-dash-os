@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useScope, scopeQuery } from '../ScopeContext.jsx';
+import AllBranches from './AllBranches.jsx';
 
 const COLUMNS = [
   { key: 'new', label: 'New', hint: 'oldest first' },
@@ -40,13 +42,23 @@ function busiestHourText(hour) {
 }
 
 export default function Orders() {
+  const { scope } = useScope();
   const [orders, setOrders] = useState(null);
   const [today, setToday] = useState(null);
 
   useEffect(() => {
-    api.get('/orders').then(setOrders);
-    api.get('/orders/stats/today').then(setToday);
-  }, []);
+    if (scope === 'all') return;
+    setOrders(null);
+    setToday(null);
+    const q = scopeQuery(scope);
+    api.get(`/orders${q}`).then(setOrders);
+    api.get(`/orders/stats/today${q}`).then(setToday);
+  }, [scope]);
+
+  // Changing scope changes the page, not just filters it -- comparing
+  // branches is a different kind of view (no order rail, see AllBranches),
+  // not a filtered version of this one.
+  if (scope === 'all') return <AllBranches />;
 
   if (!orders) return null;
 
