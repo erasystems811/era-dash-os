@@ -142,6 +142,15 @@ create table if not exists rider (
   pin_hash text,
   pin_failed_attempts integer not null default 0,
   pin_locked_until timestamptz,
+  -- The browser's real PushSubscription object (endpoint + keys.p256dh/
+  -- auth), saved the moment the rider PWA registers its service worker and
+  -- subscribes -- see engine/push-notify.js. Without this, an offer only
+  -- ever reaches a rider whose app happens to be open on screen right now
+  -- (engine/offer-bus.js's in-page SSE alarm) -- real push is what actually
+  -- rings/vibrates the phone with the screen off or the app backgrounded,
+  -- which is the whole point of an "alarm". Null until the rider's app has
+  -- subscribed at least once.
+  push_subscription jsonb,
   last_lat numeric,
   last_lng numeric,
   last_seen_at timestamptz,

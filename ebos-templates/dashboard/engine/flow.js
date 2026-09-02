@@ -1489,14 +1489,18 @@ export async function completePayment(orderId) {
   const customer = custRows[0];
 
   await transitionOrder(order, 'payment_acceptance');
-  // The kanban `status` staff actually watch only reaches 'confirmation'
-  // here, once money is really in -- never at the customer's "yes" (see
-  // handleConfirmOrder, which sets confirmed_at instead, an internal marker
-  // only). Fulfilment progress past this (preparation, ready, delivery,
-  // in_transit, completed) is staff's own call as they physically
-  // prepare/dispatch it, not something the bot decides -- payment
-  // succeeding is not the same fact as food being ready.
-  await pool.query(`update "order" set status = 'confirmation' where id = $1`, [order.id]);
+  // This function IS "payment confirmed" -- whether that's Paystack's own
+  // webhook (cryptographically verified, nothing left for a person to
+  // check) or staff's own "Confirm payment received" click after looking
+  // at a submitted proof. Either way, the kanban `status` jumps straight
+  // to 'preparation' here, never sitting in 'confirmation' a moment
+  // longer than it takes to actually confirm it (Chidera's own words:
+  // "when receipt is confirmed immediately take them to preparing").
+  // Fulfilment progress past this (ready, in_transit, completed) is
+  // staff's own call as they physically prepare/dispatch it, not
+  // something the bot decides -- payment succeeding is not the same fact
+  // as food being ready.
+  await pool.query(`update "order" set status = 'preparation' where id = $1`, [order.id]);
   await createReceipt(order);
   await transitionOrder(order, 'fulfilment');
 
@@ -1979,7 +1983,13 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
 
   try {
     const dataUrl = channel === 'instagram' ? await downloadInstagramMedia(mediaId) : await downloadWhatsAppMedia(mediaId);
-    await pool.query(`update "order" set payment_proof_url = $1, payment_status = 'proof_submitted' where id = $2`, [dataUrl, order.id]);
+    // 'confirmation' means exactly this moment -- proof is in, pending a
+    // real person's sign-off (Chidera's own words: "customer has sent
+    // proof of payment and is pending confirmation") -- not "already
+    // confirmed." completePayment() is what moves it past this, straight
+    // to 'preparation', the instant a person (or Paystack's own webhook)
+    // actually confirms it.
+    await pool.query(`update "order" set payment_proof_url = $1, payment_status = 'proof_submitted', status = 'confirmation' where id = $2`, [dataUrl, order.id]);
     await reply(customer, `Noted, I will confirm the payment and get back to you shortly.`, 'payment_proof_received');
     // Staff confirming payment needs both documents in front of them at
     // once -- the invoice (what was ordered/owed) and the receipt they just

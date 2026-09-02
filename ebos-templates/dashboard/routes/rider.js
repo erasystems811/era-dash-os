@@ -65,6 +65,28 @@ router.post('/duty', requireRider, async (req, res) => {
   res.json(rows[0]);
 });
 
+// The rider PWA needs this to call pushManager.subscribe({applicationServerKey})
+// -- public by design (it's a public key, meant to be handed to a
+// browser), but still behind requireRider since there's no reason a
+// signed-out visitor needs it either. Empty string (not an error) when
+// this deployment hasn't got VAPID keys configured yet -- the client
+// treats that as "push isn't available here", same "off is genuinely
+// inert" idiom as every other optional capability in this codebase.
+router.get('/push-public-key', requireRider, (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || '' });
+});
+
+// Saved every time the rider PWA (re)subscribes -- overwriting whatever
+// was there before is correct, not a merge: a subscription is tied to one
+// specific browser/device, and a rider re-subscribing (a fresh install, a
+// cleared cache) always means the OLD one is dead anyway.
+router.post('/push-subscribe', requireRider, async (req, res) => {
+  const subscription = req.body?.subscription;
+  if (!subscription?.endpoint) return res.status(400).json({ error: 'A real push subscription is required.' });
+  await pool.query('update rider set push_subscription = $1 where id = $2', [JSON.stringify(subscription), req.session.rider.id]);
+  res.json({ ok: true });
+});
+
 // Interval is entirely the rider-pwa client's own choice (spec B6: 15s
 // during an active delivery, 60s on-duty idle, none off-duty) -- this
 // endpoint just records whatever it's sent, it has no timer of its own.
@@ -247,13 +269,11 @@ router.post('/assignments/:id/picked-up', requireRider, async (req, res) => {
     if (existing === null) return; // loadOwnAssignment already responded
     return res.status(409).json({ error: `Can't mark picked up from status "${existing.status}".` });
   }
-  // Staff's own kanban board advances itself here -- the system already
-  // knows the rider has the order in hand, so there's nothing for a person
-  // to click (Chidera's call: "when rider pick up let be on a stage called
-  // in transit"). Only moves an order actually still sitting at 'delivery'
-  // -- never overwrites a staff override or a state this rider action
-  // doesn't actually explain.
-  await pool.query(`update "order" set status = 'in_transit' where id = $1 and status = 'delivery'`, [rows[0].order_id]);
+  // Deliberately does NOT move the staff-facing order.status here --
+  // Chidera's call: staff mark an order "in delivery" themselves, the
+  // moment they hand it to the rider in person, not automatically off the
+  // rider's own app action (OrderDetail.jsx/Orders.jsx's "Mark in
+  // delivery" button on the Ready stage).
   res.json(rows[0]);
 });
 

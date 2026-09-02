@@ -683,12 +683,23 @@ router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
   if (status === 'completed' || status === 'cancelled') {
     await pool.query('update "order" set engine_state = $1 where id = $2', [status, req.params.id]);
   }
-  // "Order reaches READY" is the delivery add-on's own dispatch trigger
-  // (own_riders mode) -- a no-op for pickup orders, non-delivery-add-on
-  // businesses, and any order that's already been dispatched once (see
-  // maybeDispatchOwnRiders's own idempotency check).
+  // One "Mark as ready" click on the Preparation stage, same button
+  // regardless of fulfilment_type (Chidera's call) -- everything below
+  // branches automatically off the order's own real fulfilment_type
+  // instead of needing two different buttons for the same real-world "the
+  // kitchen just finished" moment.
   if (status === 'ready') {
+    // Own_riders dispatch (own_riders mode only) -- a no-op for pickup
+    // orders, non-delivery-add-on businesses, and any order already
+    // dispatched once (maybeDispatchOwnRiders's own idempotency check).
     await maybeDispatchOwnRiders(req.params.id);
+    // The pickup-side equivalent of that same click -- the customer needs
+    // to know their food is ready to collect, automatically, not via a
+    // second manual button for the same fact.
+    const { rows: orderRows } = await pool.query('select fulfilment_type from "order" where id = $1', [req.params.id]);
+    if (orderRows[0]?.fulfilment_type === 'pickup') {
+      await notifyReadyForPickup(req.params.id).catch((err) => console.error('notifyReadyForPickup failed:', err.message));
+    }
   }
   await logActivity(req, 'order_status_changed', { entityType: 'order', entityId: req.params.id, detail: { status } });
   res.json({ ok: true });

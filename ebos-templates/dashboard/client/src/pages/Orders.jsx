@@ -4,32 +4,7 @@ import { api } from '../api.js';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
 import AllBranches from './AllBranches.jsx';
 import { useStaff, canEdit } from '../StaffContext.jsx';
-
-// No 'new' column, deliberately (Chidera's call) -- an order still being
-// built through chat, before payment, is work in progress on the
-// Conversations tab, not something this board needs to show. This board
-// starts the moment there's something to act on: paid and needing a look.
-// 'delivery' and 'in_transit' only ever apply to delivery orders (a
-// pickup order goes straight from 'ready' to 'completed') -- both columns
-// just sit empty for a pickup-only business, same as any other column
-// with nothing in it yet.
-const COLUMNS = [
-  { key: 'confirmation', label: 'Confirmation', hint: 'needs a look' },
-  { key: 'preparation', label: 'Preparation', hint: 'kitchen is on it' },
-  { key: 'ready', label: 'Ready', hint: 'awaiting pickup/rider' },
-  { key: 'delivery', label: 'Delivery', hint: 'waiting for rider' },
-  { key: 'in_transit', label: 'In transit', hint: 'rider has it' },
-  { key: 'completed', label: 'Completed', hint: 'last 24h' },
-];
-
-// Completed orders drop off the board a day after they're done -- nothing
-// is deleted (the data's still there for everything else), this is purely
-// "don't let a growing pile of finished orders clutter what staff actually
-// need to act on" (Chidera's call: "completed only lasts a day").
-const COMPLETED_VISIBLE_MS = 24 * 60 * 60 * 1000;
-function isRecentlyCompleted(order) {
-  return Date.now() - new Date(order.updated_at).getTime() < COMPLETED_VISIBLE_MS;
-}
+import { nextStageFor, ORDER_COLUMNS as COLUMNS, isRecentlyCompleted } from '../orderStages.js';
 
 // Purely a visual affordance -- a long unattended wait means something
 // different at different stages, but a single flat threshold is the
@@ -229,6 +204,25 @@ export default function Orders() {
     api.get(`/orders/stats/today${q}`).then(setToday);
   }
 
+  // e.preventDefault/stopPropagation on every one of these -- each docket
+  // card is itself a <Link> to the order's detail page, and these buttons
+  // live right on the card (Chidera's call: "i want the button at the
+  // surface not when kanban is opened"), so a click on the button must
+  // never also trigger the card's own navigation.
+  async function advanceStatus(e, orderId, next) {
+    e.preventDefault();
+    e.stopPropagation();
+    await api.post(`/orders/${orderId}/status`, { status: next });
+    load();
+  }
+
+  async function confirmPayment(e, orderId) {
+    e.preventDefault();
+    e.stopPropagation();
+    await api.post(`/orders/${orderId}/confirm-payment`);
+    load();
+  }
+
   useEffect(() => {
     if (scope === 'all') return;
     setOrders(null);
@@ -342,6 +336,19 @@ export default function Orders() {
                         <span className="total mono">NGN {Number(o.total).toLocaleString()}</span>
                         <span className={`badge ${o.payment_status}`}>{o.payment_status}</span>
                       </div>
+                      {canEdit(staff) &&
+                        (o.status === 'confirmation'
+                          ? o.payment_status !== 'confirmed' &&
+                            o.payment_status !== 'accepted' && (
+                              <button style={{ marginTop: 8, width: '100%' }} onClick={(e) => confirmPayment(e, o.id)}>
+                                Confirm payment received
+                              </button>
+                            )
+                          : nextStageFor(o) && (
+                              <button style={{ marginTop: 8, width: '100%' }} onClick={(e) => advanceStatus(e, o.id, nextStageFor(o).next)}>
+                                {nextStageFor(o).label}
+                              </button>
+                            ))}
                     </Link>
                   );
                 })}

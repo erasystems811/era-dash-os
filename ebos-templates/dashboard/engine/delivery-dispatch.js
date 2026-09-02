@@ -9,6 +9,7 @@ import { handoverRecipients } from './flow.js';
 import { getDeliveryConfig } from './delivery-zones.js';
 import { resolveSource } from './delivery.js';
 import { offerBus } from './offer-bus.js';
+import { pushOfferToOnDutyRiders } from './push-notify.js';
 
 // Called from routes/api.js's /orders/:id/status the moment staff marks an
 // order 'ready' -- "order reaches READY" is the addon spec's own trigger
@@ -68,6 +69,12 @@ function broadcastOffer(offer, details, { urgent = false } = {}) {
     reference: details.reference,
     urgent,
   });
+  // Fire and forget -- a push provider hiccup must never delay or fail the
+  // dispatch itself. The SSE alarm above already reached anyone with the
+  // app open; this is what reaches everyone else (Chidera's report: "there
+  // wasnt any actual ring on my phone" -- the in-page alarm alone can't
+  // ring a locked/backgrounded phone, only a real OS push can).
+  pushOfferToOnDutyRiders(offer, details).catch((err) => console.error('pushOfferToOnDutyRiders failed:', err.message));
 }
 
 // Run on an interval from server.js (see the addon's B4: no acceptance

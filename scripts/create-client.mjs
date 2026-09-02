@@ -145,6 +145,13 @@ async function main() {
     PUBLIC_URL: `https://${subdomain}`,
     OPENAI_API_KEY: secrets.OPENAI_API_KEY,
     ANTHROPIC_API_KEY: secrets.ANTHROPIC_API_KEY,
+    // ERA-wide, shared across every EBOS deployment (engine/push-notify.js)
+    // -- not per-client the way PAYMENT_ENCRYPTION_KEY is generated below.
+    // Blank (harmless) on a control server that hasn't set these up yet --
+    // push just stays unavailable, same "off is genuinely inert" idiom as
+    // any other optional capability.
+    VAPID_PUBLIC_KEY: secrets.VAPID_PUBLIC_KEY || '',
+    VAPID_PRIVATE_KEY: secrets.VAPID_PRIVATE_KEY || '',
     POSTGRES_PASSWORD: randomPassword(),
     AUTHENTICATOR_PASSWORD: randomPassword(),
     PGRST_JWT_SECRET: randomSecret(32),

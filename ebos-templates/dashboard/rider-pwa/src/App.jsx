@@ -1,6 +1,45 @@
 import React, { useEffect, useState } from 'react';
 import { api } from './api.js';
 
+// The Push API needs the VAPID public key as raw bytes, not the base64url
+// string the server hands back -- this is the standard conversion every
+// Web Push tutorial uses, no library needed for it.
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+// Registers the service worker and subscribes to real push (App.jsx's own
+// in-page alarm only ever fires while this tab is open -- this is what
+// actually rings/vibrates the phone with the screen off or the app
+// backgrounded, Chidera's report: "there wasnt any actual ring on my
+// phone"). Best-effort and silent on failure -- an old browser with no
+// Push API support, a denied notification permission, or a deployment
+// with no VAPID keys configured yet all just mean "no push this time",
+// never a broken sign-in/duty-toggle over it.
+async function subscribeToPush() {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    const { publicKey } = await api.get('/push-public-key');
+    if (!publicKey) return; // this deployment hasn't got VAPID keys set up yet
+    const registration = await navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`);
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') return;
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+    }
+    await api.post('/push-subscribe', { subscription: subscription.toJSON() });
+  } catch (err) {
+    console.error('Push subscription failed:', err);
+  }
+}
+
 // Posts the rider's own position on whatever interval the caller picks --
 // 15s during an active delivery, 60s on-duty idle, and simply not called
 // at all off duty (spec B3/B6: the rider pays for his own data and can't
@@ -315,6 +354,13 @@ function Duty({ rider, onLoggedOut }) {
   const [active, setActive] = useState(null);
 
   const onDuty = status === 'on_duty';
+
+  // Going on duty is the natural moment to make sure a real push
+  // subscription exists -- the same moment the rider is telling the app
+  // "I'm available, offers can come in now."
+  useEffect(() => {
+    if (onDuty) subscribeToPush();
+  }, [onDuty]);
 
   // 60s while on duty and idle (ActiveDelivery's own 15s takes over once a
   // job is accepted, see there) -- none at all off duty. This is what

@@ -2,44 +2,12 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
-
-// One explicit action per stage, not a generic status dropdown (Chidera's
-// call) -- staff should never have to think about which of six raw status
-// words is "the next one," just press the one obviously-right button.
-// 'preparation' is the only stage the mark-as-ready action appears on --
-// that's the button that calls a rider (routes/api.js's /orders/:id/status
-// already triggers own_riders dispatch when status becomes 'ready',
-// unchanged here, just given a real button instead of a dropdown option).
-// 'ready' branches by fulfilment_type -- a pickup order's handoff button
-// ends its journey at 'completed' directly; a delivery order's own handoff
-// button just marks it as out with a rider, since 'delivery' -> 'in_transit'
-// -> 'completed' advance themselves automatically from there (routes/
-// rider.js, the moment the rider actually marks picked-up/delivers) for an
-// own_riders order. The buttons on 'delivery'/'in_transit' below only
-// really matter for a delivery arranged outside own_riders (manual/
-// Chowdeck), where nothing else is watching for those events.
-function nextStageFor(order) {
-  switch (order.status) {
-    case 'confirmation':
-      return { label: 'Start preparing', next: 'preparation' };
-    case 'preparation':
-      return { label: 'Mark as ready', next: 'ready' };
-    case 'ready':
-      return order.fulfilment_type === 'pickup' ? { label: 'Picked up', next: 'completed' } : { label: 'Send for delivery', next: 'delivery' };
-    case 'delivery':
-      return { label: 'Mark in transit', next: 'in_transit' };
-    case 'in_transit':
-      return { label: 'Mark completed', next: 'completed' };
-    default:
-      return null;
-  }
-}
+import { nextStageFor } from '../orderStages.js';
 
 export default function OrderDetail() {
   const { id } = useParams();
   const { staff } = useStaff();
   const [data, setData] = useState(null);
-  const [readySent, setReadySent] = useState(false);
 
   function load() {
     api.get(`/orders/${id}`).then(setData);
@@ -83,11 +51,6 @@ export default function OrderDetail() {
     load();
   }
 
-  async function notifyReady() {
-    await api.post(`/orders/${id}/notify-ready`);
-    setReadySent(true);
-  }
-
   return (
     <div>
       <div className="page-header">
@@ -107,18 +70,10 @@ export default function OrderDetail() {
         <p>
           {customer?.name || customer?.phone_number} &middot; {customer?.phone_number}
         </p>
-        <p>
+        <p style={{ marginBottom: 0 }}>
           Fulfilment: <strong>{order.fulfilment_type}</strong>
           {order.fulfilment_type === 'delivery' && customer?.address ? ` — ${customer.address}` : ''}
         </p>
-        {order.fulfilment_type === 'pickup' &&
-          order.engine_state === 'fulfilment' &&
-          !['completed', 'cancelled'].includes(order.status) &&
-          canEdit(staff) && (
-            <button onClick={notifyReady} disabled={readySent}>
-              {readySent ? 'Customer notified' : 'Notify ready for pickup'}
-            </button>
-          )}
       </div>
 
       <div className="card">
