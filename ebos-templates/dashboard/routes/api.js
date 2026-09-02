@@ -21,7 +21,7 @@ import {
   logActivity,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, sendOutreachMessage } from '../engine/flow.js';
 import { resolveZoneForAddress, getDeliveryConfig } from '../engine/delivery-zones.js';
 import { createDelivery } from '../engine/delivery.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
@@ -968,6 +968,25 @@ router.get('/conversations/:id', async (req, res) => {
   if (!customerRows[0]) return res.status(404).json({ error: 'Not found.' });
   const { rows: messages } = await pool.query('select * from message where customer_id = $1 order by created_at', [req.params.id]);
   res.json({ customer: customerRows[0], messages });
+});
+
+// Staff messaging a customer FIRST, not replying -- e.g. "we have your
+// order ready" sent proactively rather than triggered by an inbound
+// message. Goes out as the pre-approved "business_outreach" template (see
+// scripts/lib/whatsapp-templates.mjs), so it works even for a customer who
+// has never messaged this number, or whose 24h window has closed.
+router.post('/conversations/outreach', async (req, res) => {
+  const phone = (req.body?.phone_number || '').trim();
+  const message = (req.body?.message || '').trim();
+  if (!phone) return res.status(400).json({ error: 'A phone number is required.' });
+  if (!message) return res.status(400).json({ error: 'A message is required.' });
+  try {
+    const customer = await sendOutreachMessage({ phoneNumber: phone, message, branchId: req.branchId, staffId: req.staff.id });
+    await logActivity(req, 'message_sent', { entityType: 'conversation', entityId: customer.id });
+    res.json({ ok: true, conversation_id: customer.id });
+  } catch (err) {
+    res.status(502).json({ error: `Could not send: ${err.message}` });
+  }
 });
 
 router.post('/conversations/:id/send', async (req, res) => {

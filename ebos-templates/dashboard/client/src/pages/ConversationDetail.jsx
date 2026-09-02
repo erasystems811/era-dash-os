@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 
@@ -10,11 +10,21 @@ export default function ConversationDetail() {
   const [sendError, setSendError] = useState(null);
   const [takingOver, setTakingOver] = useState(false);
   const [returningToBot, setReturningToBot] = useState(false);
+  const bottomRef = useRef(null);
 
   function load() {
     api.get(`/conversations/${id}`).then(setData);
   }
   useEffect(load, [id]);
+
+  // Staff opening a thread care about the newest message, not the oldest --
+  // without this the scrollable .thread div (index.css) starts at its
+  // native top-of-content position, so every open meant scrolling down
+  // manually. Re-fires on every message-count change too, so it also jumps
+  // to the bottom after sending a reply or taking over.
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [data?.messages?.length]);
 
   if (!data) return null;
   const { customer, messages } = data;
@@ -92,6 +102,7 @@ export default function ConversationDetail() {
             </div>
           ))}
           {!messages.length && <div className="empty-state">No messages yet.</div>}
+          <div ref={bottomRef} />
         </div>
       </div>
 

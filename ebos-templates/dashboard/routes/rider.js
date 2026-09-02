@@ -175,7 +175,11 @@ router.post('/offers/:id/accept', requireRider, async (req, res) => {
     const payout = zoneRows[0]?.rider_payout || 0;
 
     const deliveryCode = String(Math.floor(Math.random() * 10_000)).padStart(4, '0');
-    const trackingToken = Buffer.from(`${offer.id}:${Date.now()}:${Math.random()}`).toString('base64url');
+    // The SAME token the customer's tracking link already uses, generated
+    // at offer-broadcast time (engine/delivery-dispatch.js) -- one link for
+    // the whole journey, not a second one issued now that would silently
+    // break the link already sent.
+    const trackingToken = offer.tracking_token;
 
     const { rows: assignmentRows } = await client.query(
       `insert into delivery_assignment (offer_id, order_id, rider_id, delivery_code, tracking_token)
@@ -220,20 +224,14 @@ router.post('/offers/:id/accept', requireRider, async (req, res) => {
     // committed, so a WhatsApp hiccup here must never surface as a failed
     // accept (the rider already has the job either way).
     //
-    // trackingUrl deliberately withheld from the customer message for now
-    // (Chidera's call, 2026-09-01): the page it points to only ever shows
-    // the RIDER's real position, never the customer's own -- nothing in
-    // this system geocodes a customer's typed address into map
-    // coordinates yet, so sending a "track your delivery" link oversells
-    // what the page can actually show. The route/page itself (routes/
-    // tracking.js) and `delivery.tracking_url` on the order are both left
-    // fully working, deliberately -- this only stops it being proactively
-    // texted out until the location gap above is closed. The delivery
-    // code (the part that actually matters for the handoff) still goes
-    // out regardless.
+    // trackingPath now goes out for real (Chidera's call, 2026-09-02) --
+    // the page behind it (routes/tracking.js) shows a stage tracker
+    // (waiting for rider -> accepted -> picked up -> here -> delivered),
+    // not a live location, so there's no real-coordinate gap left to
+    // oversell the way there was when this was paused on 2026-09-01.
     notifyDeliveryAssigned(offer.order_id, {
       riderName,
-      trackingUrl: null,
+      trackingPath,
       deliveryCode,
     }).catch((err) => console.error(`Failed to notify customer of delivery assignment for order ${offer.order_id}:`, err));
   } catch (err) {

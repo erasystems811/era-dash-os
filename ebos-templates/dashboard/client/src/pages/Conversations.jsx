@@ -181,6 +181,68 @@ function NeedsAttention() {
   );
 }
 
+// Reaching out first, not replying -- for a new lead or a customer who's
+// gone quiet, where there's no existing thread to type into. Goes out as
+// the approved "business_outreach" template server-side (see
+// engine/flow.js's sendOutreachMessage) so it works even outside the normal
+// 24h reply window; this form just collects the number and the message.
+function MessageCustomer() {
+  const [open, setOpen] = useState(false);
+  const [phone, setPhone] = useState('');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState(null);
+  const [sending, setSending] = useState(false);
+
+  async function send(e) {
+    e.preventDefault();
+    setError(null);
+    setSending(true);
+    try {
+      const res = await api.post('/conversations/outreach', { phone_number: phone, message });
+      window.location.href = `/conversations/${res.conversation_id}`;
+    } catch (err) {
+      setError(err.message);
+      setSending(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="card" style={{ width: 'fit-content' }}>
+        <button onClick={() => setOpen(true)}>Message a customer</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <h3 style={{ marginTop: 0 }}>Message a customer</h3>
+      <p className="subtitle">Reach out first -- works even if they've never messaged this number before.</p>
+      {error && <div className="error-banner">{error}</div>}
+      <form onSubmit={send}>
+        <div className="form-row">
+          <div className="field">
+            <label>Their WhatsApp number</label>
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="2348..." required />
+          </div>
+        </div>
+        <div className="field">
+          <label>Message</label>
+          <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={3} required />
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="submit" disabled={sending}>
+            {sending ? 'Sending...' : 'Send'}
+          </button>
+          <button type="button" className="secondary" onClick={() => setOpen(false)}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function Conversations() {
   const [tab, setTab] = useState('all');
 
@@ -192,6 +254,7 @@ export default function Conversations() {
           <p className="subtitle">Every customer thread, bot and staff turns, WhatsApp style.</p>
         </div>
       </div>
+      <MessageCustomer />
       <div className="card" style={{ display: 'flex', gap: 8, padding: 6, width: 'fit-content' }}>
         <button className={tab === 'all' ? '' : 'secondary'} onClick={() => setTab('all')}>
           All conversations

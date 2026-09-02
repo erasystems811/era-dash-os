@@ -2,10 +2,11 @@
 // every on-duty rider's phone alarms for, and the timeout escalation that
 // follows one nobody accepts (spec B4). Never guesses, never silently drops
 // -- an offer nobody accepts becomes visible to a human, not a mystery.
+import { randomBytes } from 'node:crypto';
 import { pool } from '../lib/db.js';
 import * as botEngine from '../bot-engine/index.js';
 import { sendWhatsApp } from './whatsapp-send.js';
-import { handoverRecipients } from './flow.js';
+import { handoverRecipients, notifyDeliverySearching } from './flow.js';
 import { getDeliveryConfig } from './delivery-zones.js';
 import { resolveSource } from './delivery.js';
 import { offerBus } from './offer-bus.js';
@@ -49,13 +50,24 @@ export async function maybeDispatchOwnRiders(orderId) {
 
   const business = await resolveSource(order);
 
+  // Generated here, not at accept time -- a Chowdeck-style stage tracker
+  // (Chidera's call) needs no real coordinates the way a live-location
+  // link would have, so there's no reason to make the customer wait for a
+  // rider to accept before they get a real link to open.
+  const trackingToken = randomBytes(18).toString('base64url');
+
   const { rows } = await pool.query(
-    `insert into delivery_offer (order_id, branch_id, zone_id) values ($1, $2, $3) returning *`,
-    [order.id, order.branch_id, zone.id]
+    `insert into delivery_offer (order_id, branch_id, zone_id, tracking_token) values ($1, $2, $3, $4) returning *`,
+    [order.id, order.branch_id, zone.id, trackingToken]
   );
   const offer = rows[0];
 
   broadcastOffer(offer, { zoneName: zone.name, payout: zone.rider_payout, pickupName: business.name, pickupAddress: business.address, reference: order.reference });
+
+  // Fire-and-forget, same reasoning as every other post-commit customer
+  // notification in this add-on -- a WhatsApp hiccup here must never turn
+  // into a failed dispatch.
+  notifyDeliverySearching(order.id, `/track/${trackingToken}`).catch((err) => console.error(`Failed to notify customer of dispatch for order ${order.id}:`, err));
 }
 
 function broadcastOffer(offer, details, { urgent = false } = {}) {

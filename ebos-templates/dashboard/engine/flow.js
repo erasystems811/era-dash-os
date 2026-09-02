@@ -8,7 +8,7 @@ import { classifyIntent, detectWantsHuman, detectDelayComplaint } from './classi
 import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extractOrderItems, extractOrderModifications, extractFulfilmentChange, loadBotFields, describeForExtraction, branchOptions, resolveMenu, getSharingMode } from './fields.js';
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
-import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
+import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
 import { sendMenuList } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
@@ -195,6 +195,25 @@ export async function sendStaffReply(customerId, text, staffId) {
       }
     }
   }
+}
+
+// Staff messaging a customer FIRST -- a new or dormant customer, outside
+// any 24h session window, so this must go out as an approved template
+// ("business_outreach", see scripts/lib/whatsapp-templates.mjs), never as a
+// plain-text send, or Meta rejects it (error 131047). No existing session
+// to key off of, so branchId comes from the acting staff member, same as
+// every other staff-initiated write in routes/api.js.
+export async function sendOutreachMessage({ phoneNumber, message, branchId, staffId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channel: 'whatsapp', branchId });
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  const components = [{ type: 'body', parameters: [{ type: 'text', text: message }] }];
+  await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'whatsapp', sender: 'staff', body: message, trigger: 'outreach' });
+  await pool.query(
+    `update customers set handled_by = 'staff', handled_by_staff_id = coalesce($1, handled_by_staff_id), handover_at = coalesce(handover_at, now()) where id = $2`,
+    [staffId || null, customer.id]
+  );
+  return customer;
 }
 
 // Claims a conversation for staff WITHOUT sending anything -- the
@@ -432,11 +451,21 @@ export async function handoverRecipients() {
   return biz[0]?.handover_number ? [biz[0].handover_number] : [];
 }
 
+// Shared between the error-recovery handover() call below and
+// handlePendingBatch's own gate on it -- a customer stuck in exactly this
+// handover shouldn't get the bot retried (it just failed) or re-greeted on
+// every later message, only the first one.
+const SYSTEM_ERROR_HANDOVER_REASON = 'Unexpected error while processing customer message';
+
 // `extra` is for context a plain conversation summary can't produce itself
 // -- specifically the invoice and payment-proof links on a payment-related
 // handover, so whoever's confirming payment has both right there instead of
 // having to go look them up on the dashboard first.
-async function handover(customer, reason, extra) {
+// ackText overrides the default "let me confirm this properly" line for a
+// handover that isn't really about confirming anything -- e.g. the bot
+// itself broke (see the error-recovery catch in scheduleDebouncedProcessing)
+// and that phrasing reads as evasive rather than honest about what happened.
+async function handover(customer, reason, extra, ackText) {
   await pool.query(`update customers set handled_by = 'staff', handover_at = now(), handover_reason = $1 where id = $2`, [reason, customer.id]);
 
   // Voice add-on only (spec A8, Phase 1/call-forwarding -- no live transfer
@@ -495,7 +524,7 @@ async function handover(customer, reason, extra) {
   // Never leave the customer with silence just because the bot handed off
   // -- they get an ack here regardless of whether anyone is even configured
   // to receive the internal staff alert below.
-  await reply(customer, `Let me confirm this properly for you, I'll get back to you here shortly.`, 'handover_ack');
+  await reply(customer, ackText || `Let me confirm this properly for you, I'll get back to you here shortly.`, 'handover_ack');
 
   const recipients = await handoverRecipients();
   if (!recipients.length) return;
@@ -1462,18 +1491,43 @@ export async function notifyReadyForPickup(orderId) {
 // notifyReadyForPickup above, called from outside this file's own
 // request/reply loop for the same reason: the event that triggers it
 // (a rider accepting) doesn't originate from the customer's next message.
-export async function notifyDeliveryAssigned(orderId, { riderName, trackingUrl, deliveryCode }) {
+export async function notifyDeliveryAssigned(orderId, { riderName, trackingPath, deliveryCode }) {
   const { rows } = await pool.query('select * from "order" where id = $1', [orderId]);
   const order = rows[0];
   if (!order) throw new Error('Order not found.');
   const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
   const customer = custRows[0];
   if (!customer) throw new Error('Customer not found.');
-  const trackingLine = trackingUrl ? ` Track your delivery here: ${trackingUrl}.` : '';
+  // Never a bare relative path in a WhatsApp message -- there's no "current
+  // page" for a chat to resolve it against, so this only goes out at all
+  // once PUBLIC_URL is actually configured (same gating every other
+  // outbound link in this codebase, e.g. the invoice link, already uses).
+  const trackingLine = trackingPath && process.env.PUBLIC_URL ? ` Track your order here: ${process.env.PUBLIC_URL}${trackingPath}.` : '';
   await reply(
     customer,
     `Your order is on its way with ${riderName}.${trackingLine} Give them this code when they arrive: ${deliveryCode}`,
     'delivery_assigned'
+  );
+}
+
+// Own_riders delivery only. Called the instant a delivery order's offer
+// broadcasts (engine/delivery-dispatch.js) -- a customer whose order is
+// out for delivery gets a real, working tracking link from THIS moment,
+// not only once a rider happens to accept (Chidera's own Chowdeck-style
+// stage tracker: "waiting for rider to accept order" is itself a real,
+// trackable stage, not a gap before tracking starts).
+export async function notifyDeliverySearching(orderId, trackingPath) {
+  const { rows } = await pool.query('select * from "order" where id = $1', [orderId]);
+  const order = rows[0];
+  if (!order) throw new Error('Order not found.');
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+  const customer = custRows[0];
+  if (!customer) throw new Error('Customer not found.');
+  if (!process.env.PUBLIC_URL) return; // same gating as notifyDeliveryAssigned -- no link worth sending without it
+  await reply(
+    customer,
+    `Your order is ready and we're finding you a rider. Track it here: ${process.env.PUBLIC_URL}${trackingPath}`,
+    'delivery_searching'
   );
 }
 
@@ -1562,8 +1616,13 @@ function scheduleDebouncedProcessing(customer) {
       // until they happened to message again. Best-effort and deliberately
       // swallows its own failure, so a second error here can't cascade.
       try {
-        await reply(customer, `Sorry, having some trouble on my end. Let me get someone to help you.`, 'error_recovery');
-        await handover(customer, 'Unexpected error while processing customer message');
+        // One plain message, not two -- this used to send its own
+        // "having trouble" line here and then handover()'s default
+        // "let me confirm this properly" right after, which read as a
+        // stitched-together non-sequitur to the customer (found live,
+        // 2026-09-02: "let me confirm this properly" makes no sense right
+        // after being told something broke).
+        await handover(customer, SYSTEM_ERROR_HANDOVER_REASON, null, 'Hello, someone will be with you shortly.');
       } catch (innerErr) {
         console.error('Failed to notify customer after a processing error:', innerErr);
       }
@@ -1729,6 +1788,25 @@ async function handlePendingBatch(customer, text) {
     // dashboard and can answer themselves; the bot just isn't the one
     // talking right now. It picks back up the moment "Return to bot" is
     // pressed or the 30-minute idle window above trips.
+    return;
+  }
+
+  // The bot itself broke on this thread (see scheduleDebouncedProcessing's
+  // error-recovery handover) and no human has replied yet. Retrying
+  // dispatch/classifyIntent here would most likely just fail the same way
+  // again, and re-running the ack above every message would spam the
+  // customer with the same "someone will be with you shortly" line. Relay
+  // straight to whoever gets handover alerts instead -- no bot attempt, no
+  // repeat ack, same "picks back up on 'Return to bot'" recovery path.
+  if (customer.handled_by === 'staff' && customer.handover_reason === SYSTEM_ERROR_HANDOVER_REASON) {
+    const recipients = await handoverRecipients();
+    for (const to of recipients) {
+      try {
+        await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text: `${displayNameFor(customer)} says: ${text}`, whatsappSend: sendWhatsApp });
+      } catch (err) {
+        console.error(`Failed to relay message to ${to}:`, err);
+      }
+    }
     return;
   }
 

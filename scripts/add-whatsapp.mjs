@@ -13,6 +13,7 @@ import { loadRegistry, saveRegistry, findClient, upsertClient } from './lib/regi
 import { readRemote, runRemote, copyToRemote } from './lib/ssh.mjs';
 import { patchEnv } from './lib/env-patch.mjs';
 import { runScaffoldBot } from './lib/scaffold-runner.mjs';
+import { createOutreachTemplate } from './lib/whatsapp-templates.mjs';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -23,8 +24,8 @@ function parseArgs(argv) {
     const [key, ...rest] = arg.replace(/^--/, '').split('=');
     args[key] = rest.join('=');
   }
-  if (!args.client || !args.token || !args['phone-id'] || !args['verify-token']) {
-    throw new Error('Usage: add-whatsapp.mjs --client=slug --token=... --phone-id=... --verify-token=...');
+  if (!args.client || !args.token || !args['phone-id'] || !args['verify-token'] || !args['waba-id']) {
+    throw new Error('Usage: add-whatsapp.mjs --client=slug --token=... --phone-id=... --verify-token=... --waba-id=...');
   }
   return args;
 }
@@ -56,12 +57,29 @@ async function main() {
   // for their number falls through to its Nexa fallback instead of ever
   // reaching them. Confirmed missing here (this call used to only set
   // needsWhatsapp) while building that router's Instagram counterpart.
-  upsertClient(registry, { name: client.name, needsWhatsapp: true, whatsappPhoneNumberId: args['phone-id'] });
+  upsertClient(registry, {
+    name: client.name,
+    needsWhatsapp: true,
+    whatsappPhoneNumberId: args['phone-id'],
+    whatsappBusinessAccountId: args['waba-id'],
+  });
   saveRegistry(registry);
 
   if (!client.hasBotEngine) {
     console.log('Setting up bot-engine (first time WhatsApp has been enabled for this client)...');
     await runScaffoldBot(client.name);
+  }
+
+  // Lets this business message a customer first, any time, outside the
+  // normal 24-hour reply window -- Meta requires an approved template for
+  // that. One submission per business, right when its own WABA is known;
+  // review happens async, this call doesn't block on it.
+  try {
+    await createOutreachTemplate({ accessToken: args.token, wabaId: args['waba-id'], businessName: client.displayName });
+    console.log('Submitted "business_outreach" message template for Meta review (pending approval, usually quick).');
+  } catch (err) {
+    console.log(`WARNING: could not submit the outreach template automatically: ${err.message}`);
+    console.log('WhatsApp itself still works -- this only affects the "message a customer first" feature.');
   }
 
   console.log(`WhatsApp env vars set for "${client.name}" and containers restarted.`);

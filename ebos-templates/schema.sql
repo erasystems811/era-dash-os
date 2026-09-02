@@ -517,6 +517,16 @@ create table if not exists delivery_offer (
   branch_id uuid references branch(id),
   zone_id uuid not null references delivery_zone(id),
   status text not null default 'OPEN' check (status in ('OPEN', 'CLAIMED', 'EXPIRED', 'CANCELLED')),
+  -- Generated the moment this offer broadcasts (engine/delivery-dispatch.js)
+  -- and sent to the customer right then -- a stage tracker ("waiting for a
+  -- rider" -> accepted -> picked up -> here -> delivered, Chidera's own
+  -- Chowdeck-style request, 2026-09-02) needs no real coordinates the way
+  -- a live-location link would have, so there's no reason to wait until a
+  -- rider actually accepts before the customer gets a real link. Copied
+  -- onto delivery_assignment.tracking_token unchanged once a rider claims
+  -- this offer (routes/rider.js) -- one token for the whole journey, not a
+  -- second one issued partway through.
+  tracking_token text unique,
   broadcast_at timestamptz not null default now(),
   escalated_at timestamptz,
   -- Separate from escalated_at so the staff-alert sweep never re-alerts on
@@ -730,7 +740,7 @@ create table if not exists message (
   id uuid primary key default gen_random_uuid(),
   customer_id uuid not null references customers(id),
   direction text not null check (direction in ('inbound', 'outbound')),
-  channel text not null check (channel in ('whatsapp', 'instagram', 'tiktok', 'website', 'voice')),
+  channel text not null check (channel in ('whatsapp', 'instagram', 'tiktok', 'website', 'voice', 'manual')),
   sender text not null,
   body text not null,
   trigger text,
