@@ -9,13 +9,27 @@ import { useStaff, canEdit } from '../StaffContext.jsx';
 // built through chat, before payment, is work in progress on the
 // Conversations tab, not something this board needs to show. This board
 // starts the moment there's something to act on: paid and needing a look.
+// 'delivery' and 'in_transit' only ever apply to delivery orders (a
+// pickup order goes straight from 'ready' to 'completed') -- both columns
+// just sit empty for a pickup-only business, same as any other column
+// with nothing in it yet.
 const COLUMNS = [
-  { key: 'confirmed', label: 'Confirmed', hint: 'needs a look' },
+  { key: 'confirmation', label: 'Confirmation', hint: 'needs a look' },
   { key: 'preparation', label: 'Preparation', hint: 'kitchen is on it' },
   { key: 'ready', label: 'Ready', hint: 'awaiting pickup/rider' },
-  { key: 'delivery', label: 'Delivery', hint: 'rider or pickup' },
-  { key: 'completed', label: 'Completed', hint: '' },
+  { key: 'delivery', label: 'Delivery', hint: 'waiting for rider' },
+  { key: 'in_transit', label: 'In transit', hint: 'rider has it' },
+  { key: 'completed', label: 'Completed', hint: 'last 24h' },
 ];
+
+// Completed orders drop off the board a day after they're done -- nothing
+// is deleted (the data's still there for everything else), this is purely
+// "don't let a growing pile of finished orders clutter what staff actually
+// need to act on" (Chidera's call: "completed only lasts a day").
+const COMPLETED_VISIBLE_MS = 24 * 60 * 60 * 1000;
+function isRecentlyCompleted(order) {
+  return Date.now() - new Date(order.updated_at).getTime() < COMPLETED_VISIBLE_MS;
+}
 
 // Purely a visual affordance -- a long unattended wait means something
 // different at different stages, but a single flat threshold is the
@@ -296,7 +310,7 @@ export default function Orders() {
 
       <div className="board" style={{ display: 'flex', gap: 14, overflowX: 'auto', paddingBottom: 8 }}>
         {COLUMNS.map((col) => {
-          const colOrders = orders.filter((o) => o.status === col.key);
+          const colOrders = orders.filter((o) => o.status === col.key && (col.key !== 'completed' || isRecentlyCompleted(o)));
           return (
             <div key={col.key} className="board-column" style={{ minWidth: 220, flex: '0 0 220px' }}>
               <div className="lane-head">

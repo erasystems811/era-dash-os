@@ -247,6 +247,13 @@ router.post('/assignments/:id/picked-up', requireRider, async (req, res) => {
     if (existing === null) return; // loadOwnAssignment already responded
     return res.status(409).json({ error: `Can't mark picked up from status "${existing.status}".` });
   }
+  // Staff's own kanban board advances itself here -- the system already
+  // knows the rider has the order in hand, so there's nothing for a person
+  // to click (Chidera's call: "when rider pick up let be on a stage called
+  // in transit"). Only moves an order actually still sitting at 'delivery'
+  // -- never overwrites a staff override or a state this rider action
+  // doesn't actually explain.
+  await pool.query(`update "order" set status = 'in_transit' where id = $1 and status = 'delivery'`, [rows[0].order_id]);
   res.json(rows[0]);
 });
 
@@ -285,6 +292,10 @@ router.post('/assignments/:id/deliver', requireRider, async (req, res) => {
   // close out. The existing `delivery` row is the one OrderDetail.jsx
   // actually renders, so that's what has to change for staff to see it.
   await pool.query(`update delivery set status = 'delivered' where order_id = $1`, [existing.order_id]);
+  // Same automatic advance as picked-up above -- the real code entry the
+  // customer just gave the rider IS the completion event, no staff click
+  // needed on top of it.
+  await pool.query(`update "order" set status = 'completed' where id = $1 and status = 'in_transit'`, [existing.order_id]);
   res.json(rows[0]);
 
   // Manual payout (the default, spec B9's own "manual before automatic")

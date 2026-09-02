@@ -374,19 +374,26 @@ create table if not exists "order" (
   -- (conversation-facing) -- the engine reads/writes this one directly via
   -- bot-engine/states.js's assertTransition.
   engine_state text not null default 'new_inquiry' references bot_state(key),
-  -- 'preparation' added 2026-09-02 (Chidera's call): 'confirmed' means paid
-  -- and needs someone to look at it; 'preparation' means the kitchen has
-  -- actually started, and is the ONLY stage the "mark as ready" button
-  -- (routes/api.js's /orders/:id/status, which calls maybeDispatchOwnRiders)
-  -- appears from. A manually-created order (routes/api.js's POST /orders)
-  -- lands directly in 'preparation', skipping 'confirmed' -- staff already
-  -- confirmed it themselves by typing it in, so that step would be
-  -- redundant. `new` still exists for the bot's own in-progress draft
-  -- orders (still being built through a chat, before payment) -- staff's
-  -- kanban board (Orders.jsx) simply doesn't render a column for it, that
-  -- work-in-progress state belongs on the Conversations tab, not the
-  -- Orders one.
-  status text not null default 'new' check (status in ('new', 'confirmed', 'preparation', 'ready', 'delivery', 'completed', 'cancelled')),
+  -- Full pipeline (Chidera's call, 2026-09-02): new -> confirmation ->
+  -- preparation -> ready -> [pickup: completed] -> [delivery: delivery ->
+  -- in_transit -> completed]. `new` is the bot's own in-progress draft
+  -- order (still being built through chat, before payment) -- staff's
+  -- kanban board (Orders.jsx) doesn't render a column for it, that
+  -- work-in-progress state belongs on the Conversations tab. `confirmation`
+  -- means paid and needs someone to look at it; `preparation` means the
+  -- kitchen actually started, and is the ONLY stage the "mark as ready"
+  -- button (routes/api.js's /orders/:id/status, which calls
+  -- maybeDispatchOwnRiders) appears from. `ready` branches by
+  -- fulfilment_type: a pickup order's "Picked up" button goes straight to
+  -- `completed` (its last stage); a delivery order's own button moves it
+  -- to `delivery` ("waiting for rider"), which then advances itself,
+  -- automatically, to `in_transit` the moment a rider marks picked-up, and
+  -- to `completed` the moment the rider closes it out with the delivery
+  -- code (routes/rider.js) -- never a staff click for those two, the
+  -- system already knows. A manually-created order (routes/api.js's POST
+  -- /orders) lands directly in `preparation`, skipping `confirmation` --
+  -- staff already confirmed it themselves by typing it in.
+  status text not null default 'new' check (status in ('new', 'confirmation', 'preparation', 'ready', 'delivery', 'in_transit', 'completed', 'cancelled')),
   -- Set the moment the customer says yes to the order, before payment --
   -- distinct from `status`, which only reaches 'confirmed' once payment is
   -- actually in (see engine/flow.js). Purely an internal marker so the

@@ -1489,14 +1489,14 @@ export async function completePayment(orderId) {
   const customer = custRows[0];
 
   await transitionOrder(order, 'payment_acceptance');
-  // The kanban `status` staff actually watch only reaches 'confirmed' here,
-  // once money is really in -- never at the customer's "yes" (see
+  // The kanban `status` staff actually watch only reaches 'confirmation'
+  // here, once money is really in -- never at the customer's "yes" (see
   // handleConfirmOrder, which sets confirmed_at instead, an internal marker
-  // only). Fulfilment progress past this (ready, delivery, completed) is
-  // staff's own call as they physically prepare/dispatch it, not something
-  // the bot decides -- payment succeeding is not the same fact as food
-  // being ready.
-  await pool.query(`update "order" set status = 'confirmed' where id = $1`, [order.id]);
+  // only). Fulfilment progress past this (preparation, ready, delivery,
+  // in_transit, completed) is staff's own call as they physically
+  // prepare/dispatch it, not something the bot decides -- payment
+  // succeeding is not the same fact as food being ready.
+  await pool.query(`update "order" set status = 'confirmation' where id = $1`, [order.id]);
   await createReceipt(order);
   await transitionOrder(order, 'fulfilment');
 

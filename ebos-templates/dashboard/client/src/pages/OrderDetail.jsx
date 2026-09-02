@@ -10,12 +10,30 @@ import { useStaff, canEdit } from '../StaffContext.jsx';
 // that's the button that calls a rider (routes/api.js's /orders/:id/status
 // already triggers own_riders dispatch when status becomes 'ready',
 // unchanged here, just given a real button instead of a dropdown option).
-const NEXT_STAGE = {
-  confirmed: { label: 'Start preparing', next: 'preparation' },
-  preparation: { label: 'Mark as ready', next: 'ready' },
-  ready: { label: 'Send out', next: 'delivery' },
-  delivery: { label: 'Mark completed', next: 'completed' },
-};
+// 'ready' branches by fulfilment_type -- a pickup order's handoff button
+// ends its journey at 'completed' directly; a delivery order's own handoff
+// button just marks it as out with a rider, since 'delivery' -> 'in_transit'
+// -> 'completed' advance themselves automatically from there (routes/
+// rider.js, the moment the rider actually marks picked-up/delivers) for an
+// own_riders order. The buttons on 'delivery'/'in_transit' below only
+// really matter for a delivery arranged outside own_riders (manual/
+// Chowdeck), where nothing else is watching for those events.
+function nextStageFor(order) {
+  switch (order.status) {
+    case 'confirmation':
+      return { label: 'Start preparing', next: 'preparation' };
+    case 'preparation':
+      return { label: 'Mark as ready', next: 'ready' };
+    case 'ready':
+      return order.fulfilment_type === 'pickup' ? { label: 'Picked up', next: 'completed' } : { label: 'Send for delivery', next: 'delivery' };
+    case 'delivery':
+      return { label: 'Mark in transit', next: 'in_transit' };
+    case 'in_transit':
+      return { label: 'Mark completed', next: 'completed' };
+    default:
+      return null;
+  }
+}
 
 export default function OrderDetail() {
   const { id } = useParams();
@@ -193,20 +211,23 @@ export default function OrderDetail() {
         </div>
       )}
 
-      {canEdit(staff) && !['completed', 'cancelled'].includes(order.status) && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>Update status</h3>
-          <p className="hint" style={{ marginTop: 0 }}>
-            Currently: <span className={`badge ${order.status}`}>{order.status}</span>
-          </p>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {NEXT_STAGE[order.status] && <button onClick={() => advanceStatus(NEXT_STAGE[order.status].next)}>{NEXT_STAGE[order.status].label}</button>}
-            <button className="secondary" onClick={cancelOrder}>
-              Cancel order
-            </button>
+      {canEdit(staff) && !['completed', 'cancelled'].includes(order.status) && (() => {
+        const next = nextStageFor(order);
+        return (
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Update status</h3>
+            <p className="hint" style={{ marginTop: 0 }}>
+              Currently: <span className={`badge ${order.status}`}>{order.status}</span>
+            </p>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {next && <button onClick={() => advanceStatus(next.next)}>{next.label}</button>}
+              <button className="secondary" onClick={cancelOrder}>
+                Cancel order
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

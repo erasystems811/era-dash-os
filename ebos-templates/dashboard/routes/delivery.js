@@ -190,6 +190,10 @@ router.post('/assignments/:id/release', requireEditorApi, async (req, res) => {
   );
   if (!rows[0]) return res.status(409).json({ error: 'This delivery is not in a state that can be released.' });
   await pool.query(`update delivery set status = 'delivered' where order_id = $1`, [rows[0].order_id]);
+  // Same automatic advance the rider's own real deliver action would have
+  // caused -- a staff override closing out a stuck delivery is just as
+  // real a completion as the rider entering the code themselves.
+  await pool.query(`update "order" set status = 'completed' where id = $1 and status in ('delivery', 'in_transit')`, [rows[0].order_id]);
   res.json(rows[0]);
 });
 
