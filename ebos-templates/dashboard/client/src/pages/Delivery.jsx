@@ -1,6 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
+import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
+import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
+import markerIcon from 'leaflet/dist/images/marker-icon.png';
+import markerShadow from 'leaflet/dist/images/marker-shadow.png';
+
+// Leaflet's default marker icon paths break once bundled (a well-known
+// Leaflet+Vite gotcha -- the CSS references relative image paths that
+// don't survive bundling) -- re-pointed at the real bundled asset URLs
+// Vite gives these imports, once, before any marker on this page is ever
+// created.
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({ iconRetinaUrl: markerIcon2x, iconUrl: markerIcon, shadowUrl: markerShadow });
 
 const EMPTY_ZONE = { name: '', aliases: '', customer_fee: '', rider_payout: '', active: true };
 const EMPTY_RIDER = { name: '', phone: '', bank_account_number: '', bank_code: '', account_name: '', pin: '' };
@@ -353,28 +366,6 @@ function Riders() {
   );
 }
 
-// Loaded once and reused -- a second <script> tag for the same Maps API
-// would redefine window.google and throw. mapsScriptPromise is module-level
-// so remounting this tab (switching away and back) never re-fetches it.
-let mapsScriptPromise = null;
-function loadMapsScript(apiKey) {
-  if (window.google?.maps) return Promise.resolve();
-  if (!mapsScriptPromise) {
-    mapsScriptPromise = new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}`;
-      script.async = true;
-      script.onload = resolve;
-      script.onerror = () => {
-        mapsScriptPromise = null; // allow a retry on the next mount
-        reject(new Error('Could not load Google Maps.'));
-      };
-      document.head.appendChild(script);
-    });
-  }
-  return mapsScriptPromise;
-}
-
 // Every on-duty rider with a real position on file -- riders who haven't
 // reported one yet (just signed up, or genuinely off duty) are left off
 // entirely rather than plotted at some meaningless default point.
@@ -390,45 +381,42 @@ function LiveMap() {
     let poll;
 
     async function init() {
-      try {
-        const { apiKey } = await api.get('/delivery/maps-key');
-        await loadMapsScript(apiKey);
-        if (cancelled || !mapDivRef.current) return;
-        mapRef.current = new window.google.maps.Map(mapDivRef.current, {
-          center: { lat: 9.0765, lng: 7.3986 }, // Abuja -- a reasonable default until real riders place it themselves
-          zoom: 12,
-        });
-        await refresh();
-        poll = setInterval(refresh, 15_000);
-      } catch (err) {
-        if (!cancelled) setError(err.message);
-      }
+      if (!mapDivRef.current) return;
+      mapRef.current = L.map(mapDivRef.current).setView([9.0765, 7.3986], 12); // Abuja -- a reasonable default until real riders place it themselves
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19,
+      }).addTo(mapRef.current);
+      await refresh();
+      poll = setInterval(refresh, 15_000);
     }
 
     async function refresh() {
-      const riders = await api.get('/delivery/riders');
-      const withPosition = riders.filter((r) => r.status === 'on_duty' && r.last_lat && r.last_lng);
-      setRiderCount(withPosition.length);
-      const seen = new Set();
-      for (const r of withPosition) {
-        seen.add(r.id);
-        const position = { lat: Number(r.last_lat), lng: Number(r.last_lng) };
-        const existing = markersRef.current.get(r.id);
-        if (existing) {
-          existing.setPosition(position);
-        } else {
-          markersRef.current.set(
-            r.id,
-            new window.google.maps.Marker({ map: mapRef.current, position, title: r.name })
-          );
+      try {
+        const riders = await api.get('/delivery/riders');
+        if (cancelled) return;
+        const withPosition = riders.filter((r) => r.status === 'on_duty' && r.last_lat && r.last_lng);
+        setRiderCount(withPosition.length);
+        const seen = new Set();
+        for (const r of withPosition) {
+          seen.add(r.id);
+          const position = [Number(r.last_lat), Number(r.last_lng)];
+          const existing = markersRef.current.get(r.id);
+          if (existing) {
+            existing.setLatLng(position);
+          } else {
+            markersRef.current.set(r.id, L.marker(position).addTo(mapRef.current).bindPopup(r.name));
+          }
         }
-      }
-      // Drop the marker for anyone no longer on duty / no longer reporting.
-      for (const [id, marker] of markersRef.current) {
-        if (!seen.has(id)) {
-          marker.setMap(null);
-          markersRef.current.delete(id);
+        // Drop the marker for anyone no longer on duty / no longer reporting.
+        for (const [id, marker] of markersRef.current) {
+          if (!seen.has(id)) {
+            mapRef.current.removeLayer(marker);
+            markersRef.current.delete(id);
+          }
         }
+      } catch (err) {
+        if (!cancelled) setError(err.message);
       }
     }
 
@@ -436,6 +424,10 @@ function LiveMap() {
     return () => {
       cancelled = true;
       clearInterval(poll);
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
     };
   }, []);
 

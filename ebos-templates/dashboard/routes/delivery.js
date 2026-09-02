@@ -126,19 +126,6 @@ router.delete('/riders/:id', requireEditorApi, async (req, res) => {
   res.json({ ok: true });
 });
 
-// --- Live map -----------------------------------------------------------
-// Google's Maps JavaScript API key has to reach the browser to render an
-// actual map (unlike engine/geocode.js's own server-side use of the same
-// key) -- gated behind a real staff login rather than served as a public
-// asset, the same trust level as any other reused secret in this codebase.
-// The key itself is still the real safety boundary (HTTP-referrer
-// restriction, set on the Google Cloud Console side, not something this
-// code can enforce) -- this only controls who can ask this dashboard for it.
-router.get('/maps-key', (req, res) => {
-  if (!process.env.GOOGLE_MAPS_API_KEY) return res.status(404).json({ error: 'Maps is not configured for this deployment.' });
-  res.json({ apiKey: process.env.GOOGLE_MAPS_API_KEY });
-});
-
 // --- Payouts --------------------------------------------------------------
 // Manual mode first, on purpose (spec B9): same ledger a human presses a
 // button against, so the whole delivery flow is live and real money can
