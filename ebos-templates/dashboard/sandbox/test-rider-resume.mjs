@@ -76,8 +76,50 @@ async function main() {
     assert(state.active.customerPhone === '2348050001111', `expected the customer's phone, got ${state.active.customerPhone}`);
   });
 
+  console.log('=== Rider marks picked up: order auto-advances ready -> in_transit ===');
+  const { rows: order2Rows } = await pool.query(
+    `insert into "order" (customer_id, reference, fulfilment_type, status) values ($1, 'TEST-0002', 'delivery', 'ready') returning id`,
+    [customerId]
+  );
+  const order2Id = order2Rows[0].id;
+  const { rows: offer2Rows } = await pool.query(
+    `insert into delivery_offer (order_id, zone_id, status, tracking_token) values ($1, $2, 'CLAIMED', 'test-token-2') returning id`,
+    [order2Id, zoneId]
+  );
+  const offer2Id = offer2Rows[0].id;
+  const { rows: assignment2Rows } = await pool.query(
+    `insert into delivery_assignment (offer_id, order_id, rider_id, status, delivery_code, tracking_token)
+     values ($1, $2, $3, 'ASSIGNED', '5678', 'test-token-2') returning id`,
+    [offer2Id, order2Id, riderId]
+  );
+  const assignment2Id = assignment2Rows[0].id;
+
+  // Mirrors exactly what routes/rider.js's POST /assignments/:id/picked-up
+  // does -- Chidera's call, 2026-09-03: "when rider press ive picked up,
+  // order is meant to go to in transit automatically."
+  await check('marking picked up flips order.status from ready to in_transit', async () => {
+    await pool.query(
+      `update delivery_assignment set status = 'PICKED_UP', picked_up_at = now() where id = $1 and status = 'ASSIGNED'`,
+      [assignment2Id]
+    );
+    await pool.query(`update "order" set status = 'in_transit' where id = $1 and status = 'ready'`, [order2Id]);
+    const { rows } = await pool.query('select status from "order" where id = $1', [order2Id]);
+    assert(rows[0].status === 'in_transit', `expected in_transit, got ${rows[0].status}`);
+  });
+
+  await check('the ready-only guard is a harmless no-op on a repeat call', async () => {
+    // order2 is already in_transit -- a retried request or a rider double
+    // tap must never error or move it somewhere unexpected.
+    await pool.query(`update "order" set status = 'in_transit' where id = $1 and status = 'ready'`, [order2Id]);
+    const { rows } = await pool.query('select status from "order" where id = $1', [order2Id]);
+    assert(rows[0].status === 'in_transit', 'a repeat call must be a harmless no-op');
+  });
+
   console.log('=== Once delivered, a later /me must stop restoring it ===');
-  await pool.query(`update delivery_assignment set status = 'DELIVERED' where offer_id = $1`, [offerId]);
+  // Every assignment this rider has picked up in this fixture run --
+  // loadRiderState only ever restores the MOST RECENT non-terminal one, so
+  // this has to close out both to actually prove "none of them" restore.
+  await pool.query(`update delivery_assignment set status = 'DELIVERED' where rider_id = $1`, [riderId]);
   await check('a completed delivery is not treated as still active', async () => {
     const state = await loadRiderState(riderId);
     assert(state.active === null, 'a DELIVERED assignment must not be restored as active');

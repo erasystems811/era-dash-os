@@ -342,11 +342,17 @@ router.post('/assignments/:id/picked-up', requireRider, async (req, res) => {
     if (existing === null) return; // loadOwnAssignment already responded
     return res.status(409).json({ error: `Can't mark picked up from status "${existing.status}".` });
   }
-  // Deliberately does NOT move the staff-facing order.status here --
-  // Chidera's call: staff mark an order "in delivery" themselves, the
-  // moment they hand it to the rider in person, not automatically off the
-  // rider's own app action (OrderDetail.jsx/Orders.jsx's "Mark in
-  // delivery" button on the Ready stage).
+  // Automatic advance (Chidera's call, 2026-09-03: "when rider press ive
+  // picked up, order is meant to go to in transit automatically") -- the
+  // rider physically taking the order IS the real-world "in delivery"
+  // event for an own_riders order, no separate staff click needed on top
+  // of it. `and status = 'ready'` is a no-op guard, not a requirement: a
+  // non-own_riders provider (Chowdeck/Bolt) never creates a
+  // delivery_assignment row and never reaches this route at all, so staff's
+  // own "Mark in delivery" button (OrderDetail.jsx/Orders.jsx) is still the
+  // only path for those -- and if staff happened to click it first for an
+  // own_riders order too, this simply does nothing rather than erroring.
+  await pool.query(`update "order" set status = 'in_transit' where id = $1 and status = 'ready'`, [rows[0].order_id]);
   res.json(rows[0]);
 });
 
