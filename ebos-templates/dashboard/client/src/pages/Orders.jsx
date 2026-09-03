@@ -223,6 +223,33 @@ export default function Orders() {
     load();
   }
 
+  // A real push can still get lost -- a battery-killed browser, a dropped
+  // connection -- and staff shouldn't have to wait out the automatic
+  // timeout re-broadcast for a second try (Chidera's report, 2026-09-03:
+  // "it didnt even ring atall this time"). Result text shown right on the
+  // card, not a reload -- ringing a rider never changes the order's own
+  // status, so there's nothing for `load()` to refresh.
+  const [ringResult, setRingResult] = useState({});
+  async function ringRider(e, orderId) {
+    e.preventDefault();
+    e.stopPropagation();
+    setRingResult((prev) => ({ ...prev, [orderId]: 'Ringing...' }));
+    let message;
+    try {
+      const result = await api.post(`/orders/${orderId}/ring-rider`, {});
+      message =
+        result.mode === 'broadcast'
+          ? 'Re-pinged every on-duty rider.'
+          : result.delivered
+            ? `Reminder sent to ${result.riderName}.`
+            : `${result.riderName} has no working notification right now -- call them directly.`;
+    } catch (err) {
+      message = err.message;
+    }
+    setRingResult((prev) => ({ ...prev, [orderId]: message }));
+    setTimeout(() => setRingResult((prev) => ({ ...prev, [orderId]: undefined })), 6000);
+  }
+
   useEffect(() => {
     if (scope === 'all') return;
     setOrders(null);
@@ -350,6 +377,12 @@ export default function Orders() {
                                 {nextStageFor(o).label}
                               </button>
                             ))}
+                      {canEdit(staff) && o.status === 'ready' && o.fulfilment_type === 'delivery' && (
+                        <button style={{ marginTop: 8, width: '100%' }} className="secondary" onClick={(e) => ringRider(e, o.id)}>
+                          Ring rider
+                        </button>
+                      )}
+                      {ringResult[o.id] && <p className="hint">{ringResult[o.id]}</p>}
                     </Link>
                   );
                 })}

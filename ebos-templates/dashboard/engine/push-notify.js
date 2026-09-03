@@ -23,11 +23,43 @@ function ensureConfigured() {
   return true;
 }
 
+// Shared by both the broadcast (every on-duty rider) and the single-rider
+// reminder below -- same send call, same cleanup-on-dead-subscription
+// logic, one place to get it right. Never throws -- a delivery still has
+// to dispatch (or a manual "ring" still has to return something to staff)
+// even if pushing to one particular rider isn't 100% reliable this second.
+async function pushToRider(rider, payload) {
+  try {
+    // 'high' urgency (Chidera's report, 2026-09-03: "when a rider ... is
+    // sleeping the phone alarm doesnt ring") -- Android's Doze mode
+    // normally holds a push until the next maintenance window once the
+    // screen's been off a while; FCM (what Chrome's push service runs on)
+    // treats a high-urgency message as allowed to wake the device
+    // immediately instead of waiting. Real ceiling, not fixed by this:
+    // some phones (Xiaomi/Tecno/Infinix/Samsung's own extra battery
+    // managers on top of stock Android) can still kill Chrome's
+    // background process regardless of urgency unless the rider explicitly
+    // allows it unrestricted battery/autostart access for their browser --
+    // a device setting only the rider can change, same ceiling as the
+    // notification SOUND length fix already hit.
+    await webpush.sendNotification(rider.push_subscription, payload, { urgency: 'high' });
+  } catch (err) {
+    // 404/410 means the push service itself says this subscription is
+    // gone for good -- clear it so this rider stops being queried every
+    // broadcast for a subscription that will never work again. Any other
+    // error (network blip, push service hiccup) is left alone; it might
+    // just work next time.
+    if (err.statusCode === 404 || err.statusCode === 410) {
+      await pool.query('update rider set push_subscription = null where id = $1', [rider.id]);
+    } else {
+      console.error(`Push to rider ${rider.id} failed:`, err.message);
+    }
+  }
+}
+
 // One push per on-duty rider with a saved subscription, in the same
 // branch-or-unassigned scope the SSE broadcast already uses (spec B3: a
-// rider only ever sees offers from their own branch). Never blocks or
-// throws the caller over one dead subscription -- a delivery still has to
-// dispatch even if pushing to every rider isn't 100% reliable this second.
+// rider only ever sees offers from their own branch).
 export async function pushOfferToOnDutyRiders(offer, details) {
   if (!ensureConfigured()) return; // not set up on this deployment yet -- SSE alarm still works for anyone with the app open
 
@@ -44,34 +76,21 @@ export async function pushOfferToOnDutyRiders(offer, details) {
     offerId: offer.id,
   });
 
-  await Promise.all(
-    riders.map(async (rider) => {
-      try {
-        // 'high' urgency (Chidera's report, 2026-09-03: "when a rider ...
-        // is sleeping the phone alarm doesnt ring") -- Android's Doze mode
-        // normally holds a push until the next maintenance window once the
-        // screen's been off a while; FCM (what Chrome's push service runs
-        // on) treats a high-urgency message as allowed to wake the device
-        // immediately instead of waiting. Real ceiling, not fixed by this:
-        // some phones (Xiaomi/Tecno/Infinix/Samsung's own extra battery
-        // managers on top of stock Android) can still kill Chrome's
-        // background process regardless of urgency unless the rider
-        // explicitly allows it unrestricted battery/autostart access for
-        // their browser -- a device setting only the rider can change,
-        // same ceiling as the notification SOUND length fix already hit.
-        await webpush.sendNotification(rider.push_subscription, payload, { urgency: 'high' });
-      } catch (err) {
-        // 404/410 means the push service itself says this subscription is
-        // gone for good -- clear it so this rider stops being queried every
-        // broadcast for a subscription that will never work again. Any
-        // other error (network blip, push service hiccup) is left alone;
-        // it might just work next time.
-        if (err.statusCode === 404 || err.statusCode === 410) {
-          await pool.query('update rider set push_subscription = null where id = $1', [rider.id]);
-        } else {
-          console.error(`Push to rider ${rider.id} failed:`, err.message);
-        }
-      }
-    })
-  );
+  await Promise.all(riders.map((rider) => pushToRider(rider, payload)));
+}
+
+// Staff's manual "Ring rider" button (Chidera's ask, 2026-09-03) -- a
+// direct nudge to one specific rider (the one who already accepted this
+// delivery, per engine/delivery-dispatch.js's manuallyRingForRider), for
+// the case a real push genuinely got lost (a device battery-killed Chrome,
+// a dropped connection) and staff don't want to wait for anything
+// automatic. Returns whether a push was actually attempted, not just
+// "the function ran," so the route can tell staff the truth if this
+// rider never had a working subscription to begin with.
+export async function pushReminderToRider(riderId, { title, body }) {
+  if (!ensureConfigured()) return false;
+  const { rows } = await pool.query('select id, push_subscription from rider where id = $1 and push_subscription is not null', [riderId]);
+  if (!rows[0]) return false;
+  await pushToRider(rows[0], JSON.stringify({ title, body }));
+  return true;
 }

@@ -30,7 +30,7 @@ import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort
 import { router as deliveryRoutes } from './delivery.js';
 import { router as voiceRoutes } from './voice.js';
 import { encrypt } from '../lib/crypto.js';
-import { maybeDispatchOwnRiders } from '../engine/delivery-dispatch.js';
+import { maybeDispatchOwnRiders, manuallyRingForRider } from '../engine/delivery-dispatch.js';
 
 export const router = express.Router();
 
@@ -671,6 +671,21 @@ router.post('/orders/:id/notify-ready', requireStaffApi, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ error: `Could not notify customer: ${err.message}` });
+  }
+});
+
+// Staff's manual retry for a push that never rang (Chidera's report,
+// 2026-09-03: "it didnt even ring atall this time") -- requireStaffApi,
+// same tier as notify-ready and status above, since this is the same kind
+// of one-click action a Tier 3 (PIN) staff member acting on the Orders tab
+// needs, not an owner-only capability.
+router.post('/orders/:id/ring-rider', requireStaffApi, async (req, res) => {
+  try {
+    const result = await manuallyRingForRider(req.params.id);
+    await logActivity(req, 'order_rider_rung', { entityType: 'order', entityId: req.params.id, detail: result });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

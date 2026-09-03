@@ -10,7 +10,7 @@ import { handoverRecipients, notifyDeliverySearching } from './flow.js';
 import { getDeliveryConfig } from './delivery-zones.js';
 import { resolveSource } from './delivery.js';
 import { offerBus } from './offer-bus.js';
-import { pushOfferToOnDutyRiders } from './push-notify.js';
+import { pushOfferToOnDutyRiders, pushReminderToRider } from './push-notify.js';
 
 // Called from routes/api.js's /orders/:id/status the moment staff marks an
 // order 'ready' -- "order reaches READY" is the addon spec's own trigger
@@ -137,4 +137,55 @@ export async function sweepOfferEscalation() {
       }
     }
   }
+}
+
+// Staff's manual "Ring rider" button on a Ready-stage order (Chidera's
+// ask, 2026-09-03, right after "it didnt even ring atall" -- a real push
+// can still get lost to a battery-killed browser, and staff shouldn't
+// have to wait out sweepOfferEscalation's own timeout for a second try).
+// Branches on the offer's real status rather than assuming one shape:
+// nobody's accepted yet -> re-broadcast to every on-duty rider, exactly
+// like the automatic timeout escalation above; someone already accepted
+// -> a direct reminder to that one rider specifically, never a broadcast
+// that would wrongly imply the job is still up for grabs.
+export async function manuallyRingForRider(orderId) {
+  const { rows: offerRows } = await pool.query(
+    `select o.*, z.name as zone_name, z.rider_payout
+     from delivery_offer o join delivery_zone z on z.id = o.zone_id
+     where o.order_id = $1 and o.status in ('OPEN', 'CLAIMED')
+     order by o.broadcast_at desc limit 1`,
+    [orderId]
+  );
+  const offer = offerRows[0];
+  if (!offer) throw new Error('No rider offer exists for this order -- it may not have dispatched yet, or the offer expired.');
+
+  const { rows: orderRows } = await pool.query('select reference, branch_id from "order" where id = $1', [orderId]);
+  const order = orderRows[0];
+
+  if (offer.status === 'OPEN') {
+    const { rows: bizRows } = await pool.query(
+      offer.branch_id ? 'select name, address from branch where id = $1' : 'select name, address from business limit 1',
+      offer.branch_id ? [offer.branch_id] : []
+    );
+    const business = bizRows[0] || {};
+    broadcastOffer(offer, { zoneName: offer.zone_name, payout: offer.rider_payout, pickupName: business.name, pickupAddress: business.address, reference: order?.reference }, { urgent: true });
+    return { mode: 'broadcast' };
+  }
+
+  // CLAIMED -- someone already has it, so this is a direct nudge, not a
+  // second offer to the whole fleet.
+  const { rows: assignmentRows } = await pool.query(
+    `select da.rider_id, r.name as rider_name
+     from delivery_assignment da join rider r on r.id = da.rider_id
+     where da.offer_id = $1`,
+    [offer.id]
+  );
+  const assignment = assignmentRows[0];
+  if (!assignment) throw new Error('This offer was accepted but the assignment record is missing -- check the order manually.');
+
+  const delivered = await pushReminderToRider(assignment.rider_id, {
+    title: 'Reminder: pick up this order',
+    body: `Order ${order?.reference || orderId} (${offer.zone_name}) is waiting for pickup.`,
+  });
+  return { mode: 'reminder', riderName: assignment.rider_name, delivered };
 }
