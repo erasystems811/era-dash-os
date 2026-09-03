@@ -323,6 +323,7 @@ export default function Orders() {
                         <span className={`waiting mono ${waiting.level}`}>{waiting.text}</span>
                       </div>
                       <p className="who">{o.customer_name || o.customer_phone}</p>
+                      {o.rider_name && <p className="hint">{o.rider_name} accepted order</p>}
                       {o.items?.length > 0 && (
                         <ul>
                           {o.items.map((item, i) => (

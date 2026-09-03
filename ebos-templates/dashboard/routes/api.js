@@ -461,9 +461,11 @@ router.get('/orders', async (req, res) => {
   // lock, no ?branch_id= requested) means "see everything", same as today.
   const { rows } = await pool.query(
     `select o.*, c.name as customer_name, c.phone_number as customer_phone, c.channel as customer_channel,
+            d.rider_name as rider_name,
             (select coalesce(json_agg(json_build_object('name', p.name, 'quantity', oi.quantity)), '[]')
              from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
      from "order" o join customers c on c.id = o.customer_id
+     left join delivery d on d.order_id = o.id
      where $1::uuid is null or o.branch_id = $1
      order by o.created_at desc limit 200`,
     [req.branchId]
