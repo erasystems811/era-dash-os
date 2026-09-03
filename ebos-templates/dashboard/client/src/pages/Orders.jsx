@@ -44,10 +44,10 @@ function busiestHourText(hour) {
 // gets priced.
 function NewOrderForm({ onCreated, onCancel }) {
   const [products, setProducts] = useState(null);
+  const [zones, setZones] = useState(null);
   const [phone, setPhone] = useState('');
-  const [name, setName] = useState('');
-  const [fulfilmentType, setFulfilmentType] = useState('delivery');
   const [address, setAddress] = useState('');
+  const [zoneId, setZoneId] = useState('');
   const [items, setItems] = useState([]); // [{productId, quantity}]
   const [pickProductId, setPickProductId] = useState('');
   const [pickQuantity, setPickQuantity] = useState(1);
@@ -56,6 +56,7 @@ function NewOrderForm({ onCreated, onCancel }) {
 
   useEffect(() => {
     api.get('/catalogue').then(setProducts);
+    api.get('/delivery/zones').then(setZones);
   }, []);
 
   function addItem() {
@@ -83,14 +84,14 @@ function NewOrderForm({ onCreated, onCancel }) {
     setError(null);
     if (!phone.trim()) return setError('A phone number is required.');
     if (!items.length) return setError('Add at least one item.');
-    if (fulfilmentType === 'delivery' && !address.trim()) return setError('A delivery address is required.');
+    if (!address.trim()) return setError('A delivery address is required.');
+    if (zones?.length && !zoneId) return setError('Pick a delivery area.');
     setSaving(true);
     try {
       const order = await api.post('/orders', {
         phone: phone.trim(),
-        name: name.trim() || undefined,
-        fulfilment_type: fulfilmentType,
-        address: fulfilmentType === 'delivery' ? address.trim() : undefined,
+        address: address.trim(),
+        zoneId: zoneId || undefined,
         items,
       });
       onCreated(order);
@@ -101,13 +102,13 @@ function NewOrderForm({ onCreated, onCancel }) {
     }
   }
 
-  if (!products) return null;
+  if (!products || !zones) return null;
 
   return (
     <div className="card">
-      <h3 style={{ marginTop: 0 }}>New order</h3>
+      <h3 style={{ marginTop: 0 }}>Create delivery order</h3>
       <p className="hint">
-        For an order that didn't come in on WhatsApp/Instagram/a call -- a landline order, a walk-in. This gets created already marked
+        For a delivery that didn't come in on WhatsApp/Instagram/a call -- a landline order, a walk-in. This gets created already marked
         paid; use this only once payment is actually settled.
       </p>
       {error && <div className="error-banner">{error}</div>}
@@ -118,26 +119,26 @@ function NewOrderForm({ onCreated, onCancel }) {
             <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="e.g. 2348010000000" required />
           </div>
           <div className="field">
-            <label>Customer name (optional)</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} />
+            <label>Delivery address</label>
+            <input value={address} onChange={(e) => setAddress(e.target.value)} required />
           </div>
         </div>
 
-        <div className="form-row">
-          <div className="field">
-            <label>Fulfilment</label>
-            <select value={fulfilmentType} onChange={(e) => setFulfilmentType(e.target.value)}>
-              <option value="delivery">Delivery</option>
-              <option value="pickup">Pickup</option>
-            </select>
-          </div>
-          {fulfilmentType === 'delivery' && (
+        {zones.length > 0 && (
+          <div className="form-row">
             <div className="field">
-              <label>Delivery address</label>
-              <input value={address} onChange={(e) => setAddress(e.target.value)} required />
+              <label>Delivery area</label>
+              <select value={zoneId} onChange={(e) => setZoneId(e.target.value)} required>
+                <option value="">Choose an area...</option>
+                {zones.map((z) => (
+                  <option key={z.id} value={z.id}>
+                    {z.name} ({naira(z.customer_fee)})
+                  </option>
+                ))}
+              </select>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         <label>Items</label>
         <div className="form-row" style={{ alignItems: 'flex-end' }}>
@@ -273,7 +274,7 @@ export default function Orders() {
           <h1>Orders</h1>
           <p className="subtitle">Every order that has come in through the bot or the dashboard.</p>
         </div>
-        {canEdit(staff) && !showNewOrder && <button onClick={() => setShowNewOrder(true)}>New order</button>}
+        {canEdit(staff) && !showNewOrder && <button onClick={() => setShowNewOrder(true)}>Create delivery order</button>}
       </div>
 
       {showNewOrder && (

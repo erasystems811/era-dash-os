@@ -22,7 +22,7 @@ import {
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
 import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, sendOutreachMessage } from '../engine/flow.js';
-import { resolveZoneForAddress, getDeliveryConfig } from '../engine/delivery-zones.js';
+import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { createDelivery } from '../engine/delivery.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
 import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../engine/whatsapp-profile.js';
@@ -473,21 +473,31 @@ router.get('/orders', async (req, res) => {
   res.json(rows);
 });
 
-// Staff creating an order directly -- a delivery or order that came in
-// some way other than a channel this system listens on itself (a landline
-// call, a walk-in). Owner/manager only (requireEditorApi) and never a
-// PIN-tier session even if one somehow held a manager role
-// (requireFullAccessApi) -- creating a real, priced, already-marked-paid
-// order is a different trust level than the one write action (notify-
-// ready) Tier 3 gets.
+// Staff creating an order directly -- always a delivery (Chidera's call,
+// 2026-09-03: "any order manually created is solely for delivery
+// purpose"), for one that came in some way other than a channel this
+// system listens on itself (a landline call, a walk-in). Owner/manager
+// only (requireEditorApi) and never a PIN-tier session even if one
+// somehow held a manager role (requireFullAccessApi) -- creating a real,
+// priced, already-marked-paid order is a different trust level than the
+// one write action (notify-ready) Tier 3 gets.
 //
 // Reuses the real engine pieces rather than a second, parallel path:
-// findOrCreateCustomer (same lookup/branch-scoping WhatsApp uses),
-// resolveZoneForAddress (same deterministic, never-guessed zone match
-// own_riders delivery already relies on), and newReference for the order
-// number. Item prices are always the real, current product.price --
-// never trusted from the request, exactly like every other place an order
-// gets priced.
+// findOrCreateCustomer (same lookup/branch-scoping WhatsApp uses) and
+// newReference for the order number. Item prices are always the real,
+// current product.price -- never trusted from the request, exactly like
+// every other place an order gets priced.
+//
+// The delivery AREA is a real dropdown of this business's own configured
+// delivery_zone rows (f.zoneId), not free-text address matching -- used
+// to run the address through resolveZoneForAddress the same fuzzy way
+// the bot does, but a manually typed address that didn't match any zone's
+// name/aliases meant no delivery_zone_id at all, which meant
+// maybeDispatchOwnRiders (routes/api.js's /orders/:id/status) silently
+// never dispatched a rider for it -- staff had no way to notice until
+// "Ring rider" turned up "No rider offer exists for this order" on an
+// order that looked completely normal otherwise. Picking a real zone up
+// front makes that failure mode impossible by construction.
 //
 // Lands directly as status='preparation', skipping 'confirmed' entirely
 // (Chidera's call) -- 'confirmed' exists to flag a real WhatsApp order as
@@ -503,23 +513,16 @@ router.post('/orders', requireFullAccessApi, requireEditorApi, async (req, res) 
   const f = req.body;
   if (!f.phone) return res.status(400).json({ error: 'A customer phone number is required.' });
   if (!Array.isArray(f.items) || !f.items.length) return res.status(400).json({ error: 'At least one item is required.' });
-  if (!['delivery', 'pickup'].includes(f.fulfilment_type)) return res.status(400).json({ error: 'fulfilment_type must be "delivery" or "pickup".' });
-  if (f.fulfilment_type === 'delivery' && !f.address) return res.status(400).json({ error: 'A delivery address is required.' });
+  if (!f.address) return res.status(400).json({ error: 'A delivery address is required.' });
 
   const branchId = req.branchId || f.branch_id || null;
   const customer = await findOrCreateCustomer({ phoneNumber: f.phone, channel: 'manual', branchId });
-  if (f.name && !customer.name) {
-    await pool.query('update customers set name = $1 where id = $2', [f.name, customer.id]);
-    customer.name = f.name;
-  }
   // Kept in sync on the in-memory customer object too, not just written to
   // the row -- createDelivery() below reads customer.address directly, and
   // a stale value here would silently create a delivery row with the
   // customer's OLD (or no) address instead of the one just typed in.
-  if (f.fulfilment_type === 'delivery' && f.address) {
-    await pool.query('update customers set address = $1 where id = $2', [f.address, customer.id]);
-    customer.address = f.address;
-  }
+  await pool.query('update customers set address = $1 where id = $2', [f.address, customer.id]);
+  customer.address = f.address;
 
   const { rows: products } = await pool.query(
     `select id, name, price from product where id = any($1::uuid[])`,
@@ -536,25 +539,19 @@ router.post('/orders', requireFullAccessApi, requireEditorApi, async (req, res) 
 
   let deliveryFee = 0;
   let deliveryZoneId = null;
-  if (f.fulfilment_type === 'delivery') {
-    const deliveryConfig = await getDeliveryConfig();
-    if (deliveryConfig.mode === 'own_riders') {
-      const zone = await resolveZoneForAddress(f.address, branchId);
-      // Never guess a zone (same rule the bot itself follows) -- an
-      // unresolved address here just means no delivery fee is added and no
-      // own-riders dispatch will ever trigger for it, not a made-up price.
-      // Staff typed the address themselves, so they can see and fix it.
-      if (zone) {
-        deliveryZoneId = zone.id;
-        deliveryFee = Number(zone.customer_fee);
-      }
-    }
+  const deliveryConfig = await getDeliveryConfig();
+  if (deliveryConfig.mode === 'own_riders') {
+    if (!f.zoneId) return res.status(400).json({ error: 'Pick a delivery area for this order.' });
+    const { rows: zoneRows } = await pool.query('select * from delivery_zone where id = $1', [f.zoneId]);
+    if (!zoneRows[0]) return res.status(400).json({ error: 'That delivery area no longer exists -- pick another.' });
+    deliveryZoneId = zoneRows[0].id;
+    deliveryFee = Number(zoneRows[0].customer_fee);
   }
 
   const { rows: orderRows } = await pool.query(
     `insert into "order" (customer_id, reference, engine_state, status, total, delivery_fee, payment_status, fulfilment_type, branch_id, delivery_zone_id)
-     values ($1, $2, 'fulfilment', 'preparation', $3, $4, 'confirmed', $5, $6, $7) returning *`,
-    [customer.id, newReference('ORD'), itemsTotal + deliveryFee, deliveryFee, f.fulfilment_type, branchId, deliveryZoneId]
+     values ($1, $2, 'fulfilment', 'preparation', $3, $4, 'confirmed', 'delivery', $5, $6) returning *`,
+    [customer.id, newReference('ORD'), itemsTotal + deliveryFee, deliveryFee, branchId, deliveryZoneId]
   );
   const order = orderRows[0];
 
@@ -569,9 +566,7 @@ router.post('/orders', requireFullAccessApi, requireEditorApi, async (req, res) 
   // delivery_assignment directly. Caught by testing this end to end, not
   // by inspection: a rider accepted the own_riders offer just fine, but
   // the order's own delivery summary stayed null until this was added.
-  if (f.fulfilment_type === 'delivery') {
-    await createDelivery(order, customer);
-  }
+  await createDelivery(order, customer);
 
   await logActivity(req, 'order_created_manually', { entityType: 'order', entityId: order.id, detail: { reference: order.reference } });
   res.status(201).json(order);
