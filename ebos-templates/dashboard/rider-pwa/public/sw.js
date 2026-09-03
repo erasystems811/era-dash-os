@@ -33,6 +33,14 @@ self.addEventListener('push', (event) => {
       vibrate: RING_VIBRATE_PATTERN,
       requireInteraction: true,
       tag: 'delivery-offer',
+      // Without this, a second push sharing the same tag (the automatic
+      // timeout re-broadcast, or staff's manual "Ring rider" button --
+      // Chidera's own words for what it's for: "the ring rider is to re
+      // alarm riders phone") would silently REPLACE the still-showing
+      // first notification instead of re-alerting -- requireInteraction
+      // keeps that first one sitting there undismissed, so this is the
+      // normal case, not an edge case.
+      renotify: true,
     })
   );
 });
