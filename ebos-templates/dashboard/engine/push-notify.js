@@ -47,7 +47,19 @@ export async function pushOfferToOnDutyRiders(offer, details) {
   await Promise.all(
     riders.map(async (rider) => {
       try {
-        await webpush.sendNotification(rider.push_subscription, payload);
+        // 'high' urgency (Chidera's report, 2026-09-03: "when a rider ...
+        // is sleeping the phone alarm doesnt ring") -- Android's Doze mode
+        // normally holds a push until the next maintenance window once the
+        // screen's been off a while; FCM (what Chrome's push service runs
+        // on) treats a high-urgency message as allowed to wake the device
+        // immediately instead of waiting. Real ceiling, not fixed by this:
+        // some phones (Xiaomi/Tecno/Infinix/Samsung's own extra battery
+        // managers on top of stock Android) can still kill Chrome's
+        // background process regardless of urgency unless the rider
+        // explicitly allows it unrestricted battery/autostart access for
+        // their browser -- a device setting only the rider can change,
+        // same ceiling as the notification SOUND length fix already hit.
+        await webpush.sendNotification(rider.push_subscription, payload, { urgency: 'high' });
       } catch (err) {
         // 404/410 means the push service itself says this subscription is
         // gone for good -- clear it so this rider stops being queried every
