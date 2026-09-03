@@ -450,26 +450,114 @@ const PAYOUT_STATUS_LABEL = { PENDING: 'Pending', SENT: 'Sent', FAILED: 'Failed'
 // already self-managing bank_name/bank_account_number in Settings today.
 // Manual is the default and stays perfectly usable forever; automatic is an
 // optimisation on top, never a requirement to use this feature at all.
-// Automatic payout is switched off at the code level for now (not just this
-// UI) -- routes/api.js's /delivery-config/payout refuses payout_mode:
-// 'automatic' outright. This is a plain status notice, not a working
-// toggle, until that's deliberately lifted.
+//
+// Automatic used to be locked off at the code level regardless of what
+// this form sent (Chidera's earlier call, 2026-09-01: "don't put any
+// money yet") -- lifted 2026-09-03 at her explicit "yes". The secret key
+// is write-only from here: GET /delivery-config only ever returns
+// hasProviderKey (a boolean), never the key itself, so there's nothing to
+// leak back to this screen even for staff who can already see it.
+// Moniepoint isn't offered as a provider choice at all -- engine/payout-
+// providers.js fails closed on it (never independently confirmed against
+// its real transfer API, rule 0.4: never guess with real money).
 function PayoutSettings() {
+  const { staff } = useStaff();
+  const editable = canEdit(staff);
   const [config, setConfig] = useState(null);
+  const [payoutMode, setPayoutMode] = useState('manual');
+  const [provider, setProvider] = useState('');
+  const [secretKey, setSecretKey] = useState('');
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    api.get('/delivery-config').then(setConfig);
-  }, []);
+  function load() {
+    api.get('/delivery-config').then((c) => {
+      setConfig(c);
+      setPayoutMode(c.payout_mode || 'manual');
+      setProvider(c.provider || '');
+    });
+  }
+  useEffect(load, []);
 
   if (!config) return null;
+
+  async function save(e) {
+    e.preventDefault();
+    setError(null);
+    setSaved(false);
+    setSaving(true);
+    try {
+      const updated = await api.post('/delivery-config/payout', {
+        payout_mode: payoutMode,
+        provider: provider || undefined,
+        provider_keys: secretKey.trim() ? { secretKey: secretKey.trim() } : undefined,
+      });
+      setConfig(updated);
+      setSecretKey('');
+      setSaved(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <div className="card">
       <h3 style={{ marginTop: 0 }}>Payout method</h3>
-      <p className="hint" style={{ marginBottom: 0 }}>
-        Manual for now -- every completed delivery lands on the list below, and you mark it paid yourself once you've sent the money.
-        Automatic bank payouts aren't turned on yet.
+      <p className="hint">
+        Manual: every completed delivery lands on the list below, and you mark it paid yourself once you've sent the rider the money.
+        Automatic: this business's own Paystack or Flutterwave account pays the rider directly the moment a delivery completes -- ERA
+        never holds or touches the money at any point.
       </p>
+      {error && <div className="error-banner">{error}</div>}
+      {saved && !error && <p className="hint">Saved.</p>}
+      {editable ? (
+        <form onSubmit={save} style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 420 }}>
+          <div className="field">
+            <label>Payout mode</label>
+            <select value={payoutMode} onChange={(e) => setPayoutMode(e.target.value)}>
+              <option value="manual">Manual</option>
+              <option value="automatic">Automatic</option>
+            </select>
+          </div>
+          {payoutMode === 'automatic' && (
+            <>
+              <div className="field">
+                <label>Provider</label>
+                <select value={provider} onChange={(e) => setProvider(e.target.value)} required>
+                  <option value="">Choose a provider...</option>
+                  <option value="paystack">Paystack</option>
+                  <option value="flutterwave">Flutterwave</option>
+                </select>
+              </div>
+              <div className="field">
+                <label>Secret key{config.hasProviderKey ? ' (already saved -- leave blank to keep it)' : ''}</label>
+                <input
+                  type="password"
+                  value={secretKey}
+                  onChange={(e) => setSecretKey(e.target.value)}
+                  placeholder={config.hasProviderKey ? '••••••••••••' : 'sk_live_...'}
+                  autoComplete="off"
+                />
+                <p className="hint" style={{ marginTop: 4 }}>
+                  From the restaurant's own {provider === 'flutterwave' ? 'Flutterwave' : 'Paystack'} dashboard -- Settings
+                  {provider === 'flutterwave' ? ' → API' : ' → API Keys & Webhooks'}. Payouts come straight out of their own account
+                  balance, so it has to stay funded.
+                </p>
+              </div>
+            </>
+          )}
+          <button type="submit" disabled={saving} style={{ alignSelf: 'flex-start' }}>
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+        </form>
+      ) : (
+        <p className="hint" style={{ marginBottom: 0 }}>
+          Currently: {config.payout_mode === 'automatic' ? `Automatic via ${config.provider}` : 'Manual'}.
+        </p>
+      )}
     </div>
   );
 }

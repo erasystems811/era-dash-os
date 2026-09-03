@@ -320,9 +320,9 @@ router.get('/delivery-config', async (req, res) => {
   if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
   if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
   const { rows } = await pool.query(
-    'select business_id, mode, payout_mode, provider, offer_timeout_seconds from delivery_config limit 1'
+    'select business_id, mode, payout_mode, provider, provider_keys is not null as "hasProviderKey", offer_timeout_seconds from delivery_config limit 1'
   );
-  res.json(rows[0] || { mode: 'none', payout_mode: 'manual', provider: null, offer_timeout_seconds: 90 });
+  res.json(rows[0] || { mode: 'none', payout_mode: 'manual', provider: null, hasProviderKey: false, offer_timeout_seconds: 90 });
 });
 
 // mode itself is ERA's to flip, never the client's (0.7 of the addon spec:
@@ -375,25 +375,49 @@ router.use('/voice', voiceRoutes);
 
 // payout_mode/provider/provider_keys are the restaurant's own to set, once
 // mode is on -- same level of trust as them already self-managing
-// bank_name/bank_account_number in Settings today.
-// Automatic payout is deliberately locked off at the code level right now
-// (Chidera's explicit call, 2026-09-01: "don't put any money yet") -- not
-// just an unchecked box in the UI. Manual is the only real payout path
-// until this is lifted on purpose; provider/provider_keys can still be
-// saved ahead of time (so the form isn't wasted work), they just can't be
-// switched live yet.
+// bank_name/bank_account_number in Settings today. Manual is the default
+// and stays perfectly usable forever; automatic is an optimisation on top,
+// never a requirement.
+//
+// Automatic payout used to be hard-refused at the code level regardless of
+// what was posted (Chidera's earlier call, 2026-09-01: "don't put any
+// money yet") -- lifted 2026-09-03 at her explicit "yes" once a real
+// restaurant actually wanted it. Still guarded for real, not just
+// unlocked outright: 'moniepoint' is refused specifically for automatic
+// mode, since engine/payout-providers.js itself fails closed on that
+// provider (its transfer API was never independently confirmed against
+// real docs -- rule 0.4, never guess with real money), and switching to
+// automatic without ever having supplied a secret key (this request or a
+// previously saved one) is refused too, so a business can never end up
+// "automatic" with nothing on file that could actually pay a rider.
 router.post('/delivery-config/payout', requireEditorApi, async (req, res) => {
   const { payout_mode, provider, provider_keys } = req.body;
+  if (!['manual', 'automatic'].includes(payout_mode)) {
+    return res.status(400).json({ error: 'payout_mode must be "manual" or "automatic".' });
+  }
+  if (provider && !['paystack', 'flutterwave', 'moniepoint'].includes(provider)) {
+    return res.status(400).json({ error: `Unknown payout provider "${provider}".` });
+  }
   if (payout_mode === 'automatic') {
-    return res.status(403).json({ error: 'Automatic payout is not enabled yet -- deliveries pay out manually for now.' });
+    if (!provider) return res.status(400).json({ error: 'Pick a payout provider first.' });
+    if (provider === 'moniepoint') {
+      return res.status(400).json({ error: 'Moniepoint automatic payout is not built yet -- use manual payout for now, or switch to Paystack/Flutterwave.' });
+    }
+    const { rows: existing } = await pool.query('select provider_keys from delivery_config limit 1');
+    if (!provider_keys?.secretKey && !existing[0]?.provider_keys) {
+      return res.status(400).json({ error: 'Add this provider\'s secret key before switching to automatic payout.' });
+    }
   }
   const { rows } = await pool.query(
-    `insert into delivery_config (business_id, payout_mode, provider, provider_keys)
-     values ((select id from business limit 1), 'manual', $1, $2)
-     on conflict (business_id) do update set payout_mode = 'manual', provider = excluded.provider,
-       provider_keys = coalesce(excluded.provider_keys, delivery_config.provider_keys)
-     returning business_id, mode, payout_mode, provider, offer_timeout_seconds`,
-    [provider || null, provider_keys ? encrypt(JSON.stringify(provider_keys)) : null]
+    `with saved as (
+       insert into delivery_config (business_id, payout_mode, provider, provider_keys)
+       values ((select id from business limit 1), $1, $2, $3)
+       on conflict (business_id) do update set payout_mode = excluded.payout_mode, provider = excluded.provider,
+         provider_keys = coalesce(excluded.provider_keys, delivery_config.provider_keys)
+       returning *
+     )
+     select business_id, mode, payout_mode, provider, provider_keys is not null as "hasProviderKey", offer_timeout_seconds from saved`,
+    [payout_mode, provider || null, provider_keys?.secretKey ? encrypt(JSON.stringify(provider_keys)) : null]
   );
   res.json(rows[0]);
 });
