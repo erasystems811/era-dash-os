@@ -88,13 +88,18 @@ async function logMessage({ customerId, direction, channel, sender, body, trigge
   await pool.query(`update customers set last_message = $1, last_message_at = now() where id = $2`, [body, customerId]);
 }
 
-// Instagram's send response carries the new message's own id (message_id)
-// -- WhatsApp's response shape has no equivalent use here (coexistence
-// already has its own, cleaner smb_message_echoes signal), so this only
-// ever returns something for an Instagram send. See message.platform_
-// message_id's schema comment for what this id gets used for.
+// Instagram's send response carries the new message's own id (message_id).
+// WhatsApp's carries its own wamid too (sendResult.messages[0].id) -- kept
+// unused here until 2026-09-02, when a real live bug (a plain-text send
+// outside the 24h window, accepted synchronously then failed later via a
+// status webhook, with no way to know which conversation row it belonged
+// to) made it clear webhook-whatsapp.js's status handler needs this to
+// correlate a failure back to the message that produced it. See message.
+// platform_message_id's schema comment for the full story.
 function platformMessageIdFrom(customer, sendResult) {
-  return customer.channel === 'instagram' ? sendResult?.message_id || null : null;
+  if (customer.channel === 'instagram') return sendResult?.message_id || null;
+  if (customer.channel === 'whatsapp') return sendResult?.messages?.[0]?.id || null;
+  return null;
 }
 
 // AI-generated text (greetings, KB answers) sometimes reaches for a dash
@@ -149,9 +154,25 @@ export async function sendStaffReply(customerId, text, staffId) {
   const customer = rows[0];
   if (!customer) throw new Error('Customer not found.');
 
-  const isFirstTakeover = staffId && customer.handled_by_staff_id !== staffId;
-
-  const sendResult = await botEngine.sendMessage({ trigger: 'explicit_type_command', to: recipientFor(customer), text, whatsappSend: await senderFor(customer) });
+  let sendResult;
+  try {
+    sendResult = await botEngine.sendMessage({ trigger: 'explicit_type_command', to: recipientFor(customer), text, whatsappSend: await senderFor(customer) });
+  } catch (err) {
+    // Error 131047 is WhatsApp refusing a plain text send outside the 24h
+    // session window -- a stale conversation, or one that never started
+    // (Chidera's call, 2026-09-02: "normal messaging on normal chat", no
+    // separate "message a customer first" flow, and it must not just fail
+    // silently). Same reply box, same endpoint -- falls back to the
+    // approved business_outreach template with the exact text staff typed,
+    // automatically, instead of surfacing this as a dead end.
+    if (customer.channel === 'whatsapp' && /131047/.test(err.message)) {
+      const credentials = await getWhatsAppCredentials(customer.branch_id);
+      const components = [{ type: 'body', parameters: [{ type: 'text', text }] }];
+      sendResult = await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
+    } else {
+      throw err;
+    }
+  }
   await logMessage({
     customerId: customer.id,
     direction: 'outbound',
@@ -173,47 +194,57 @@ export async function sendStaffReply(customerId, text, staffId) {
     `update customers set handled_by = 'staff', handled_by_staff_id = coalesce($1, handled_by_staff_id), handover_at = coalesce(handover_at, now()) where id = $2`,
     [staffId || null, customer.id]
   );
-
-  // Other staff who'd also get a handover alert should know someone's
-  // already on it, the moment they actually reply -- not left to find out
-  // by both answering the same customer.
-  if (isFirstTakeover) {
-    const { rows: staffRows } = await pool.query('select name, phone_number from staff where id = $1', [staffId]);
-    const staffName = staffRows[0]?.name || 'A staff member';
-    const actingStaffPhone = staffRows[0]?.phone_number;
-    const others = (await handoverRecipients()).filter((phone) => phone !== actingStaffPhone);
-    for (const to of others) {
-      try {
-        await botEngine.sendMessage({
-          trigger: 'staff_handoff_intro',
-          to,
-          text: `${staffName} has taken over the chat with ${displayNameFor(customer)}.`,
-          whatsappSend: sendWhatsApp,
-        });
-      } catch (err) {
-        console.error(`Failed to notify ${to} of takeover:`, err);
-      }
-    }
-  }
 }
 
-// Staff messaging a customer FIRST -- a new or dormant customer, outside
-// any 24h session window, so this must go out as an approved template
-// ("business_outreach", see scripts/lib/whatsapp-templates.mjs), never as a
-// plain-text send, or Meta rejects it (error 131047). No existing session
-// to key off of, so branchId comes from the acting staff member, same as
-// every other staff-initiated write in routes/api.js.
-export async function sendOutreachMessage({ phoneNumber, message, branchId, staffId }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channel: 'whatsapp', branchId });
-  const credentials = await getWhatsAppCredentials(customer.branch_id);
-  const components = [{ type: 'body', parameters: [{ type: 'text', text: message }] }];
-  await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'whatsapp', sender: 'staff', body: message, trigger: 'outreach' });
-  await pool.query(
-    `update customers set handled_by = 'staff', handled_by_staff_id = coalesce($1, handled_by_staff_id), handover_at = coalesce(handover_at, now()) where id = $2`,
-    [staffId || null, customer.id]
+// Staff reaching a phone number with no existing thread -- just resolves
+// (or creates) the customer row so there's a conversation to open. No send
+// here, no separate "outreach" ceremony: sendStaffReply's own fallback
+// (business_outreach template when a plain send hits error 131047) is what
+// actually gets the first message out, from the exact same reply box as
+// any other conversation.
+export async function startConversation({ phoneNumber, branchId }) {
+  return findOrCreateCustomer({ phoneNumber, channel: 'whatsapp', branchId });
+}
+
+// Called from webhook-whatsapp.js's status handler when Meta reports a send
+// failed with error 131047 -- the window-closed case sendStaffReply's own
+// try/catch fallback can't catch, because Meta accepted the request
+// synchronously (a real wamid came back, no error) and only failed it
+// afterward, async, via this same webhook. Real bug, found live
+// 2026-09-02: two staff replies to real customers went out this way,
+// Meta accepted both, neither customer ever got anything, and nothing in
+// this app knew, because this webhook event was never even listened for.
+// Retries the exact text that failed, via the same business_outreach
+// template sendStaffReply's synchronous fallback already uses, so this is
+// the second half of the same fix, not a separate mechanism.
+export async function retryFailedSendAsTemplate(failedPlatformMessageId) {
+  const { rows: msgRows } = await pool.query(
+    `select * from message where platform_message_id = $1 and direction = 'outbound'`,
+    [failedPlatformMessageId]
   );
-  return customer;
+  const original = msgRows[0];
+  if (!original) return; // nothing to correlate -- can't safely retry blind
+
+  await pool.query(`update message set delivery_status = 'failed' where id = $1`, [original.id]);
+
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [original.customer_id]);
+  const customer = custRows[0];
+  if (!customer || customer.channel !== 'whatsapp') return; // template mechanism is WhatsApp-only
+
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  const components = [{ type: 'body', parameters: [{ type: 'text', text: original.body }] }];
+  const sendResult = await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
+
+  await pool.query(`update message set delivery_status = 'retried' where id = $1`, [original.id]);
+  await logMessage({
+    customerId: customer.id,
+    direction: 'outbound',
+    channel: 'whatsapp',
+    sender: original.sender,
+    body: original.body,
+    trigger: 'window_closed_retry',
+    platformMessageId: sendResult?.messages?.[0]?.id,
+  });
 }
 
 // Claims a conversation for staff WITHOUT sending anything -- the
@@ -224,36 +255,20 @@ export async function sendOutreachMessage({ phoneNumber, message, branchId, staf
 // window, so the bot would still answer the customer in the meantime, both
 // of them replying at once. Clicking this first closes that window
 // immediately, before typing even starts.
+// Who took over what, and when, lives in the Activity Log now (routes/
+// api.js's take-over route already calls logActivity for this) -- staff
+// used to also get it pushed as a WhatsApp text ("X has taken over the chat
+// with Y"), which Chidera flagged as the wrong channel for it, 2026-09-02:
+// that's dashboard information, not something that should land on a phone.
 export async function takeOverConversation(customerId, staffId) {
   const { rows } = await pool.query('select * from customers where id = $1', [customerId]);
   const customer = rows[0];
   if (!customer) throw new Error('Customer not found.');
 
-  const isFirstTakeover = staffId && customer.handled_by_staff_id !== staffId;
-
   await pool.query(
     `update customers set handled_by = 'staff', handled_by_staff_id = coalesce($1, handled_by_staff_id), handover_at = coalesce(handover_at, now()) where id = $2`,
     [staffId || null, customer.id]
   );
-
-  if (isFirstTakeover) {
-    const { rows: staffRows } = await pool.query('select name, phone_number from staff where id = $1', [staffId]);
-    const staffName = staffRows[0]?.name || 'A staff member';
-    const actingStaffPhone = staffRows[0]?.phone_number;
-    const others = (await handoverRecipients()).filter((phone) => phone !== actingStaffPhone);
-    for (const to of others) {
-      try {
-        await botEngine.sendMessage({
-          trigger: 'staff_handoff_intro',
-          to,
-          text: `${staffName} has taken over the chat with ${displayNameFor(customer)}.`,
-          whatsappSend: sendWhatsApp,
-        });
-      } catch (err) {
-        console.error(`Failed to notify ${to} of takeover:`, err);
-      }
-    }
-  }
 }
 
 // A real human reply sent from the business's OWN WhatsApp app --
@@ -265,35 +280,18 @@ export async function takeOverConversation(customerId, staffId) {
 // "a real human is here" signal instead (see the gate checks in
 // handlePendingBatch/handleInboundMedia). Logged into the same message
 // history as everything else, so resumeBotControl's catch-up sees the full
-// conversation regardless of which side of coexistence it happened on.
+// conversation regardless of which side of coexistence it happened on. Used
+// to also WhatsApp-broadcast "Someone has taken over the chat with X" to
+// every other handover-alert number -- removed, same call as the dashboard
+// takeover broadcasts (Chidera's call, 2026-09-02/03): who took over what
+// belongs in the dashboard/Activity Log, not pushed to a phone.
 export async function recordAppReply({ phoneNumber, text }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channel: 'whatsapp' });
-  const wasAlreadyHandled = customer.handled_by === 'staff' && (customer.handled_by_staff_id || customer.app_handled_at);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'staff', body: text, trigger: 'app_reply' });
   await pool.query(
     `update customers set handled_by = 'staff', app_handled_at = coalesce(app_handled_at, now()), handover_at = coalesce(handover_at, now()) where id = $1`,
     [customer.id]
   );
-
-  // Same "someone has taken over" broadcast as sendStaffReply's first-
-  // takeover case -- other handover-alert numbers should know the moment
-  // anyone starts answering, whether that happened from the dashboard or
-  // the app.
-  if (!wasAlreadyHandled) {
-    const others = (await handoverRecipients()).filter((phone) => phone !== phoneNumber);
-    for (const to of others) {
-      try {
-        await botEngine.sendMessage({
-          trigger: 'staff_handoff_intro',
-          to,
-          text: `Someone has taken over the chat with ${displayNameFor(customer)} from the WhatsApp app.`,
-          whatsappSend: sendWhatsApp,
-        });
-      } catch (err) {
-        console.error(`Failed to notify ${to} of app takeover:`, err);
-      }
-    }
-  }
 }
 
 // Instagram's version of recordAppReply above -- a real human reply typed
@@ -304,28 +302,11 @@ export async function recordAppReply({ phoneNumber, text }) {
 // calling this, so by the time this runs, that check has already happened.
 export async function recordAppReplyInstagram({ channelId, text }) {
   const customer = await findOrCreateCustomer({ channelId, channel: 'instagram' });
-  const wasAlreadyHandled = customer.handled_by === 'staff' && (customer.handled_by_staff_id || customer.app_handled_at);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'staff', body: text, trigger: 'app_reply' });
   await pool.query(
     `update customers set handled_by = 'staff', app_handled_at = coalesce(app_handled_at, now()), handover_at = coalesce(handover_at, now()) where id = $1`,
     [customer.id]
   );
-
-  if (!wasAlreadyHandled) {
-    const others = await handoverRecipients();
-    for (const to of others) {
-      try {
-        await botEngine.sendMessage({
-          trigger: 'staff_handoff_intro',
-          to,
-          text: `Someone has taken over the chat with ${displayNameFor(customer)} from the Instagram app.`,
-          whatsappSend: sendWhatsApp,
-        });
-      } catch (err) {
-        console.error(`Failed to notify ${to} of Instagram app takeover:`, err);
-      }
-    }
-  }
 }
 
 // WhatsApp customers are found/created by phone_number (unique index on
@@ -389,6 +370,20 @@ async function getOpenOrder(customerId) {
   const order = rows[0] || null;
   if (order) await pool.query(`update "order" set updated_at = now() where id = $1`, [order.id]);
   return order;
+}
+
+// Drives the 24h "want to order again?" window (Chidera's call,
+// 2026-09-03): once completed_at is more than 24h old, this returns null
+// and a bare greeting goes back to the normal cold-open flow -- exactly
+// "back to root" after 24h, no separate cleanup job needed, the interval
+// check alone does it.
+async function recentlyCompletedOrder(customerId) {
+  const { rows } = await pool.query(
+    `select id from "order" where customer_id = $1 and status = 'completed' and completed_at > now() - interval '24 hours'
+     order by completed_at desc limit 1`,
+    [customerId]
+  );
+  return rows[0] || null;
 }
 
 // An order a customer never confirmed or actively walked away from just
@@ -523,8 +518,15 @@ async function handover(customer, reason, extra, ackText) {
 
   // Never leave the customer with silence just because the bot handed off
   // -- they get an ack here regardless of whether anyone is even configured
-  // to receive the internal staff alert below.
-  await reply(customer, ackText || `Let me confirm this properly for you, I'll get back to you here shortly.`, 'handover_ack');
+  // to receive the internal staff alert below. ackText === false means the
+  // caller already sent its own tailored ack right before calling handover
+  // (e.g. "Noted, I will confirm the payment...") -- found live, 2026-09-03:
+  // that case still fell through to this default line too, so the customer
+  // got two stitched-together acks back to back, same bug as the earlier
+  // error-recovery fix, different call site.
+  if (ackText !== false) {
+    await reply(customer, ackText || `Let me confirm this properly for you, I'll get back to you here shortly.`, 'handover_ack');
+  }
 
   const recipients = await handoverRecipients();
   if (!recipients.length) return;
@@ -996,12 +998,81 @@ async function handleCollectFulfilment(customer, order, text) {
   if (order.fulfilment_type === 'delivery') {
     const deliveryConfig = await getDeliveryConfig();
     if (deliveryConfig.mode === 'own_riders' && !order.delivery_zone_id) {
-      // Persisted the moment it's resolved (not re-resolved at dispatch
-      // time) so the price the customer is about to pay and the amount the
-      // rider is eventually owed both come from the exact same zone row --
-      // see schema.sql's own comment on order.delivery_zone_id.
-      const zone = await resolveZoneForAddress(customer.address, order.branch_id);
-      if (!zone) {
+      // Three states, same null/non-null gate idiom confirm_order's own
+      // confirmed_at uses (see schema.sql's comment on the two columns
+      // below): a candidate zone awaiting yes/no, "already asked what area
+      // this is" awaiting their answer, or neither yet (first pass).
+      // Chidera's call, 2026-09-02: a matched zone is never applied
+      // silently any more -- always confirmed first -- and a miss asks the
+      // customer directly for the area instead of giving straight up to a
+      // human. Persisted the moment it's actually confirmed (not
+      // re-resolved at dispatch time) so the price the customer is about
+      // to pay and the amount the rider is eventually owed both come from
+      // the exact same zone row -- see schema.sql's own comment on
+      // order.delivery_zone_id.
+      if (order.delivery_zone_candidate_id) {
+        const confirmQuestion = 'Are they confirming yes, that this is the right delivery area?';
+        const confirmedField = botEngine.defineField({
+          key: 'area_confirmed',
+          label: 'delivery area confirmation',
+          type: 'boolean',
+          description: describeForExtraction(confirmQuestion, { type: 'boolean' }),
+        });
+        const confirmed = text === null ? null : await botEngine.extractField(confirmedField, text, { askJson });
+        if (confirmed === true) {
+          const { rows: zoneRows } = await pool.query('select * from delivery_zone where id = $1', [order.delivery_zone_candidate_id]);
+          const zone = zoneRows[0];
+          await pool.query(
+            `update "order" set delivery_zone_id = $1, delivery_fee = $2, delivery_zone_candidate_id = null where id = $3`,
+            [zone.id, zone.customer_fee, order.id]
+          );
+          order.delivery_zone_id = zone.id;
+          order.delivery_fee = Number(zone.customer_fee);
+          // Falls through below to total/payment -- confirmed, nothing left to ask.
+        } else if (confirmed === false) {
+          // Try the rejection itself before falling back to a blind
+          // re-ask -- "no, it's Wuse" says both in one message, and
+          // resolveZoneForAddress's plain substring match catches that.
+          const retry = await resolveZoneForAddress(text, order.branch_id);
+          if (retry) {
+            await pool.query(`update "order" set delivery_zone_candidate_id = $1 where id = $2`, [retry.id, order.id]);
+            order.delivery_zone_candidate_id = retry.id;
+            await reply(customer, `Got it, just to confirm, is that delivery to ${retry.name}?`);
+            return;
+          }
+          await pool.query(
+            `update "order" set delivery_zone_candidate_id = null, delivery_area_prompted_at = now() where id = $1`,
+            [order.id]
+          );
+          order.delivery_zone_candidate_id = null;
+          order.delivery_area_prompted_at = new Date();
+          await reply(customer, 'No problem -- please, what area is this delivery for?');
+          return;
+        } else {
+          const { rows: zoneRows } = await pool.query('select name from delivery_zone where id = $1', [order.delivery_zone_candidate_id]);
+          await reply(customer, `Just to confirm, is that delivery to ${zoneRows[0]?.name}?`);
+          return;
+        }
+      } else if (!order.delivery_area_prompted_at) {
+        const zone = await resolveZoneForAddress(customer.address, order.branch_id);
+        if (zone) {
+          await pool.query(`update "order" set delivery_zone_candidate_id = $1 where id = $2`, [zone.id, order.id]);
+          order.delivery_zone_candidate_id = zone.id;
+          await reply(customer, `Just to confirm, is that delivery to ${zone.name}?`);
+          return;
+        }
+        await pool.query(`update "order" set delivery_area_prompted_at = now() where id = $1`, [order.id]);
+        order.delivery_area_prompted_at = new Date();
+        await reply(customer, 'Please, what area is this delivery for?');
+        return;
+      } else {
+        const zone = text === null ? null : await resolveZoneForAddress(text, order.branch_id);
+        if (zone) {
+          await pool.query(`update "order" set delivery_zone_candidate_id = $1 where id = $2`, [zone.id, order.id]);
+          order.delivery_zone_candidate_id = zone.id;
+          await reply(customer, `Just to confirm, is that delivery to ${zone.name}?`);
+          return;
+        }
         // Never guess a zone (spec B5) -- a wrong one means a wrong price
         // charged to the customer and a wrong amount owed to a rider, both
         // real money. Same handover primitive sendPaymentInstructions
@@ -1009,9 +1080,6 @@ async function handleCollectFulfilment(customer, order, text) {
         await handover(customer, 'Delivery address could not be matched to a delivery zone');
         return;
       }
-      await pool.query(`update "order" set delivery_zone_id = $1, delivery_fee = $2 where id = $3`, [zone.id, zone.customer_fee, order.id]);
-      order.delivery_zone_id = zone.id;
-      order.delivery_fee = Number(zone.customer_fee);
     } else if (deliveryConfig.mode !== 'own_riders') {
       const deliveryFee = await estimateDeliveryFee(order, customer);
       if (deliveryFee > 0) {
@@ -1085,7 +1153,9 @@ async function sendPaymentInstructions(customer, order) {
     ? `Please pay NGN ${total}${deliveryFeeLine} to ${b.bank_name}, ${b.bank_account_number}, ${b.bank_account_name}, then send proof of payment here.`
     : `Your total is NGN ${total}${deliveryFeeLine}. Let me get someone to confirm payment details with you.`;
   await reply(customer, `${invoiceLine}\n\n${payLine}`);
-  if (!hasBankDetails) await handover(customer, 'Order ready for payment but no payment method is configured for this business yet');
+  // ackText false -- payLine already told them someone will confirm payment
+  // details (see above), same double-ack bug as the others fixed 2026-09-03.
+  if (!hasBankDetails) await handover(customer, 'Order ready for payment but no payment method is configured for this business yet', null, false);
 }
 
 // A customer nudging the bot while still unpaid ("where's the link", "resend
@@ -1146,6 +1216,35 @@ function looksLikeBrowseQuestion(text) {
 }
 
 // Shared by every place that can be asked a broad "what do you have" --
+// Instagram has no equivalent of WhatsApp's interactive List Message --
+// sendMenuList is a WhatsApp-only Graph API feature, confirmed while
+// building the WhatsApp version of this. The system prompt driving `answer`
+// (answerOrderQuestion/answerFromKnowledgeBase) is told never to write out
+// the item list itself for a broad availability question, on the promise
+// that "a real menu is shown separately as an interactive button right
+// after" -- a promise this function used to just silently break for
+// Instagram, returning `answer` unchanged (often null, or a vague filler
+// line the AI generated instead of a real list). Found live, 2026-09-03,
+// Chidera's own words: "why did i ask what is available on ig and they
+// said we have some tasty dis for you? where is menu?" A plain-text
+// listing is the honest fallback here -- not the wall-of-text WhatsApp
+// avoids by having a real button, but strictly better than nothing or a
+// vague non-answer, which is the actual choice on this channel.
+async function formatMenuAsText(branchId) {
+  const products = await resolveMenu(branchId);
+  if (!products.length) return null;
+  // No dash separator and no toLocaleString comma-grouping -- reply()'s own
+  // normalizeDashes turns " - " into ", " and adds a space after every
+  // comma it finds, including ones already inside a formatted number, which
+  // mangled "NGN 1,500" into "NGN 1, 500" the first time this ran live.
+  // Plain digits match how every other bot-generated price in this file
+  // (e.g. sendPaymentInstructions's `NGN ${order.total}`) already writes
+  // one -- comma-grouping is a dashboard-UI-only convention (orderStages.js
+  // et al), not something bot text has ever done.
+  const lines = products.map((p) => `${p.name}: NGN ${Number(p.price)}`);
+  return `Here's what we have:\n${lines.join('\n')}`;
+}
+
 // mid-order (answerOrderQuestion) and pre-order (answerFromKnowledgeBase)
 // alike. Prefers the real, always-current interactive menu button (built
 // and sent by this backend, re-sent every time it's asked, not just once)
@@ -1154,7 +1253,43 @@ function looksLikeBrowseQuestion(text) {
 // is never left with silence just because of a transient WhatsApp error.
 async function resolveGeneralAvailability(customer, isGeneralAvailability, answer, rawText, branchId) {
   const shouldShowMenu = isGeneralAvailability || looksLikeBrowseQuestion(rawText);
-  if (!shouldShowMenu || customer.channel === 'instagram' || process.env.EBOS_SANDBOX === '1') return answer;
+  if (!shouldShowMenu) return answer;
+
+  if (customer.channel === 'instagram') {
+    // Real menu photo(s), same source and ordering handleCollectInfo's own
+    // items-field fallback already uses (position asc), take priority over
+    // the plain-text listing -- Chidera's call, 2026-09-03: "instagram main
+    // fallback should be a photo of the menus first (there could be more
+    // than 1 photo)". imageSenderFor already resolves to
+    // sendInstagramDocument for this channel, so no new send plumbing
+    // needed, just reusing what's there.
+    if (process.env.PUBLIC_URL) {
+      const { rows: photos } = await pool.query('select id from menu_photo order by position');
+      if (photos.length) {
+        const sendImage = await imageSenderFor(customer);
+        let sentAny = false;
+        for (const photo of photos) {
+          try {
+            await sendImage(recipientFor(customer), `${process.env.PUBLIC_URL}/documents/menu-photo/${photo.id}`);
+            sentAny = true;
+          } catch (err) {
+            console.error('Failed to forward menu photo:', err.message);
+          }
+        }
+        if (sentAny) {
+          await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[${photos.length} menu photo(s) sent]`, trigger: 'menu_shown' });
+          return answer;
+        }
+      }
+    }
+    // No menu photos configured (or the send failed outright) -- fall back
+    // to a real text listing rather than nothing, same "something beats
+    // silence" reasoning as before this photo path existed.
+    const menuText = await formatMenuAsText(branchId);
+    if (!menuText) return answer;
+    return answer ? `${answer}\n\n${menuText}` : menuText;
+  }
+  if (process.env.EBOS_SANDBOX === '1') return answer;
 
   const shown = await sendMenuList(recipientFor(customer), "Here's our menu, tap below to see everything we have.", branchId).catch((err) => {
     console.error('sendMenuList failed:', err.message);
@@ -1207,7 +1342,7 @@ async function handleWaitingOnPayment(customer, order, text) {
     return;
   }
   await reply(customer, `Let me get someone to confirm payment details with you.`, 'payment_reminder');
-  await handover(customer, 'Customer waiting on payment but no payment link/bank details are available');
+  await handover(customer, 'Customer waiting on payment but no payment link/bank details are available', null, false);
 }
 
 // Reviewing an order isn't a one-shot thing -- "add a chapman" or "remove
@@ -1262,7 +1397,7 @@ async function handleOrderModification(customer, order, mods) {
 
   if (paid) {
     await reply(customer, `Got it, added that on. Your order's now ${lines}, new total NGN ${total} (NGN ${addedValue} more than what's already paid). Our team will confirm the extra payment with you.`);
-    await handover(customer, 'Customer added items to an already-paid order, extra payment needs confirming');
+    await handover(customer, 'Customer added items to an already-paid order, extra payment needs confirming', null, false);
     return;
   }
 
@@ -1339,23 +1474,59 @@ async function handleFulfilmentChange(customer, order, newType) {
 const PURE_ACK =
   /^(ok(ay)?|yh|yeah|yep|yup|alright|aight|sure|got ?it|noted|fine|k|cool|nice|sounds good|perfect|great|awesome|bet|gotcha|understood|will do|no problem|np|good|bye|goodbye|see you|take care|have a good (day|night|one)|all good|that works|that'?s fine)[.!]*$/i;
 const PURE_THANKS = /^(thanks?( you)?|tysm|thank ?u|appreciate ?it|much appreciated)[.!]*$/i;
+// A polite decline of whatever was just offered/asked ("anything else?" ->
+// "no thank you") -- NOT the same as PURE_THANKS (that regex is anchored
+// and requires the whole line to start with "thanks"/"thank you", so a
+// leading "no" already fails it -- found live, 2026-09-03: "no thank you"
+// matched neither PURE_THANKS nor PURE_ACK, so it fell all the way through
+// to full AI dispatch instead of getting a simple acknowledgment). Always
+// gets a short "Okay!" -- never silence (declining deserves some
+// response) and never the 'thanks' branch's "You're welcome!" (nonsensical
+// for a decline).
+const PURE_DECLINE = /^(no,? ?thanks?( you)?|nah,? ?(i'?m good|thanks?)|i'?m good( thanks?)?|not (right )?now|no,? ?i'?m (good|fine)|no need)[.!]*$/i;
 
 // null = not applicable (some part of the message needs a real answer),
 // 'ack' = every line was a pure acknowledgment, reply with nothing,
 // 'thanks' = at least one line was a thank-you (and the rest, if any, were
 // pure acks too) -- a plain "you're welcome" back, not silence.
+// 'decline' = a polite "no" to whatever was just offered -- a plain "Okay!"
+// back, not silence, not "you're welcome".
 function classifyPureAck(text) {
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
   if (!lines.length) return null;
   let sawThanks = false;
+  let sawDecline = false;
   for (const line of lines) {
     if (PURE_THANKS.test(line)) {
       sawThanks = true;
       continue;
     }
+    if (PURE_DECLINE.test(line)) {
+      sawDecline = true;
+      continue;
+    }
     if (!PURE_ACK.test(line)) return null;
   }
+  if (sawDecline) return 'decline';
   return sawThanks ? 'thanks' : 'ack';
+}
+
+// Real bug, found live 2026-09-03: this used to say "Paid and being
+// prepared for delivery" no matter what order.status actually was --
+// including for an order already out with a rider. A customer asking "how
+// long" got told the truth from days ago, not the truth right now. Every
+// stage own_riders actually moves through (orderStages.js's own pipeline
+// comment): preparation -> ready -> delivery/in_transit -> completed.
+function fulfilmentStatusLine(order) {
+  if (order.status === 'ready') {
+    return order.fulfilment_type === 'delivery' ? `Paid and ready, waiting on a rider to pick it up.` : `Paid and ready for pickup whenever you are.`;
+  }
+  if (order.status === 'delivery' || order.status === 'in_transit') {
+    return `Paid and on its way to you with the rider now.`;
+  }
+  // 'preparation' (the normal case) and any other/unexpected status this
+  // function still gets called for -- same honest default it always had.
+  return order.fulfilment_type === 'delivery' ? `Paid and being prepared for delivery.` : `Paid and being prepared for pickup.`;
 }
 
 // Same real-question-first principle as handleWaitingOnPayment -- already
@@ -1373,20 +1544,17 @@ async function handleFulfilmentStageMessage(customer, order, text) {
   // upset, not just asking.
   if (await detectDelayComplaint(text)) {
     await reply(customer, `I'm sorry about this, let me check, I'll get back to you shortly.`, 'delay_complaint_ack');
-    await handover(customer, 'Customer complained about order delay/wait time');
+    await handover(customer, 'Customer complained about order delay/wait time', null, false);
     return;
   }
 
-  const statusLine =
-    order.fulfilment_type === 'delivery'
-      ? `Paid and being prepared for delivery.`
-      : `Paid and being prepared for pickup.`;
+  const statusLine = fulfilmentStatusLine(order);
   const answer = await answerOrThenShowMenu(customer, order, text, statusLine);
   if (answer) {
     await reply(customer, answer, 'order_question_answer');
     return;
   }
-  await reply(customer, `Your order is already paid and being prepared. Let me know if you'd like to add anything else.`);
+  await reply(customer, `${statusLine} Let me know if you'd like to add anything else.`);
 }
 
 // Switching delivery<->pickup after payment is real (paid expecting to pick
@@ -1421,7 +1589,7 @@ async function handlePostPaymentFulfilmentChange(customer, order, newType) {
   }
 
   await reply(customer, `Got it, you'd like ${newType} instead of ${previousType}. Your order's already paid, so let me get someone to sort that out for you.`);
-  await handover(customer, `Customer wants to switch an already-paid order from ${previousType} to ${newType}`);
+  await handover(customer, `Customer wants to switch an already-paid order from ${previousType} to ${newType}`, null, false);
 }
 
 async function dispatch(customer, order, text) {
@@ -1602,6 +1770,42 @@ export async function completePayment(orderId) {
 export const DEBOUNCE_MS = 15_000;
 const pendingTimers = new Map();
 
+// A single one-shot typing indicator at the start of a debounce cycle used
+// to be the whole story -- fine when Meta's own indicator outlives the
+// debounce+processing wait, not fine when it doesn't. Found live,
+// 2026-09-03, Chidera's own words: "why does instagram not show that
+// typing thing again? even whatsapp doesnt sometimes" -- Instagram's
+// sender_action typing_on visibly expires well inside 15s, and WhatsApp's
+// own ~25s window can still run out if a real AI call inside
+// handlePendingBatch takes a while after the debounce fires. This keeps
+// re-sending on an interval (under each platform's own known lifetime)
+// for as long as this customer has a message genuinely being worked on,
+// and stops the moment processPendingMessages actually finishes -- see
+// startTypingKeepAlive/stopTypingKeepAlive below and their two call sites.
+const typingIntervals = new Map();
+
+function startTypingKeepAlive(customer, channel, messageId, channelId) {
+  if (typingIntervals.has(customer.id)) return; // already running for this burst
+  const tick = () => {
+    if (channel === 'whatsapp') {
+      markTypingIndicator(messageId).catch((err) => console.error('Typing indicator failed:', err));
+    } else if (channel === 'instagram') {
+      markInstagramTypingIndicator(channelId).catch((err) => console.error('Instagram typing indicator failed:', err));
+    }
+  };
+  tick();
+  const intervalMs = channel === 'whatsapp' ? 20_000 : 15_000;
+  typingIntervals.set(customer.id, setInterval(tick, intervalMs));
+}
+
+function stopTypingKeepAlive(customerId) {
+  const id = typingIntervals.get(customerId);
+  if (id) {
+    clearInterval(id);
+    typingIntervals.delete(customerId);
+  }
+}
+
 function scheduleDebouncedProcessing(customer) {
   const existing = pendingTimers.get(customer.id);
   if (existing) clearTimeout(existing);
@@ -1709,19 +1913,52 @@ async function processPendingMessages(customerId) {
     `select id, body from message where customer_id = $1 and direction = 'inbound' and processed_at is null order by created_at`,
     [customerId]
   );
-  if (!pending.length) return; // already answered by the time this fired
+  if (!pending.length) {
+    stopTypingKeepAlive(customerId); // already answered by the time this fired
+    return;
+  }
   const text = pending.map((m) => m.body).join('\n');
 
-  await handlePendingBatch(customer, text);
+  try {
+    // Captured before processing -- found live, 2026-09-02: a customer stuck
+    // in this exact handover from an earlier outage, bot replying to them
+    // completely normally since (a real, successful reply logged), but still
+    // sitting in Needs Attention forever because nothing ever cleared it.
+    // "Waiting on the customer to reply" isn't "needs a person" -- the fix is
+    // below, right after a successful reply proves the bot actually recovered.
+    const wasStuckOnSystemError =
+      customer.handled_by === 'staff' &&
+      customer.handover_reason === SYSTEM_ERROR_HANDOVER_REASON &&
+      !(customer.handled_by_staff_id || customer.app_handled_at);
 
-  // Only marked once actually handled -- if handlePendingBatch throws, these
-  // stay unprocessed and get picked up (and re-included) the next time
-  // anything schedules processing for this customer, instead of being
-  // written off by a batch that never actually replied to them.
-  await pool.query(
-    `update message set processed_at = now() where id = any($1)`,
-    [pending.map((m) => m.id)]
-  );
+    await handlePendingBatch(customer, text);
+
+    if (wasStuckOnSystemError) {
+      // Only clear if the reason is STILL the system-error one -- if this
+      // same pass raised a fresh, different, real handover (a complaint
+      // buried in this batch, say), that one deserves to stay flagged, not
+      // get silently wiped out just because it happened to follow an outage.
+      const { rows: freshRows } = await pool.query('select handover_reason from customers where id = $1', [customerId]);
+      if (freshRows[0]?.handover_reason === SYSTEM_ERROR_HANDOVER_REASON) {
+        await pool.query(`update customers set handled_by = 'bot', handover_reason = null, handover_at = null where id = $1`, [customerId]);
+      }
+    }
+
+    // Only marked once actually handled -- if handlePendingBatch throws, these
+    // stay unprocessed and get picked up (and re-included) the next time
+    // anything schedules processing for this customer, instead of being
+    // written off by a batch that never actually replied to them.
+    await pool.query(
+      `update message set processed_at = now() where id = any($1)`,
+      [pending.map((m) => m.id)]
+    );
+  } finally {
+    // Stops the moment this batch is done, success or failure -- the
+    // customer either has their real reply now, or (on failure) got
+    // scheduleDebouncedProcessing's own error-recovery ack instead, and
+    // either way "typing..." forever after that would be a lie.
+    stopTypingKeepAlive(customerId);
+  }
 }
 
 // Hands control back to the bot -- either a staff member explicitly clicked
@@ -1731,7 +1968,9 @@ async function processPendingMessages(customerId) {
 // pickup, confirming yes) purely in conversation, with nothing reflected in
 // the order record itself -- so this doesn't just flip a flag and wait for
 // the NEXT message, it replays everything the customer said since the
-// handover through the exact same extraction pipeline a live message
+// handover (or since staff's own last reply, if they sent more than one --
+// see the boundary calculation below) through the exact same extraction
+// pipeline a live message
 // would use, picking up from the real state instead of re-asking from
 // scratch.
 //
@@ -1749,7 +1988,23 @@ export async function resumeBotControl(customerId) {
   const customer = rows[0];
   if (!customer) return;
 
-  const boundary = customer.handover_at || customer.created_at;
+  // handover_at is set once, at the ORIGINAL handover moment -- if staff
+  // replied more than once since then, using it alone replays every
+  // customer message all the way back to the first handover, including
+  // ones staff already answered. Found live, 2026-09-03: staff said "let
+  // me check that for you", then returning control replayed an OLDER,
+  // already-addressed customer message and the bot generated its own
+  // near-identical "let me check on that for you" on top of it. The real
+  // boundary is whichever is later: the handover itself, or staff's own
+  // most recent reply -- "only respond if the customer had the last word,
+  // not staff" (Chidera's own framing).
+  const { rows: lastStaffRows } = await pool.query(
+    `select max(created_at) as at from message where customer_id = $1 and sender = 'staff'`,
+    [customerId]
+  );
+  const handoverAt = customer.handover_at || customer.created_at;
+  const lastStaffAt = lastStaffRows[0]?.at;
+  const boundary = lastStaffAt && new Date(lastStaffAt) > new Date(handoverAt) ? lastStaffAt : handoverAt;
   await pool.query(`update customers set handled_by = 'bot', handled_by_staff_id = null, app_handled_at = null, handover_reason = null, handover_at = null where id = $1`, [customerId]);
   customer.handled_by = 'bot';
   customer.handled_by_staff_id = null;
@@ -1778,19 +2033,31 @@ export async function resumeBotControl(customerId) {
 }
 
 async function handlePendingBatch(customer, text) {
-  // Checked first, before ANY other routing -- deterministic, free, and
-  // applies everywhere (mid-order, post-order, no order at all, even while
-  // staff nominally still has the thread) so a plain "ok"/"thanks"/"sounds
-  // good" never triggers a reply, a restart, or an unwanted "still
-  // checking" filler. This is the actual answer to "how does the bot know
-  // when to keep quiet": one deterministic rule, checked before any other
-  // decision, not scattered per state -- including inside
-  // resumeBotControl's catch-up replay, so staff leaving a conversation at
-  // a plain "ok" doesn't get treated as something to act on.
+  // Checked first, before ANY other routing -- deterministic and free.
+  // Applies everywhere EXCEPT while an order is still actively being
+  // processed (Chidera's call, 2026-09-02: a staff member had just quoted
+  // the delivery fee -- payment still outstanding -- and a plain "okay"
+  // got pure silence instead of the payment nudge handleWaitingOnPayment
+  // already exists specifically to give; silence is only right once
+  // there's genuinely nothing left pending, not mid-order). getOpenOrder
+  // already excludes 'completed'/'cancelled', so reusing it here is the
+  // exact same "is this actually done" boundary the rest of the engine
+  // uses, not a new one invented just for this check. When there IS an
+  // open order, this falls through to the real per-state dispatch below,
+  // which already knows how to answer a plain "ok" gracefully at each
+  // stage (see handleWaitingOnPayment's own anti-repeat guard, and
+  // handleFulfilmentStageMessage's comment on why paid-and-preparing stays
+  // quiet) -- this isn't bypassing that judgment, just no longer skipping
+  // it universally before it gets a chance to run.
   const ackType = classifyPureAck(text);
-  if (ackType === 'ack') return;
-  if (ackType === 'thanks') {
+  if (ackType === 'ack') {
+    const openOrder = await getOpenOrder(customer.id);
+    if (!openOrder) return;
+  } else if (ackType === 'thanks') {
     await reply(customer, `You're welcome!`, 'thanks_ack');
+    return;
+  } else if (ackType === 'decline') {
+    await reply(customer, `Okay!`, 'decline_ack');
     return;
   }
 
@@ -1848,6 +2115,19 @@ async function handlePendingBatch(customer, text) {
     return;
   }
   if (intent === 'greeting') {
+    // Chidera's call, 2026-09-03: a customer messaging back in within 24h
+    // of an order actually finishing (picked up/delivered) isn't a brand
+    // new inquiry -- greeting them with the cold first-contact line reads
+    // like the bot forgot they were just here. Not the normal AI-driven
+    // handleGreeting on purpose: this is a specific, deterministic offer,
+    // not something worth letting an AI call improvise differently each
+    // time. Only overrides a bare greeting -- a real question or a direct
+    // "I want jollof rice" still gets handled normally below/by enquiry,
+    // no need to ask first when they've already said what they want.
+    if (await recentlyCompletedOrder(customer.id)) {
+      await reply(customer, `Would you like to place another order, or is there anything else I can help you with?`, 'post_completion_greeting');
+      return;
+    }
     await handleGreeting(customer, text);
     return;
   }
@@ -1890,23 +2170,19 @@ export async function acknowledgeMenuTap({ phoneNumber, channelId, itemName, cha
 export async function handleInboundMessage({ phoneNumber, channelId, text, channel = 'whatsapp', messageId, branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: text });
-  // Best-effort -- shows "typing..." for the debounce wait so the customer
-  // sees something happening instead of silence. Never let this delay or
-  // break the actual reply. Only sent for the message that STARTS a
-  // debounce cycle, not every message in a burst -- Meta's API rejects
-  // (#131009) a typing indicator sent while one from an earlier message in
-  // the same still-open cycle is already active, and it stays visible for
-  // up to 25s anyway, longer than the whole debounce window, so re-sending
-  // mid-burst has no benefit even when it doesn't error. WhatsApp's call
-  // needs the inbound messageId (its typing indicator is a mark-as-read+
-  // typing combo tied to that specific message); Instagram's sender_action
-  // just needs who to show it to.
+  // Best-effort -- shows "typing..." for the whole debounce+processing
+  // wait so the customer sees something happening instead of silence.
+  // Never let this delay or break the actual reply. Only started for the
+  // message that STARTS a debounce cycle, not every message in a burst --
+  // Meta's API rejects (#131009) a typing indicator sent while one from an
+  // earlier message in the same still-open cycle is already active. See
+  // startTypingKeepAlive's own comment for why this is now a repeating
+  // keep-alive, not a single call. WhatsApp's call needs the inbound
+  // messageId (its typing indicator is a mark-as-read+typing combo tied to
+  // that specific message); Instagram's sender_action just needs who to
+  // show it to.
   if (!pendingTimers.has(customer.id)) {
-    if (channel === 'whatsapp') {
-      markTypingIndicator(messageId).catch((err) => console.error('Typing indicator failed:', err));
-    } else if (channel === 'instagram') {
-      markInstagramTypingIndicator(channelId).catch((err) => console.error('Instagram typing indicator failed:', err));
-    }
+    startTypingKeepAlive(customer, channel, messageId, channelId);
   }
   scheduleDebouncedProcessing(customer);
 }
@@ -2072,7 +2348,7 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
 
   if (!awaitingPayment) {
     await reply(customer, `Got your ${kind}, let me get someone to take a look.`, 'media_received');
-    await handover(customer, `Customer sent a ${kind} with no order currently awaiting payment`);
+    await handover(customer, `Customer sent a ${kind} with no order currently awaiting payment`, null, false);
     return;
   }
 
@@ -2092,13 +2368,27 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
     const { rows: docs } = await pool.query(`select url from generated_document where order_id = $1 and type = 'invoice' order by created_at desc limit 1`, [order.id]);
     const invoicePath = docs[0]?.url;
     const invoiceUrl = invoicePath && process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${invoicePath}` : null;
-    await handover(customer, `Customer submitted payment proof, needs manual confirmation`, {
-      invoice: invoiceUrl ? `Invoice: ${invoiceUrl}` : null,
-      receipt: process.env.PUBLIC_URL ? `Payment proof: ${process.env.PUBLIC_URL}/documents/payment-proof/${order.id}` : null,
-    });
+    await handover(
+      customer,
+      `Customer submitted payment proof, needs manual confirmation`,
+      {
+        invoice: invoiceUrl ? `Invoice: ${invoiceUrl}` : null,
+        receipt: process.env.PUBLIC_URL ? `Payment proof: ${process.env.PUBLIC_URL}/documents/payment-proof/${order.id}` : null,
+        // Neither of the two links above is where the actual "Confirm
+        // payment received" button lives -- found live, 2026-09-03: staff
+        // had the invoice and the proof but nothing to actually click to
+        // confirm it, just handover()'s own generic conversation link.
+        // Straight into the order itself (OrderDetail.jsx has the same
+        // "Confirm payment received" button the kanban card does) --
+        // Chidera's call: land inside the card, not on the board having to
+        // find it first.
+        confirm: process.env.PUBLIC_URL ? `Confirm payment: ${process.env.PUBLIC_URL}/orders/${order.id}` : null,
+      },
+      false // already sent its own ack ("Noted, I will confirm...") above
+    );
   } catch (err) {
     console.error(`Failed to download payment proof ${kind}:`, err);
     await reply(customer, `Got your ${kind} but had trouble saving it. Let me get someone to help confirm your payment.`, 'payment_proof_received');
-    await handover(customer, `Customer submitted payment proof but the ${kind} failed to save`);
+    await handover(customer, `Customer submitted payment proof but the ${kind} failed to save`, null, false);
   }
 }

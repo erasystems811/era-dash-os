@@ -4,12 +4,17 @@ import { useStaff, isPinTier } from '../StaffContext.jsx';
 import { useScope } from '../ScopeContext.jsx';
 import { api } from '../api.js';
 
+// Order is Chidera's own explicit call, 2026-09-03: "orders-conversations-
+// delivery-catalogue-knowledge base-branches-documents-roles and numbers-
+// activity log-settings". Delivery/Voice aren't listed here since they're
+// add-ons spliced in conditionally below (right after Conversations, so
+// they land in the same spot the requested order puts Delivery).
 const BASE_NAV = [
   { to: '/', label: 'Orders', end: true },
-  { to: '/catalogue', label: 'Catalogue' },
-  { to: '/branches', label: 'Branches' },
   { to: '/conversations', label: 'Conversations' },
+  { to: '/catalogue', label: 'Catalogue' },
   { to: '/knowledge-base', label: 'Knowledge base' },
+  { to: '/branches', label: 'Branches' },
   { to: '/documents', label: 'Documents' },
   { to: '/staff', label: 'Roles and numbers' },
   { to: '/activity-log', label: 'Activity log' },
@@ -25,8 +30,8 @@ const BASE_NAV = [
 // of that same defense-in-depth.
 const PIN_NAV = [
   { to: '/', label: 'Orders', end: true },
-  { to: '/catalogue', label: 'Catalogue' },
   { to: '/conversations', label: 'Conversations' },
+  { to: '/catalogue', label: 'Catalogue' },
   { to: '/knowledge-base', label: 'Knowledge base' },
   { to: '/documents', label: 'Documents' },
 ];

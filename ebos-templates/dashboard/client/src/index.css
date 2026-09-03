@@ -755,6 +755,21 @@ label {
 }
 
 @media (max-width: 860px) {
+  /* Kills the iOS rubber-band bounce at the top/bottom of a scroll and any
+     Android overscroll glow -- both read as the page itself "shaking" or
+     drifting (Chidera's own "like Netflix, not shaking" call, 2026-09-03).
+     Mobile-only on purpose -- found live, 2026-09-03: applied globally it
+     broke normal mouse-wheel scrolling on desktop, a browser/OS quirk with
+     overscroll-behavior:none outside a touch context. The bounce it's
+     fixing is a touch-scroll behavior that doesn't exist on desktop
+     anyway, so this is the correct scope, not just a workaround.
+     Alongside the viewport's own maximum-scale/user-scalable lock
+     (index.html), which stops pinch-zoom from sticking. */
+  html,
+  body {
+    overscroll-behavior: none;
+  }
+
   .app-shell {
     display: block;
   }
@@ -857,14 +872,21 @@ label {
   /* Buttons/inputs get real touch targets on mobile (~40-44px) instead of
      the tighter desktop sizing meant for a mouse pointer. Excludes
      checkbox/radio/color/file, which aren't text fields and already size
-     themselves (or are styled inline, like Settings' colour swatch). */
+     themselves (or are styled inline, like Settings' colour swatch).
+     font-size is 16px, not 15 -- this is not a style choice, it's the exact
+     threshold iOS Safari uses to decide whether to auto-zoom in on focus:
+     anything under 16px and it snaps the whole page in when you tap a
+     field, then back out when you leave it. Found live, 2026-09-03,
+     Chidera's own words: "i need it to seat like an actual app on the
+     screen, not moving anyhow" -- every input on this dashboard was
+     exactly 1px under that line. */
   button,
   .btn,
   input:not([type='checkbox']):not([type='radio']):not([type='color']):not([type='file']),
   select,
   textarea {
     min-height: 40px;
-    font-size: 15px;
+    font-size: 16px;
   }
   .nav-toggle {
     min-height: 36px;

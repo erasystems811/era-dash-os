@@ -394,7 +394,21 @@ router.post('/assignments/:id/deliver', requireRider, async (req, res) => {
   // Same automatic advance as picked-up above -- the real code entry the
   // customer just gave the rider IS the completion event, no staff click
   // needed on top of it.
-  await pool.query(`update "order" set status = 'completed' where id = $1 and status = 'in_transit'`, [existing.order_id]);
+  // completed_at drives the 24h "want to order again?" window (see
+  // schema.sql's comment on the column) -- explicit here since this path
+  // never goes through the staff-driven /orders/:id/status route that
+  // otherwise sets it. engine_state also has to move to 'completed' here,
+  // not just status -- found live, 2026-09-03, building that same 24h
+  // feature: engine/flow.js's getOpenOrder gates on engine_state, not
+  // status, so without this an auto-completed delivery order (rider
+  // entered the code, no staff click at all) would still look "open"
+  // forever and the customer's next message would keep routing into the
+  // finished order's own fulfilment-stage handler instead of ever reaching
+  // the post-completion flow.
+  await pool.query(
+    `update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1 and status = 'in_transit'`,
+    [existing.order_id]
+  );
   res.json(rows[0]);
 
   // Manual payout (the default, spec B9's own "manual before automatic")

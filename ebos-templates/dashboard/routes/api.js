@@ -21,7 +21,7 @@ import {
   logActivity,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, sendOutreachMessage } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { createDelivery } from '../engine/delivery.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
@@ -719,6 +719,11 @@ router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
   if (status === 'completed' || status === 'cancelled') {
     await pool.query('update "order" set engine_state = $1 where id = $2', [status, req.params.id]);
   }
+  // completed_at drives the 24h "want to order again?" window -- see
+  // schema.sql's comment on the column.
+  if (status === 'completed') {
+    await pool.query('update "order" set completed_at = now() where id = $1', [req.params.id]);
+  }
   // One "Mark as ready" click on the Preparation stage, same button
   // regardless of fulfilment_type (Chidera's call) -- everything below
   // branches automatically off the order's own real fulfilment_type
@@ -1019,23 +1024,18 @@ router.get('/conversations/:id', async (req, res) => {
   res.json({ customer: customerRows[0], messages });
 });
 
-// Staff messaging a customer FIRST, not replying -- e.g. "we have your
-// order ready" sent proactively rather than triggered by an inbound
-// message. Goes out as the pre-approved "business_outreach" template (see
-// scripts/lib/whatsapp-templates.mjs), so it works even for a customer who
-// has never messaged this number, or whose 24h window has closed.
-router.post('/conversations/outreach', async (req, res) => {
+// Staff reaching a phone number with no existing thread yet -- just opens
+// (or creates) the conversation. No message sent here: the normal reply box
+// on that conversation (POST /conversations/:id/send, via
+// engine/flow.js's sendStaffReply) sends it, falling back to the approved
+// business_outreach template automatically if the plain send is rejected
+// for being outside the 24h window. One send path, not a separate
+// "message a customer first" flow (Chidera's call, 2026-09-02).
+router.post('/conversations/start', async (req, res) => {
   const phone = (req.body?.phone_number || '').trim();
-  const message = (req.body?.message || '').trim();
   if (!phone) return res.status(400).json({ error: 'A phone number is required.' });
-  if (!message) return res.status(400).json({ error: 'A message is required.' });
-  try {
-    const customer = await sendOutreachMessage({ phoneNumber: phone, message, branchId: req.branchId, staffId: req.staff.id });
-    await logActivity(req, 'message_sent', { entityType: 'conversation', entityId: customer.id });
-    res.json({ ok: true, conversation_id: customer.id });
-  } catch (err) {
-    res.status(502).json({ error: `Could not send: ${err.message}` });
-  }
+  const customer = await startConversation({ phoneNumber: phone, branchId: req.branchId });
+  res.json({ conversation_id: customer.id });
 });
 
 router.post('/conversations/:id/send', async (req, res) => {

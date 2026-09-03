@@ -5,7 +5,15 @@ async function request(path, options = {}) {
     credentials: 'same-origin',
   });
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    // Extra fields on an error response (e.g. { error, noZoneMatch: true })
+    // used to be thrown away here -- only the message string survived, so a
+    // caller had no way to tell "this specific, recoverable case" apart
+    // from any other failure without fragile message-text matching.
+    const err = new Error(data?.error || `Request failed (${res.status})`);
+    Object.assign(err, data || {});
+    throw err;
+  }
   return data;
 }
 

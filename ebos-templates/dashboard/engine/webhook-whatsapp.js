@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, acknowledgeMenuTap } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, acknowledgeMenuTap, retryFailedSendAsTemplate } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productNameForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -69,6 +69,33 @@ router.post('/', async (req, res) => {
         // resolved by channel, decide some other way" (a single-branch
         // business needs no resolution at all; a shared-number multi-branch
         // business will ask the customer instead, once that's built).
+        // Delivery-status callbacks (sent/delivered/read/failed) -- found
+        // live, 2026-09-02: this handler never processed these at all, so
+        // a send Meta accepts synchronously (a real wamid, no error) and
+        // only fails afterward -- exactly what happens to a plain-text
+        // reply sent just outside the 24h window sometimes -- silently
+        // vanished with no retry and nothing in the UI to show it. Only
+        // 'failed' does anything; 'sent'/'delivered'/'read' are genuinely
+        // not actionable here (see flow.js's retryFailedSendAsTemplate for
+        // why those checks come first inside it, not duplicated here).
+        for (const status of change.value?.statuses || []) {
+          if (status.status !== 'failed') continue;
+          // Same duplicate-delivery behavior as inbound messages (see
+          // isDuplicateMessage's own comment) -- confirmed live 2026-09-02:
+          // without this, one real failure fired retryFailedSendAsTemplate
+          // TWICE a fraction of a second apart, which would have sent the
+          // customer the same recovered message twice. Keyed distinctly
+          // from a message id (different id space) even though collision
+          // is effectively impossible either way.
+          if (isDuplicateMessage(`status:${status.id}:${status.status}`)) continue;
+          const isWindowClosed = (status.errors || []).some((e) => e.code === 131047);
+          if (!isWindowClosed) {
+            console.error(`WhatsApp message ${status.id} failed to deliver:`, JSON.stringify(status.errors));
+            continue; // a failure reason retrying the same way can't fix
+          }
+          await retryFailedSendAsTemplate(status.id).catch((err) => console.error(`Retry-as-template failed for ${status.id}:`, err.message));
+        }
+
         const branchId = await resolveBranchByPhoneNumberId(change.value?.metadata?.phone_number_id);
         for (const message of change.value?.messages || []) {
           if (isDuplicateMessage(message.id)) continue;

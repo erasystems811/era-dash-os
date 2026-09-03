@@ -33,14 +33,34 @@ const STAGE_LABELS = {
   cancelled: 'Cancelled',
 };
 
+// A search that matches nothing, where the query itself looks like a phone
+// number, means "this person has never messaged us" -- not a dead end
+// anymore. Digits, +, spaces and dashes only (a name search never satisfies
+// this), and at least 7 digits so "080" while someone's still typing
+// doesn't show it prematurely.
+function looksLikePhoneNumber(q) {
+  return /^[+\d][\d\s-]{6,}$/.test(q.trim());
+}
+
 function AllConversations() {
   const [conversations, setConversations] = useState(null);
   const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState(null);
+  const [starting, setStarting] = useState(false);
 
   useEffect(() => {
     api.get('/conversations').then(setConversations);
   }, []);
+
+  async function startConversation() {
+    setStarting(true);
+    try {
+      const res = await api.post('/conversations/start', { phone_number: query.trim() });
+      window.location.href = `/conversations/${res.conversation_id}`;
+    } catch {
+      setStarting(false);
+    }
+  }
 
   // The default list only ever shows the 200 most recently active customers
   // (see routes/api.js) -- this is how staff reach anyone who's gone quiet
@@ -102,7 +122,15 @@ function AllConversations() {
             {!rows.length && (
               <tr>
                 <td colSpan={4} className="empty-state">
-                  {searchResults ? 'No matching customers.' : 'No conversations yet.'}
+                  {searchResults && looksLikePhoneNumber(query) ? (
+                    <button onClick={startConversation} disabled={starting}>
+                      {starting ? 'Starting...' : `Start a conversation with ${query.trim()}`}
+                    </button>
+                  ) : searchResults ? (
+                    'No matching customers.'
+                  ) : (
+                    'No conversations yet.'
+                  )}
                 </td>
               </tr>
             )}
@@ -221,6 +249,7 @@ function ActiveConversations() {
           <tr>
             <th>Customer</th>
             <th>Channel</th>
+            <th>Stage</th>
             <th>Last message</th>
           </tr>
         </thead>
@@ -233,78 +262,17 @@ function ActiveConversations() {
               <td>
                 <span className={`badge ${c.channel}`}>{c.channel}</span>
               </td>
+              <td>{c.stage && <span className="badge active">{STAGE_LABELS[c.stage] || c.stage}</span>}</td>
               <td style={{ color: 'var(--text-muted)' }}>{(c.last_message || '').slice(0, 70)}</td>
             </tr>
           ))}
           {!rows.length && (
             <tr>
-              <td colSpan={3} className="empty-state">No conversation the bot is currently handling.</td>
+              <td colSpan={4} className="empty-state">No conversation the bot is currently handling.</td>
             </tr>
           )}
         </tbody>
       </table>
-    </div>
-  );
-}
-
-// Reaching out first, not replying -- for a new lead or a customer who's
-// gone quiet, where there's no existing thread to type into. Goes out as
-// the approved "business_outreach" template server-side (see
-// engine/flow.js's sendOutreachMessage) so it works even outside the normal
-// 24h reply window; this form just collects the number and the message.
-function MessageCustomer() {
-  const [open, setOpen] = useState(false);
-  const [phone, setPhone] = useState('');
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState(null);
-  const [sending, setSending] = useState(false);
-
-  async function send(e) {
-    e.preventDefault();
-    setError(null);
-    setSending(true);
-    try {
-      const res = await api.post('/conversations/outreach', { phone_number: phone, message });
-      window.location.href = `/conversations/${res.conversation_id}`;
-    } catch (err) {
-      setError(err.message);
-      setSending(false);
-    }
-  }
-
-  if (!open) {
-    return (
-      <div className="card" style={{ width: 'fit-content' }}>
-        <button onClick={() => setOpen(true)}>Message a customer</button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="card">
-      <h3 style={{ marginTop: 0 }}>Message a customer</h3>
-      <p className="subtitle">Reach out first -- works even if they've never messaged this number before.</p>
-      {error && <div className="error-banner">{error}</div>}
-      <form onSubmit={send}>
-        <div className="form-row">
-          <div className="field">
-            <label>Their WhatsApp number</label>
-            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="2348..." required />
-          </div>
-        </div>
-        <div className="field">
-          <label>Message</label>
-          <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={3} required />
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button type="submit" disabled={sending}>
-            {sending ? 'Sending...' : 'Send'}
-          </button>
-          <button type="button" className="secondary" onClick={() => setOpen(false)}>
-            Cancel
-          </button>
-        </div>
-      </form>
     </div>
   );
 }
@@ -320,7 +288,6 @@ export default function Conversations() {
           <p className="subtitle">Every customer thread, bot and staff turns, WhatsApp style.</p>
         </div>
       </div>
-      <MessageCustomer />
       <div className="card" style={{ display: 'flex', gap: 8, padding: 6, width: 'fit-content' }}>
         <button className={tab === 'attention' ? '' : 'secondary'} onClick={() => setTab('attention')}>
           Needs attention

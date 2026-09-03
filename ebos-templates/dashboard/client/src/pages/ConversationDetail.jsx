@@ -98,6 +98,16 @@ export default function ConversationDetail() {
               {m.body}
               <div className="meta">
                 {m.sender} &middot; {new Date(m.created_at).toLocaleString()}
+                {m.delivery_status === 'failed' && (
+                  <span className="badge" style={{ marginLeft: 6, background: '#f8d7da', color: '#842029' }}>
+                    Didn't deliver
+                  </span>
+                )}
+                {m.delivery_status === 'retried' && (
+                  <span className="badge" style={{ marginLeft: 6 }} title="This failed to deliver, then went out again automatically">
+                    Resent
+                  </span>
+                )}
               </div>
             </div>
           ))}
