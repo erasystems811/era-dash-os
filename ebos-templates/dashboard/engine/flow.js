@@ -970,9 +970,24 @@ async function askNextItemQuestion(orderId) {
 // product.category, the same field the Catalogue page already groups by --
 // no new setup for a restaurant that's already categorized its menu, and
 // it simply never fires for one that hasn't.
+// Chidera 2026-09-10: "the bott should know when to recommend a protein or
+// when to recommend a drink... or when to recommend a snack... or even
+// when to recommend water." nextUpsellGroup below already asks one group
+// at a time, skips anything the order already has, and never repeats a
+// group already offered this order -- so which of these actually gets
+// offered, and in what order, already follows what's really being
+// ordered without any extra logic; adding a real category here is what
+// makes it apply to more than drink/protein. Water deliberately isn't its
+// own group -- most catalogues list a water bottle under Drinks like any
+// other beverage (era-demo's own category list confirms this: DRINKS,
+// MAINS, nothing separate), so a rigid "category = water" group would
+// just never fire for almost anyone. Folded into 'drink's own keywords
+// instead, so a business that DOES give it a distinct category still
+// gets it offered, under the same "would you like a drink" ask.
 const UPSELL_GROUPS = [
-  { key: 'drink', keywords: ['drink', 'beverage', 'juice'], label: 'a drink' },
+  { key: 'drink', keywords: ['drink', 'beverage', 'juice', 'water'], label: 'a drink' },
   { key: 'protein', keywords: ['protein', 'meat'], label: 'a protein' },
+  { key: 'snack', keywords: ['snack', 'small chop', 'appetiser', 'appetizer', 'starter'], label: 'a snack' },
 ];
 
 function categoryMatchesGroup(category, keywords) {
@@ -1064,18 +1079,23 @@ async function finishItemsCollection(customer, order, prefix = '') {
 //    (extractOrderItems), so "yes, a coke" or just "coke" both work the
 //    same way an item mention always does elsewhere, not a bespoke
 //    yes/no parser.
-// Anything that matches neither (including a plain decline) just moves
-// on -- already marked offered, so it's never asked again this order.
+// 3) failing THAT, whether they said yes at all without naming one --
+//    found live, 2026-09-10: "yes" to "Would you like to add a drink? We
+//    have: Coke, Chapman, Zobo" matched no product name, so it silently
+//    fell through as if they'd said no -- nothing added, nothing asked,
+//    straight to confirming the order with no drink on it. A plain
+//    decline still moves on exactly as before; only a real yes-but-which
+//    re-asks, and only once (the offer's already marked offered, so it
+//    can't loop forever even if they keep answering vaguely).
 async function handlePendingUpsell(customer, order, text) {
   const { rows: currentItems } = await pool.query(
     `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [order.id]
   );
   const mods = await extractOrderModifications(text, currentItems, order.branch_id);
-  order.pending_upsell_category = null;
-  await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
-
   if (mods) {
+    order.pending_upsell_category = null;
+    await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
     // Same reasoning as handleCollectInfo's own mods branch -- no "your
     // order's now X" here, finishItemsCollection's own confirm message is
     // the one place that lists it.
@@ -1084,14 +1104,36 @@ async function handlePendingUpsell(customer, order, text) {
   }
 
   const { matched } = await extractOrderItems(text, order.branch_id);
-  let added = '';
   if (matched.length) {
+    order.pending_upsell_category = null;
+    await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
     for (const m of matched) {
       await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, m.productId, m.quantity, m.price]);
     }
-    added = `Added ${matched.map((m) => `${m.quantity}x ${m.name}`).join(', ')}. `;
+    return finishItemsCollection(customer, order, `Added ${matched.map((m) => `${m.quantity}x ${m.name}`).join(', ')}. `);
   }
-  return finishItemsCollection(customer, order, added);
+
+  const wantsQuestion = 'Are they saying yes, they would like to add one, without yet naming which specific option?';
+  const wantsOneField = botEngine.defineField({
+    key: 'wantsOne',
+    label: 'wants one',
+    type: 'boolean',
+    description: describeForExtraction(wantsQuestion, { type: 'boolean' }),
+  });
+  const wantsOne = await botEngine.extractField(wantsOneField, text, { askJson });
+  if (wantsOne === true) {
+    const group = UPSELL_GROUPS.find((g) => g.key === order.pending_upsell_category);
+    const menu = await resolveMenu(order.branch_id);
+    const options = group ? catalogueOptions(menu, group.keywords) : [];
+    // pending_upsell_category deliberately left set -- their next message
+    // is still the answer to this same offer, not a fresh one.
+    await reply(customer, `Great, which one would you like? We have: ${options.join(', ')}.`, 'upsell_clarify');
+    return;
+  }
+
+  order.pending_upsell_category = null;
+  await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+  return finishItemsCollection(customer, order, '');
 }
 
 // The reply to a question just asked by askNextItemQuestion above -- taken
