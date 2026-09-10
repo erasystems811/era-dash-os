@@ -674,21 +674,35 @@ async function findSpecialsCategory(branchId) {
 // One tap, one message -- Chidera 2026-09-10: "i want straight to the see
 // menu button no two step" (fixed by switching to a direct-open cta_url
 // button), then "menu and todays specials should not be 2 differnt
-// texts" (a second "Special offers" message, sent right after the first,
-// still read as two disconnected texts even though each opened on one
-// tap). Just the one "See menu" message now -- Special Offers is already
-// its own tab inside that same page the moment it's opened (menu-page-
-// template.js tabs by category regardless), so nothing about discovering
-// a deal is actually lost, only the second WhatsApp message.
+// texts" (a second "Special offers" MESSAGE, sent right after the first),
+// then, after that got read as "drop specials from the greeting
+// entirely": "i said specials and menu buttons should be in same chat i
+// didnt say remove specialsss". Both stay, in the one message: "See menu"
+// is the real button (opens the general menu on one tap, same as
+// before); the specials link rides along as a second URL inside that
+// same message's own body text, which WhatsApp auto-links and makes
+// tappable on its own -- no second bubble, no second bot round-trip, and
+// still one tap either way.
 async function handleGreeting(customer, text) {
   const message = await askText(GREETING_SYSTEM, text);
   if (customer.channel !== 'whatsapp') {
     await reply(customer, message, 'greeting');
     return;
   }
+  if (!process.env.PUBLIC_URL) {
+    await reply(customer, message, 'greeting');
+    return;
+  }
   const headerImageUrl = await businessCoverPhotoUrl();
-  const shown = await sendWebMenuLink(customer, message, 'See menu', null, headerImageUrl);
-  if (!shown) await reply(customer, message, 'greeting');
+  const token = await ensureMenuToken(customer);
+  const menuUrl = `${process.env.PUBLIC_URL}/m/${token}`;
+  const specialsCategory = await findSpecialsCategory(customer.branch_id);
+  const body = specialsCategory
+    ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
+    : message;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppCtaUrl(recipientFor(customer), body, 'See menu', menuUrl, credentials, headerImageUrl);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body, trigger: 'greeting', processed: true });
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,
