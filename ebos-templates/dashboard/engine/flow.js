@@ -1084,14 +1084,33 @@ async function sendUpsellList(customer, upsell, prefix = '') {
     description: `NGN ${Number(p.price).toLocaleString()}`,
   }));
   rows.push({ id: 'upsell::skip', title: 'No thanks', description: `Skip ${upsell.label}` });
+  const bodyText = `${prefix}Would you like to add ${upsell.label}?`.trim();
   await sendListMessage(recipientFor(customer), {
-    bodyText: `${prefix}Would you like to add ${upsell.label}?`.trim(),
+    bodyText,
     buttonText: 'Choose',
     sectionTitle: upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1),
     rows,
   });
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `Would you like to add ${upsell.label}? We have: ${upsell.options.map((o) => o.name).join(', ')}.`, trigger: 'upsell_offered' });
+  // Logged as the real bodyText actually sent (including any order-so-far
+  // readback), not a separate hand-written string -- was drifting from
+  // what the customer actually saw, so the dashboard transcript read
+  // differently than the real conversation did.
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText} We have: ${upsell.options.map((o) => o.name).join(', ')}.`, trigger: 'upsell_offered' });
   return true;
+}
+
+// Chidera 2026-09-11: "reconfirm my order to me first before you ak me any
+// add a drink or peppered or not question so you are sure of what im
+// ordering." A quick itemized readback right before asking an item
+// question or an upsell -- so a customer sees exactly what the bot thinks
+// they ordered BEFORE getting asked to customize or add to it, not just
+// once at the very end. Skipped when there's nothing on the order yet
+// (shouldn't happen -- finishItemsCollection only ever runs after an
+// item's already been added -- but never worth a blank "Your order so
+// far:" line if it somehow did).
+async function orderSoFarSummary(order) {
+  const { itemLines } = await summariseOrder(order);
+  return itemLines.length ? `Your order so far:\n${itemLines.join('\n')}\n\n` : '';
 }
 
 // The tail end of item collection -- shared between the normal path
@@ -1111,7 +1130,8 @@ async function finishItemsCollection(customer, order, prefix = '') {
       nextQuestion.question_id,
       order.id,
     ]);
-    await reply(customer, `${prefix}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
+    const soFar = await orderSoFarSummary(order);
+    await reply(customer, `${prefix}${soFar}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
     return;
   }
 
@@ -1130,9 +1150,10 @@ async function finishItemsCollection(customer, order, prefix = '') {
       upsell.key,
       order.id,
     ]);
-    const sent = await sendUpsellList(customer, upsell, prefix);
+    const soFar = await orderSoFarSummary(order);
+    const sent = await sendUpsellList(customer, upsell, `${prefix}${soFar}`);
     if (!sent) {
-      await reply(customer, `${prefix}Would you like to add ${upsell.label}? We have: ${upsell.options.map((o) => o.name).join(', ')}.`.trim(), 'upsell_offered');
+      await reply(customer, `${prefix}${soFar}Would you like to add ${upsell.label}? We have: ${upsell.options.map((o) => o.name).join(', ')}.`.trim(), 'upsell_offered');
     }
     return;
   }
