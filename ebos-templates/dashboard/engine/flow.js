@@ -2913,7 +2913,14 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: No, change it]', processed: true });
 
-  const message = 'No problem. Open the menu again and change whatever you like.';
+  // The reference demo's exact wording (Chidera 2026-09-10) plus one
+  // added clause -- without it, a customer who opens the menu, decides
+  // not to change anything after all, and doesn't know they can just
+  // reply yes was left with no obvious way back to confirming as-is.
+  // Chidera 2026-09-10 (separately): "if a customer say yes they want to
+  // change order and they dont end up changing anything it[']s confusing
+  // on what they should do next."
+  const message = "No problem. Open the menu again and change whatever you like, or just reply yes if you'd like to keep it as it is.";
   const session = await currentDineinSession(customer);
   if (session && process.env.PUBLIC_URL) {
     const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}`;
@@ -2980,7 +2987,28 @@ export async function handleWebMenuOrder(customer, items) {
   for (const productId of existingMap.keys()) {
     if (!submittedIds.has(productId)) removes.push({ productId });
   }
-  if (!adds.length && !sets.length && !removes.length) return; // resubmitted with nothing actually changed
+  if (!adds.length && !sets.length && !removes.length) {
+    // Was a silent return -- a real dead end. Chidera 2026-09-10: "if a
+    // customer say yes they want to change order and they dont end up
+    // changing anything it[']s confusing on what they should do next."
+    // Tapping "No, change it" -> reopening the menu -> not actually
+    // changing anything -> "Review order" anyway used to produce total
+    // silence: the web page still said "Order sent!" and redirected back
+    // to a chat with no new message in it at all. Confirm_order-or-later
+    // just re-shows the same read-back and yes/no buttons they'd already
+    // seen; still mid-collection (an item question or upsell still
+    // outstanding) routes back through finishItemsCollection so it asks
+    // whatever's genuinely still needed instead of jumping straight to a
+    // premature "to confirm".
+    if (['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
+      const { itemLines, total } = await summariseOrder(order);
+      const summary = [...itemLines, `Total: NGN ${total}`].join('\n');
+      await sendConfirmButtons(customer, `Your order:\n${summary}`, 'order_confirm_asked');
+    } else {
+      await finishItemsCollection(customer, order, '');
+    }
+    return;
+  }
 
   if (['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
     await handleOrderModification(customer, order, { adds, removes, sets });
