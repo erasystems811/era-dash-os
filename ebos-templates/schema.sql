@@ -471,6 +471,44 @@ create table if not exists order_item (
   modification text
 );
 
+-- Per-item customization questions (water: room temp or cold, rice:
+-- peppered or not, ...) -- opt-in per catalogue item. An item with zero
+-- rows here behaves exactly as before: the bot never asks anything.
+create table if not exists product_question (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid not null references product(id) on delete cascade,
+  question text not null,
+  position integer not null default 0,
+  created_at timestamptz not null default now()
+);
+create index if not exists product_question_product_idx on product_question (product_id);
+
+-- One row per (order_item, question) actually asked+answered -- tracks
+-- exactly which questions still need asking (engine/flow.js's
+-- askNextItemQuestion) without parsing order_item.modification's free text.
+create table if not exists order_item_answer (
+  order_item_id uuid not null references order_item(id) on delete cascade,
+  question_id uuid not null references product_question(id) on delete cascade,
+  answer text not null,
+  created_at timestamptz not null default now(),
+  primary key (order_item_id, question_id)
+);
+
+-- Which single item-customization question the bot is mid-way through
+-- asking for this order, if any -- see engine/flow.js's dispatch() and
+-- askNextItemQuestion. Added via alter, not inline on "order" above, since
+-- order_item/product_question (what these reference) are only defined
+-- here, after "order" itself.
+alter table "order" add column if not exists pending_question_order_item_id uuid references order_item(id);
+alter table "order" add column if not exists pending_question_id uuid references product_question(id);
+
+-- Interactive drink/protein cross-sell -- see engine/flow.js's
+-- nextUpsellGroup/handlePendingUpsell. pending_upsell_category is which
+-- offer (if any) is awaiting a reply right now; upsell_offered is every
+-- category already offered this order, so a decline is never re-asked.
+alter table "order" add column if not exists pending_upsell_category text;
+alter table "order" add column if not exists upsell_offered text[] not null default '{}';
+
 create table if not exists booking (
   id uuid primary key default gen_random_uuid(),
   customer_id uuid not null references customers(id),
@@ -820,6 +858,77 @@ create index if not exists generated_document_booking_idx on generated_document 
 -- conversation from the bot or giving it back) so a branch manager and the
 -- general manager both have an accountability trail. See lib/auth.js's
 -- logActivity and its call sites in routes/api.js.
+-- ---------------------------------------------------------------------------
+-- Dine-in add-on (EBOS-Addon-Schema-Dine-In.md). Optional, per business,
+-- off by default (dinein_config.enabled = false), switched on by ERA not
+-- the restaurant -- same whole-deployment-toggle shape as
+-- voice_config/delivery_config above.
+-- ---------------------------------------------------------------------------
+
+create table if not exists dinein_config (
+  business_id uuid primary key references business(id),
+  enabled boolean not null default false,
+  feedback_enabled boolean not null default true,
+  feedback_delay_minutes int not null default 20,
+  auto_close_hours int not null default 4,
+  pos_mode text not null default 'none' check (pos_mode in ('none', 'webhook', 'api', 'database', 'printer')),
+  pos_config text,
+  review_link text,
+  welcome_image_url text
+);
+
+-- Tables belong to a branch, not a business -- same idiom as delivery_zone
+-- above and everywhere else with real per-location scope. qr_token is the
+-- guest-facing identity for a table; regenerating it is how a stolen or
+-- renumbered printed card gets invalidated without touching the table row.
+create table if not exists restaurant_table (
+  id uuid primary key default gen_random_uuid(),
+  branch_id uuid not null references branch(id),
+  label text not null,
+  qr_token text not null unique,
+  seats int,
+  status text not null default 'active' check (status in ('active', 'inactive')),
+  created_at timestamptz not null default now()
+);
+create index if not exists restaurant_table_branch_idx on restaurant_table (branch_id);
+
+-- One open session per table at a time -- opened on the first scan, closed
+-- from the dashboard or a POS integration. "Which session does a waiter
+-- call / feedback message belong to" is always "the most recent open
+-- (closed_at is null) session for that table", enforced here as a partial
+-- unique index rather than left as an application-level assumption.
+create table if not exists table_session (
+  id uuid primary key default gen_random_uuid(),
+  table_id uuid not null references restaurant_table(id),
+  branch_id uuid not null references branch(id),
+  customer_id uuid references customers(id),
+  opened_at timestamptz not null default now(),
+  closed_at timestamptz,
+  closed_by text check (closed_by in ('pos', 'staff', 'auto')),
+  closed_by_staff uuid references staff(id),
+  feedback_state text not null default 'none' check (feedback_state in ('none', 'scheduled', 'sent', 'answered', 'skipped'))
+);
+create unique index if not exists table_session_one_open_idx on table_session (table_id) where closed_at is null;
+create index if not exists table_session_branch_idx on table_session (branch_id);
+
+create table if not exists waiter_call (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references table_session(id),
+  table_id uuid not null references restaurant_table(id),
+  status text not null default 'open' check (status in ('open', 'acknowledged', 'resolved')),
+  created_at timestamptz not null default now(),
+  resolved_by uuid references staff(id),
+  resolved_at timestamptz
+);
+create index if not exists waiter_call_open_idx on waiter_call (table_id) where status = 'open';
+
+-- A dine-in order's own channel/fulfilment shape -- settled at the table,
+-- never delivered or collected, no payment confirmation step.
+alter table "order" add column if not exists channel text not null default 'whatsapp' check (channel in ('whatsapp', 'instagram', 'dinein'));
+alter table "order" add column if not exists table_id uuid references restaurant_table(id);
+alter table "order" add column if not exists session_id uuid references table_session(id);
+alter table "order" add column if not exists payment_mode text not null default 'online' check (payment_mode in ('online', 'at_table'));
+
 create table if not exists activity_log (
   id uuid primary key default gen_random_uuid(),
   staff_id uuid references staff(id),
