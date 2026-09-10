@@ -41,10 +41,17 @@ services:
   n8n:
     image: docker.n8n.io/n8nio/n8n
     restart: unless-stopped
-    mem_limit: 600m
+    # 600m was too tight for n8n's own Node process -- found live on
+    # era-demo, 2026-09-02: it was OOM-crashing on "JavaScript heap out of
+    # memory" and restarting in a loop (1396 restarts by the time this was
+    # caught). NODE_OPTIONS keeps V8's heap ceiling safely under the
+    # container limit instead of Node guessing from cgroup memory, which is
+    # what was landing it around ~300MB and crashing well before 600m.
+    mem_limit: 1200m
     ports:
       - "127.0.0.1:5678:5678"
     environment:
+      - NODE_OPTIONS=--max-old-space-size=900
       - N8N_BASIC_AUTH_ACTIVE=true
       - N8N_BASIC_AUTH_USER=admin
       - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}

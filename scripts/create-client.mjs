@@ -40,7 +40,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { loadSecrets, requireSecrets } from './lib/secrets.mjs';
-import { loadRegistry, saveRegistry, upsertClient, findClient } from './lib/registry.mjs';
+import { loadRegistry, saveRegistry, upsertClient, findClient, findServer, upsertServer } from './lib/registry.mjs';
 import { randomSecret, randomPassword, randomEncryptionKey, slugify } from './lib/random.mjs';
 import { buildEbosSeedSql } from './lib/ebos-seed.mjs';
 import { buildEsfSeedSql } from './lib/esf-seed.mjs';
@@ -48,16 +48,23 @@ import { provisionSheet } from './lib/esf-sheet.mjs';
 import { render } from './lib/render-template.mjs';
 import { templatesDirFor } from './lib/templates-dir.mjs';
 import * as hetzner from './lib/hetzner.mjs';
+import * as oracle from './lib/oracle.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
 import { waitForSsh, waitForCloudInit, runRemote, copyToRemote } from './lib/ssh.mjs';
 import { runScaffoldBot } from './lib/scaffold-runner.mjs';
+import { bootstrapSharedHost, allocatePorts, renderSiteBlock, addSite } from './lib/shared-host.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = process.env.ERA_ROOT_DOMAIN || 'erasystems.com.ng';
 
 function parseArgs(argv) {
-  const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false, size: 'small', template: 'default' };
+  // Default provider is 'oracle' now, not 'hetzner' -- Chidera's call,
+  // 2026-09-10: "i stopped using hetzner na". Still selectable
+  // (--provider=hetzner) for a business that's staying on an existing
+  // Hetzner setup, but a plain run of this script no longer touches
+  // Hetzner by accident.
+  const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false, size: 'small', template: 'default', provider: 'oracle' };
   for (const arg of argv) {
     if (arg === '--whatsapp') args.whatsapp = true;
     else if (arg === '--pdf') args.pdf = true;
@@ -68,11 +75,27 @@ function parseArgs(argv) {
     else if (arg.startsWith('--custom-domain=')) args.customDomain = arg.slice('--custom-domain='.length).toLowerCase();
     else if (arg.startsWith('--size=')) args.size = arg.slice('--size='.length);
     else if (arg.startsWith('--template=')) args.template = arg.slice('--template='.length);
+    else if (arg.startsWith('--provider=')) args.provider = arg.slice('--provider='.length);
     else if (arg.startsWith('--ebos-seed=')) args.ebosSeed = arg.slice('--ebos-seed='.length);
     else if (arg.startsWith('--esf-seed=')) args.esfSeed = arg.slice('--esf-seed='.length);
+    else if (arg.startsWith('--shared-server=')) args.sharedServer = arg.slice('--shared-server='.length);
+    else if (arg === '--new-shared-server') args.newSharedServer = true;
   }
-  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json]');
+  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--provider=oracle|hetzner] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server]');
+  if (!['oracle', 'hetzner'].includes(args.provider)) throw new Error(`Unknown --provider="${args.provider}" -- only "oracle" and "hetzner" are wired up (see scripts/lib/oracle.mjs / hetzner.mjs).`);
+  // A shared server's IP is provider-agnostic once it exists (join mode
+  // never calls a provider API at all -- see the sharedMode==='join'
+  // branch below), so --provider only matters for --new-shared-server or
+  // the plain dedicated path.
   if (args.subdomain && args.customDomain) throw new Error('Pass either --subdomain or --custom-domain, not both.');
+  if (args.sharedServer && args.newSharedServer) throw new Error('Pass either --shared-server=ip (join an existing shared server) or --new-shared-server (create one), not both.');
+  // Shared hosting only exists for docker-compose.shared.yml.template,
+  // which only ebos-templates/ has (ESF is deliberately isolated per
+  // business -- see the isEsf comment further down -- and the generic
+  // 'default' template has no shared-mode compose file yet).
+  if ((args.sharedServer || args.newSharedServer) && args.template !== 'ebos') {
+    throw new Error('--shared-server / --new-shared-server only work with --template=ebos.');
+  }
   // slug is only for internal naming (droplet, remote dir, db role) — for a
   // custom domain it's derived from the domain itself, since there's no
   // separate subdomain piece to slugify.
@@ -127,17 +150,50 @@ async function main() {
   console.log(`Setting up "${args.name}" -> https://${subdomain}`);
 
   const secrets = loadSecrets();
-  const requiredSecrets = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'HETZNER_TOKEN'];
+  const requiredSecrets = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY'];
+  // --shared-server=ip (joining an existing shared server) never calls a
+  // provider API at all -- no server gets created, so no provider secret
+  // is needed for it. Every other path (dedicated, --new-shared-server)
+  // does create one, so it needs its provider's config; oracle.mjs's own
+  // requireOracleConfig gives a much more specific error below than
+  // requireSecrets could (which key, and what it's for), so Oracle's
+  // check happens there instead of being folded into this list.
+  if (!args.sharedServer) {
+    if (args.provider === 'hetzner') requiredSecrets.push('HETZNER_TOKEN');
+  }
   // DirectAdmin secrets only matter for the erasystems.com.ng subdomain
   // path — a custom domain never touches that account.
   if (!args.customDomain) requiredSecrets.push('DA_USERNAME', 'DA_LOGIN_KEY', 'DA_HOST');
   if (!args.skipGithub) requiredSecrets.push('GITHUB_TOKEN');
   requireSecrets(secrets, requiredSecrets);
+  // See the comment above -- Oracle's own config check (which names each
+  // specific missing key) rather than a generic requireSecrets entry.
+  const oracleConfig = !args.sharedServer && args.provider === 'oracle' ? oracle.requireOracleConfig(secrets) : null;
 
   const registry = loadRegistry();
   if (findClient(registry, args.slug)) {
     throw new Error(`A client named "${args.slug}" already exists in the registry. Pick a different --subdomain, or use add-whatsapp.mjs/add-payment.mjs to modify it.`);
   }
+
+  // sharedMode: 'none' (default -- this client gets its own dedicated
+  // server, same as always), 'join' (deploy onto a server another EBOS
+  // client is already running on), or 'new' (create a fresh server that
+  // starts life as a shared host, ready for more tenants later). See
+  // lib/shared-host.mjs for what actually makes two clients' stacks
+  // coexist on one box.
+  const sharedMode = args.sharedServer ? 'join' : args.newSharedServer ? 'new' : 'none';
+  if (sharedMode === 'join') {
+    const server = findServer(registry, args.sharedServer);
+    if (!server || server.mode !== 'shared') {
+      throw new Error(`"${args.sharedServer}" isn't a registered shared server. Create one first with --new-shared-server, or check scripts/lib/registry.mjs's servers list for the right IP.`);
+    }
+  }
+  // A brand new shared server has no other tenants yet, so its first
+  // client always gets the base port block -- allocatePorts would compute
+  // the same thing by finding zero existing clients at this IP, but for
+  // 'new' the IP doesn't exist yet (the server hasn't been created), so
+  // there's nothing to look up.
+  const sharedPorts = sharedMode === 'join' ? allocatePorts(registry, args.sharedServer) : sharedMode === 'new' ? allocatePorts(registry, null) : null;
 
   const vars = {
     APP_SLUG: args.slug,
@@ -179,10 +235,22 @@ async function main() {
     // still produces a real, present-but-blank line rather than leaving the
     // literal token in the file.
     GOOGLE_SERVICE_ACCOUNT_JSON: secrets.GOOGLE_SERVICE_ACCOUNT_JSON || '',
+    // Only referenced by docker-compose.shared.yml.template / the
+    // Caddyfile.shared-site.template site block -- ignored (harmless) by
+    // the dedicated-mode templates when sharedMode is 'none'.
+    DASHBOARD_PORT: sharedPorts ? String(sharedPorts.dashboard) : '',
+    POSTGREST_PORT: sharedPorts ? String(sharedPorts.postgrest) : '',
+    N8N_PORT: sharedPorts ? String(sharedPorts.n8n) : '',
   };
 
-  const dockerComposeReal = render(readFileSync(path.join(TEMPLATES_DIR, 'docker-compose.yml.template'), 'utf8'), vars);
-  const caddyfile = render(readFileSync(path.join(TEMPLATES_DIR, 'Caddyfile.template'), 'utf8'), vars);
+  // A shared-mode client has no Caddy of its own (one shared Caddy per
+  // server handles every tenant's routing -- see lib/shared-host.mjs), so
+  // it reads a different compose file and produces a site-block instead of
+  // a full Caddyfile.
+  const composeTemplateName = sharedMode === 'none' ? 'docker-compose.yml.template' : 'docker-compose.shared.yml.template';
+  const dockerComposeReal = render(readFileSync(path.join(TEMPLATES_DIR, composeTemplateName), 'utf8'), vars);
+  const caddyfile = sharedMode === 'none' ? render(readFileSync(path.join(TEMPLATES_DIR, 'Caddyfile.template'), 'utf8'), vars) : null;
+  const sharedSiteBlock = sharedMode === 'none' ? null : renderSiteBlock(path.join(TEMPLATES_DIR, 'Caddyfile.shared-site.template'), vars);
   const envReal = render(readFileSync(path.join(TEMPLATES_DIR, '.env.template'), 'utf8'), vars);
   const schema = readFileSync(path.join(TEMPLATES_DIR, 'schema.sql'), 'utf8');
 
@@ -193,7 +261,9 @@ async function main() {
     const owner = await github.getAuthenticatedUser(secrets.GITHUB_TOKEN);
     repo = await github.createRepo(secrets.GITHUB_TOKEN, `era-${args.slug}`);
     await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'docker-compose.yml', dockerComposeReal, 'Initial setup');
-    await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'Caddyfile', caddyfile, 'Initial setup');
+    // A shared-mode client has no Caddyfile of its own -- its routing
+    // lives in the shared server's own Caddy config, not this repo.
+    if (caddyfile) await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'Caddyfile', caddyfile, 'Initial setup');
     await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, 'schema.sql', schema, 'Initial setup');
     const envExample = envReal.replace(/=(.+)$/gm, (m, v) => (v.trim() ? '=<set on server, not in git>' : '='));
     await github.putFile(secrets.GITHUB_TOKEN, repo.owner, repo.repo, '.env.example', envExample, 'Initial setup');
@@ -209,12 +279,31 @@ async function main() {
   }
 
   // 2. Server
-  console.log(`Creating Hetzner server (this takes a few minutes)...`);
-  const serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
-  const ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
-  console.log(`  Server IP: ${ip}, waiting for it to finish booting + installing Docker...`);
-  await waitForSsh(ip);
-  await waitForCloudInit(ip);
+  let serverId, ip;
+  if (sharedMode === 'join') {
+    // Already exists and is already running Docker + the shared Caddy --
+    // that's what makes it "a registered shared server" (validated above).
+    ip = args.sharedServer;
+    serverId = findServer(registry, ip).serverId;
+    console.log(`Joining existing shared server ${ip}...`);
+  } else {
+    console.log(`Creating ${args.provider} server (this takes a few minutes)...`);
+    if (args.provider === 'oracle') {
+      serverId = await oracle.createServer(oracleConfig, { name: dropletName, size: args.size });
+      ip = await oracle.waitForServerActive(oracleConfig, serverId);
+    } else {
+      serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
+      ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
+    }
+    console.log(`  Server IP: ${ip}, waiting for it to finish booting + installing Docker...`);
+    await waitForSsh(ip);
+    await waitForCloudInit(ip);
+    if (sharedMode === 'new') {
+      console.log('Setting up the shared Caddy for this server...');
+      await bootstrapSharedHost(ip);
+      upsertServer(registry, { ip, provider: args.provider, serverId, mode: 'shared', createdAt: new Date().toISOString() });
+    }
+  }
 
   // 3. Deploy real files (with real secrets) directly to the server, never to git
   console.log('Deploying app to the server...');
@@ -269,12 +358,15 @@ async function main() {
   ].join('\n');
   writeLocalTemp(tmpDir, {
     'docker-compose.yml': dockerComposeReal,
-    Caddyfile: caddyfile,
+    // A shared-mode client has no Caddyfile of its own -- omit both the
+    // temp file and (below) the copy, rather than shipping an empty/null
+    // one nothing reads.
+    ...(caddyfile ? { Caddyfile: caddyfile } : {}),
     '.env': envReal,
     'init.sql': initSql,
   });
   await copyToRemote(ip, `${tmpDir}/docker-compose.yml`, `${remoteDir}/docker-compose.yml`);
-  await copyToRemote(ip, `${tmpDir}/Caddyfile`, `${remoteDir}/Caddyfile`);
+  if (caddyfile) await copyToRemote(ip, `${tmpDir}/Caddyfile`, `${remoteDir}/Caddyfile`);
   await copyToRemote(ip, `${tmpDir}/.env`, `${remoteDir}/.env`);
   await copyToRemote(ip, `${tmpDir}/init.sql`, `${remoteDir}/init.sql`);
   await copyToRemote(ip, path.join(TEMPLATES_DIR, 'dashboard'), `${remoteDir}/`, { recursive: true });
@@ -292,6 +384,15 @@ async function main() {
   console.log('Applying starting database schema...');
   await runRemote(ip, `docker exec -i ${args.slug}-postgres-1 psql -U app -d ${args.slug} -v ON_ERROR_STOP=1 < ${remoteDir}/init.sql`);
   await runRemote(ip, `cd ${remoteDir} && docker compose restart postgrest`);
+
+  // Wire this client into the server's one shared Caddy -- its own stack
+  // has no Caddy at all (see the docker-compose.shared.yml.template
+  // comment), so until this runs it's up but genuinely unreachable from
+  // the outside.
+  if (sharedSiteBlock) {
+    console.log('Adding this client to the shared server\'s Caddy...');
+    await addSite(ip, args.slug, sharedSiteBlock);
+  }
 
   // 4. DNS
   let dnsOk = true;
@@ -328,7 +429,11 @@ async function main() {
     isCustomDomain: Boolean(args.customDomain),
     dnsPending: !dnsOk,
     dnsPendingInstructions: dnsInstructions,
-    provider: 'hetzner',
+    // For a joined shared server, the real provider is whatever that
+    // server was actually created as (recorded on it, not on args.provider
+    // -- --shared-server mode doesn't require --provider to be meaningful
+    // at all, since it never calls a provider API).
+    provider: sharedMode === 'join' ? findServer(registry, ip).provider : args.provider,
     serverId,
     ip,
     repo: repo ? repo.htmlUrl : null,
@@ -337,6 +442,12 @@ async function main() {
     paymentProvider: args.payment,
     hasPdf: args.pdf,
     createdAt: new Date().toISOString(),
+    // serverMode 'shared' plus hostedOn/sharedPorts is what teardown-client.mjs
+    // checks to know it must NOT delete the underlying server (other
+    // tenants may still be on it) and must instead remove just this
+    // client's own site block from the shared Caddy.
+    serverMode: sharedMode === 'none' ? 'dedicated' : 'shared',
+    ...(sharedMode !== 'none' ? { hostedOn: ip, sharedPorts } : {}),
     // isEbos marks this registry entry as the EBOS deployment (not a normal
     // one-business client) so the panel knows to render it in "Businesses
     // (EBOS)" instead of "Clients", and ebosAdminToken lets the panel call
@@ -361,7 +472,9 @@ async function main() {
   console.log('\nDone.');
   console.log(`  App:      https://${subdomain} ${dnsOk ? '(DNS added automatically)' : '(DNS needs the manual step above)'}`);
   console.log(`  Repo:     ${repo ? repo.htmlUrl : '(skipped, --skip-github)'}`);
-  console.log(`  Server:   ${ip}`);
+  const serverModeNote =
+    sharedMode === 'none' ? '(dedicated)' : sharedMode === 'new' ? `(shared, just set up -- pass --shared-server=${ip} to add more clients to it)` : '(shared)';
+  console.log(`  Server:   ${ip} ${serverModeNote}`);
   if (args.ebosSeed || args.esfSeed) {
     // The generic DASHBOARD_USER/DASHBOARD_PASSWORD Basic Auth login this
     // template set doesn't use -- both EBOS and ESF have real per-owner

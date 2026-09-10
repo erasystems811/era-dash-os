@@ -89,6 +89,17 @@ async function main() {
   const client = findClient(registry, args.client);
   if (!client) throw new Error(`No client "${args.client}" in the registry.`);
   if (client.customDeploy) throw new Error(`${args.client} runs a custom app deploy, not the standard template -- this script would overwrite it. See the client's own repo/deploy setup instead.`);
+  // This script isn't shared-server aware (it always renders the dedicated
+  // docker-compose.yml.template/Caddyfile.template, which would give a
+  // shared-mode client its own Caddy fighting the server's shared one for
+  // port 80/443) and --rebuild-os wipes the whole server via the Hetzner
+  // API -- on a shared server that takes every OTHER client on it down
+  // too, not just this one. Refuse outright rather than silently doing
+  // either. See push-update.mjs for the safe way to push a code update to
+  // a live client instead.
+  if (client.serverMode === 'shared') {
+    throw new Error(`${args.client} is on a shared server (${client.ip}) -- redeploy-client.mjs doesn't support shared-mode clients yet (it would either fight the shared Caddy for its own client, or with --rebuild-os wipe every other client on that server). Use push-update.mjs for a code-only update instead.`);
+  }
 
   const secrets = loadSecrets();
   requireSecrets(secrets, ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'HETZNER_TOKEN']);

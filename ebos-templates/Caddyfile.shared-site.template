@@ -1,0 +1,11 @@
+{{SUBDOMAIN}} {
+    handle_path /rest/v1/* {
+        reverse_proxy 127.0.0.1:{{POSTGREST_PORT}}
+    }
+    handle_path /n8n/* {
+        reverse_proxy 127.0.0.1:{{N8N_PORT}}
+    }
+    handle {
+        reverse_proxy 127.0.0.1:{{DASHBOARD_PORT}}
+    }
+}
