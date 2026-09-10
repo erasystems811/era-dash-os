@@ -92,21 +92,32 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoU
   .qty .qn{min-width:22px;text-align:center;font-size:13px;font-weight:600;color:var(--ink)}
   .bask{flex:0 0 auto;background:var(--ink);color:#fff;padding:13px 15px;display:flex;align-items:center;gap:10px;font-size:13.5px}
   .bask .go{margin-left:auto;background:var(--wa);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:13px;padding:9px 16px;border-radius:999px;touch-action:manipulation}
-  .pending{margin:12px 14px 0;padding:10px 12px;background:#FBF3E7;border:1px solid #EAD9B8;border-radius:10px;font-size:12.5px;color:var(--ink);line-height:1.4}
-  .pending b{font-weight:600}
-  .pending ul{margin:6px 0 2px;padding-left:18px}
-  .pending li{margin-bottom:2px}
-  .back{position:absolute;top:14px;left:12px;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.14);color:#fff;border:0;display:grid;place-items:center;font-size:18px;line-height:1;touch-action:manipulation;z-index:4}
+  .bask #bc{touch-action:manipulation;text-decoration:underline;text-decoration-color:rgba(255,255,255,.35);text-underline-offset:3px}
+  .back{display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,.16);color:#fff;border:0;border-radius:999px;padding:6px 13px 6px 10px;font-family:inherit;font-size:12.5px;font-weight:600;margin-bottom:10px;touch-action:manipulation}
+  .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:8}
+  .sheet{position:fixed;left:0;right:0;bottom:0;background:#fff;border-radius:16px 16px 0 0;max-height:70vh;overflow-y:auto;z-index:9;padding:16px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -8px 24px rgba(0,0,0,.18)}
+  .sheetHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .sheetHead h3{font-family:"Fraunces",serif;font-size:17px;font-weight:600}
+  .sheetClose{background:none;border:0;font-size:22px;line-height:1;color:var(--mid);width:28px;height:28px;touch-action:manipulation}
+  .sheetRow{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #F0EBE2}
+  .sheetRow:last-child{border-bottom:0}
+  .sheetRow .nm{flex:1;font-size:14px}
+  .sheetRow .pr{font-size:13px;color:var(--mid);min-width:70px;text-align:right}
+  .sheetEmpty{padding:24px 0;text-align:center;color:var(--mid);font-size:13px}
 </style></head>
 <body>
-<div class="mtop${coverPhotoUrl ? ' photo' : ''}" style="${headerStyle}">${waDigits ? '<button class="back" id="back" aria-label="Back to chat">←</button>' : ''}<div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
+<div class="mtop${coverPhotoUrl ? ' photo' : ''}" style="${headerStyle}">${waDigits ? '<button class="back" id="back">← Back to chat</button>' : ''}<div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
-  <div id="pending" class="pending" hidden></div>
   <div id="sec" class="sec"></div>
   <div id="grid" class="grid"></div>
 </div>
 <div class="bask"><span id="bc">Nothing added yet</span><button class="go" id="go">Review order</button></div>
+<div id="backdrop" class="backdrop" hidden></div>
+<div id="sheet" class="sheet" hidden>
+  <div class="sheetHead"><h3>Your order</h3><button id="sheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
+  <div id="sheetList"></div>
+</div>
 <script>
 const PRODUCTS = ${JSON.stringify(lightProducts)};
 const PENDING_ORDER = ${JSON.stringify(pendingOrder)};
@@ -152,6 +163,7 @@ function changeQty(id, delta) {
   if (next <= 0) delete basket[id]; else basket[id] = next;
   render();
   updateBasket();
+  if (!document.getElementById('sheet').hidden) renderSheet();
 }
 
 function render() {
@@ -186,6 +198,43 @@ function updateBasket() {
   document.getElementById('bc').textContent = count ? count + ' item' + (count > 1 ? 's' : '') + ' \\u00b7 ' + naira(total) : 'Nothing added yet';
 }
 
+// A full itemized list lives here, opened by tapping the basket summary,
+// instead of inline on the page -- Chidera 2026-09-10: "if it list that
+// will only make that bulky, let there be like a footer they can tap to
+// see the list and adjust it directly from there". Reuses changeQty, so
+// adjusting a quantity here and adjusting it in the main grid are the
+// exact same action either way -- always in sync, nothing to reconcile.
+function renderSheet() {
+  const entries = Object.entries(basket);
+  const list = document.getElementById('sheetList');
+  if (!entries.length) {
+    list.innerHTML = '<p class="sheetEmpty">Nothing added yet.</p>';
+    return;
+  }
+  list.innerHTML = entries.map(([id, qty]) => {
+    const p = PRODUCTS.find(p => p.id === id);
+    if (!p) return '';
+    return '<div class="sheetRow"><span class="nm">' + p.name + '</span>' +
+      '<div class="qty"><button class="qm" data-id="' + id + '">\\u2212</button><span class="qn">' + qty + '</span><button class="qp" data-id="' + id + '">+</button></div>' +
+      '<span class="pr">' + naira(p.price * qty) + '</span></div>';
+  }).join('');
+  list.querySelectorAll('.qp').forEach(b => b.onclick = () => changeQty(b.dataset.id, 1));
+  list.querySelectorAll('.qm').forEach(b => b.onclick = () => changeQty(b.dataset.id, -1));
+}
+
+function openSheet() {
+  renderSheet();
+  document.getElementById('backdrop').hidden = false;
+  document.getElementById('sheet').hidden = false;
+}
+function closeSheet() {
+  document.getElementById('backdrop').hidden = true;
+  document.getElementById('sheet').hidden = true;
+}
+document.getElementById('bc').onclick = openSheet;
+document.getElementById('sheetClose').onclick = closeSheet;
+document.getElementById('backdrop').onclick = closeSheet;
+
 document.getElementById('go').onclick = async () => {
   const items = Object.entries(basket).map(([productId, quantity]) => ({ productId, quantity }));
   if (!items.length) { document.getElementById('bc').textContent = 'Add something first'; return; }
@@ -199,20 +248,15 @@ document.getElementById('go').onclick = async () => {
   if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
 };
 
-if (PENDING_ORDER && PENDING_ORDER.items && PENDING_ORDER.items.length) {
-  const pendingEl = document.getElementById('pending');
-  const count = PENDING_ORDER.items.reduce(function (s, i) { return s + i.quantity; }, 0);
-  // Naming them here, not just a count -- Chidera 2026-09-10: "when you
-  // say they have 5 items pending but they can't see the 5 orders". The
-  // steppers below still reflect it too, but those are scattered across
-  // whichever categories those items happen to be in.
-  const list = PENDING_ORDER.items.map(function (i) { return '<li>' + i.quantity + '\\u00d7 ' + i.name + '</li>'; }).join('');
-  pendingEl.innerHTML = '<b>' + count + ' item' + (count > 1 ? 's' : '') + ' pending</b> (' + naira(PENDING_ORDER.total) + '):<ul>' + list + '</ul>Adjust or add more below, then tap Review order.';
-  pendingEl.hidden = false;
-}
 renderCats();
 render();
 updateBasket();
+// A guest reopening this link may already have an order sitting with us --
+// basket is already pre-loaded from it above, and the basket bar itself
+// (never "Nothing added yet" when that's true) is the ambient signal;
+// opening the sheet once, right away, is what actually answers "how do I
+// know" and "how do I remove it" without any always-on inline list.
+if (PENDING_ORDER && PENDING_ORDER.items && PENDING_ORDER.items.length) openSheet();
 </script>
 </body></html>`;
 }

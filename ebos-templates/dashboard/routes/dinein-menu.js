@@ -7,13 +7,14 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage } from '../engine/menu-page-template.js';
 import { sendConfirmButtons } from '../engine/flow.js';
+import { getWhatsAppCredentials } from '../engine/branch-channel.js';
+import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
 
 export const router = express.Router();
 
 async function resolveTable(qrToken) {
   const { rows } = await pool.query(
-    `select rt.*, b.name as branch_name, biz.name as business_name,
-       biz.cover_photo_data_url, coalesce(b.whatsapp_number, biz.phone_number) as wa_number
+    `select rt.*, b.name as branch_name, biz.name as business_name, biz.cover_photo_data_url
      from restaurant_table rt join branch b on b.id = rt.branch_id, business biz
      where rt.qr_token = $1 and rt.status = 'active'`,
     [qrToken]
@@ -21,18 +22,29 @@ async function resolveTable(qrToken) {
   return rows[0] || null;
 }
 
-// Cover photo + the business's own WhatsApp number (for the wa.me
-// return-to-chat redirect) -- shared with routes/menu-page.js, which has
-// no table row to piggyback this onto the way resolveTable above does.
+// Cover photo -- shared with routes/menu-page.js, which has no table row
+// to piggyback this onto the way resolveTable above does.
 export async function resolveMenuBranding(branchId) {
   const { rows } = await pool.query(
-    `select biz.name as business_name, biz.cover_photo_data_url,
-       coalesce(b.whatsapp_number, biz.phone_number) as wa_number
+    `select biz.name as business_name, biz.cover_photo_data_url
      from branch b, business biz
      where b.id = $1`,
     [branchId]
   );
   return rows[0] || {};
+}
+
+// The real number a wa.me link needs -- NOT business.phone_number (a free-
+// text contact field in Settings, not necessarily ever connected to
+// WhatsApp: era-demo's is a placeholder, and a wa.me link built from it
+// produced "this number isn't on WhatsApp, Invite / Cancel" every time.
+// Chidera 2026-09-10. Resolved from Meta's own record of what's actually
+// connected to this branch's phone_number_id (falls back to the single
+// shared env-var pair when no branch_channel row exists, same as every
+// other credentials lookup in this codebase).
+export async function resolveWaNumber(branchId) {
+  const credentials = await getWhatsAppCredentials(branchId);
+  return getWaDisplayNumber(credentials);
 }
 
 async function openSessionFor(table) {
@@ -125,14 +137,14 @@ router.post('/:qrToken/review', async (req, res) => {
 router.get('/:qrToken', async (req, res) => {
   const table = await resolveTable(req.params.qrToken);
   if (!table) return res.status(404).send('Table not found.');
-  const products = await menuForBranch(table.branch_id);
+  const [products, waNumber] = await Promise.all([menuForBranch(table.branch_id), resolveWaNumber(table.branch_id)]);
   res.set('Content-Type', 'text/html').send(
     renderMenuPage({
       reviewPath: `/t/${req.params.qrToken}/review`,
       businessName: table.business_name,
       subtitle: `Table ${table.label} · ${table.branch_name}`,
       coverPhotoUrl: table.cover_photo_data_url,
-      waNumber: table.wa_number,
+      waNumber,
       products,
       // A dine-in round is always a fresh order (a table ordering drinks,
       // then food later, is two real separate rounds to the kitchen, not

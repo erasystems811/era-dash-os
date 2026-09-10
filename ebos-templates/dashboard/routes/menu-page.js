@@ -7,7 +7,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage } from '../engine/menu-page-template.js';
-import { menuForBranch, resolveMenuBranding } from './dinein-menu.js';
+import { menuForBranch, resolveMenuBranding, resolveWaNumber } from './dinein-menu.js';
 import { handleWebMenuOrder, getOpenOrder } from '../engine/flow.js';
 
 export const router = express.Router();
@@ -75,16 +75,19 @@ router.post('/:token/review', async (req, res) => {
 router.get('/:token', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
-  const branding = await resolveMenuBranding(customer.branch_id);
-  const products = await menuForBranch(customer.branch_id);
-  const pendingOrder = await pendingOrderPayload(customer.id);
+  const [branding, products, pendingOrder, waNumber] = await Promise.all([
+    resolveMenuBranding(customer.branch_id),
+    menuForBranch(customer.branch_id),
+    pendingOrderPayload(customer.id),
+    resolveWaNumber(customer.branch_id),
+  ]);
   res.set('Content-Type', 'text/html').send(
     renderMenuPage({
       reviewPath: `/m/${req.params.token}/review`,
       businessName: branding.business_name || '',
       subtitle: 'Pick what you would like, then review your order.',
       coverPhotoUrl: branding.cover_photo_data_url,
-      waNumber: branding.wa_number,
+      waNumber,
       products,
       pendingOrder,
     })

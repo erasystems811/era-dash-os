@@ -252,3 +252,34 @@ export async function downloadWhatsAppMedia(mediaId) {
   const buffer = Buffer.from(await fileRes.arrayBuffer());
   return `data:${meta.mime_type};base64,${buffer.toString('base64')}`;
 }
+
+// business.phone_number is just a free-text contact field (Settings) --
+// era-demo's is a placeholder that was never actually on WhatsApp, and a
+// wa.me link built from it produced "this number isn't on WhatsApp,
+// Invite / Cancel" every time the web menu page tried to send a guest
+// back to the chat. Chidera 2026-09-10: "why does it keep telling me that
+// a certain number isnt on whatsapp". The number a wa.me link needs is
+// the one Meta actually has connected to phone_number_id -- fetched here
+// and cached in-memory per phone_number_id (this never changes without a
+// real reconnect, so refetching on every page load would just be
+// needless latency on a page that's supposed to open instantly).
+const displayNumberCache = new Map();
+export async function getWaDisplayNumber(credentials) {
+  const phoneNumberId = credentials?.phoneNumberId || process.env.META_PHONE_NUMBER_ID;
+  const accessToken = credentials?.accessToken || process.env.META_ACCESS_TOKEN;
+  if (!phoneNumberId || !accessToken) return null;
+  if (displayNumberCache.has(phoneNumberId)) return displayNumberCache.get(phoneNumberId);
+  if (process.env.EBOS_SANDBOX === '1') return null;
+  try {
+    const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}?fields=display_phone_number`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    const number = body.display_phone_number || null;
+    displayNumberCache.set(phoneNumberId, number);
+    return number;
+  } catch {
+    return null;
+  }
+}

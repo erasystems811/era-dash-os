@@ -11,23 +11,19 @@ import QRCode from 'qrcode';
 import { randomBytes } from 'node:crypto';
 import { pool } from '../lib/db.js';
 import { requireEditorApi } from '../lib/auth.js';
+import { resolveWaNumber } from './dinein-menu.js';
 
 export const router = express.Router();
 
-// The number a table's QR code actually points at -- the branch's own
-// dedicated WhatsApp number (branch_channel/branch.whatsapp_number) once
-// it has one, else the one shared business number every table falls back
-// to today. Digits only: wa.me takes a bare MSISDN, not a formatted
-// number with a leading + or spaces.
+// The number a table's QR code actually points at. NOT business.phone_
+// number (a free-text contact field, not necessarily ever connected to
+// WhatsApp -- era-demo's was a placeholder, meaning every dine-in QR code
+// generated before this fix encoded a number that would show "this number
+// isn't on WhatsApp" when scanned) -- resolveWaNumber asks Meta what's
+// actually connected to this branch's phone_number_id. Digits only: wa.me
+// takes a bare MSISDN, not a formatted number with a leading + or spaces.
 async function whatsappNumberForBranch(branchId) {
-  const { rows } = await pool.query(
-    `select coalesce(b.whatsapp_number, biz.phone_number) as number
-     from branch b, business biz
-     where b.id = $1
-     limit 1`,
-    [branchId]
-  );
-  const raw = rows[0]?.number;
+  const raw = await resolveWaNumber(branchId);
   return raw ? raw.replace(/\D/g, '') : null;
 }
 
