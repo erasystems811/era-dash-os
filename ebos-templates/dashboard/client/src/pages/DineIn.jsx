@@ -168,8 +168,8 @@ export default function DineIn() {
 
       {pendingOrders && pendingOrders.length > 0 && (
         <div className="card">
-          <h3 style={{ marginTop: 0 }}>In-house guests</h3>
-          <p className="subtitle">Orders placed, waiting on the kitchen/bar. Oldest first.</p>
+          <h3 style={{ marginTop: 0 }}>Pending orders</h3>
+          <p className="subtitle">Placed, waiting on the kitchen/bar. Oldest first.</p>
           <table>
             <thead>
               <tr>
