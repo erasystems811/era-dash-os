@@ -280,6 +280,13 @@ create unique index if not exists customers_phone_idx on customers (phone_number
 create unique index if not exists customers_channel_id_idx on customers (channel, channel_id) where channel_id is not null;
 create index if not exists customers_last_message_at_idx on customers (last_message_at desc);
 
+-- The real web menu page (engine/menu-page-template.js) backing the
+-- REGULAR (non-dine-in) ordering flow too, not just dine-in -- how
+-- routes/menu-page.js's public /m/:token resolves back to a real customer
+-- with no login, same idea as restaurant_table.qr_token for a table.
+alter table customers add column if not exists menu_token text;
+create unique index if not exists customers_menu_token_idx on customers (menu_token) where menu_token is not null;
+
 create table if not exists product (
   id uuid primary key default gen_random_uuid(),
   name text not null,

@@ -810,29 +810,23 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         if (shown.length) {
           await send(`You can check what we have and let me know what you'd like.`, 'items_reask');
         } else {
-          // The "View menu" button beats even a photo once it's available --
-          // built and sent entirely by this backend (engine/menu-message.js),
-          // not dependent on Meta's own catalogue indexing, so it can't fail
-          // the way that did. WhatsApp only (Instagram has no equivalent
-          // interactive list type). Returns false only when the catalogue is
-          // genuinely empty, so the photo/text fallback below still covers
-          // that real gap.
+          // The real web menu page (engine/menu-page-template.js) beats
+          // even a photo once it's available -- every dish, a real photo,
+          // categories, a basket, built and served entirely by this
+          // backend, not dependent on Meta's own catalogue indexing or the
+          // old WhatsApp List Message's 10-row/no-photo limits. Chidera's
+          // call, 2026-09-10: "the menu is meant to be like a site now...
+          // not just in dine in[,] the normal conversation flow". WhatsApp
+          // only (Instagram has no CTA-URL button type) -- Instagram keeps
+          // the photo/text fallback below unchanged. Returns false only
+          // when PUBLIC_URL isn't set, so the photo/text fallback below
+          // still covers that real gap.
           let catalogShown = false;
-          if (customer.channel !== 'instagram' && process.env.EBOS_SANDBOX !== '1') {
-            catalogShown = await sendMenuList(
-              recipientFor(customer),
-              "Here's our menu, tap below to see everything we have.",
-              order.branch_id
-            ).catch((err) => {
-              console.error('sendMenuList failed:', err.message);
+          if (customer.channel !== 'instagram') {
+            catalogShown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.").catch((err) => {
+              console.error('sendWebMenuLink failed:', err.message);
               return false;
             });
-            // sendMenuList sends straight via the Graph API, not through
-            // reply() -- logged here so it actually shows up in the
-            // conversation history instead of leaving a gap that makes a
-            // real "did it send twice" question impossible to answer from
-            // the transcript alone.
-            if (catalogShown) await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[interactive menu button sent]', trigger: 'menu_shown' });
           }
           // A real menu photo beats a text list once a catalogue is more
           // than a handful of items -- "We have: X, Y, Z... [300 names]" is
@@ -2706,19 +2700,63 @@ async function handlePendingBatch(customer, text) {
 // for a typed "what do you have", but with zero AI calls: the button tap
 // alone is enough to know what was meant, unlike a typed message which
 // still needs classifyIntent to tell an order-browse from anything else.
+// The real web menu link -- one per customer (customers.menu_token,
+// reused rather than regenerated every time so an old link a customer
+// still has open in their browser keeps working). Sent as a WhatsApp
+// CTA-URL button (opens right inside WhatsApp's in-app browser, same as
+// dine-in's table-scoped version, just keyed by customer instead of
+// table). Returns false (no real send) when PUBLIC_URL isn't configured,
+// same "genuinely inert without it" gate every other PUBLIC_URL-dependent
+// send in this file already follows.
+async function ensureMenuToken(customer) {
+  if (customer.menu_token) return customer.menu_token;
+  const token = randomBytes(12).toString('hex');
+  await pool.query('update customers set menu_token = $1 where id = $2', [token, customer.id]);
+  customer.menu_token = token;
+  return token;
+}
+
+async function sendWebMenuLink(customer, bodyText) {
+  if (!process.env.PUBLIC_URL) return false;
+  const token = await ensureMenuToken(customer);
+  const url = `${process.env.PUBLIC_URL}/m/${token}`;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, 'View menu', url, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'menu_shown', processed: true });
+  return true;
+}
+
 export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' , processed: true });
-  // sendMenuList calls the real Graph API directly, not gated by
-  // EBOS_SANDBOX itself (see menu-message.js) -- same guard
-  // handleCollectInfo's own catalogShown path already uses, so a sandbox
-  // run never makes a real outbound call here either.
-  const shown = process.env.EBOS_SANDBOX !== '1' && (await sendMenuList(recipientFor(customer), "Here's our menu, tap below to see everything we have.", customer.branch_id));
-  if (shown) {
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: '[interactive menu button sent]', trigger: 'menu_shown' });
+  const shown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.");
+  if (shown) return;
+  await reply(customer, 'What would you like to order?', 'items_menu_shown');
+}
+
+// The real order behind "Review order" on the web menu page (routes/
+// menu-page.js) -- multiple items at once, same as handleMenuItemTap
+// below but for a whole basket instead of one tap. Reuses the exact same
+// tail (finishItemsCollection: missing fields, item-customization
+// questions, upsell, the confirm read-back) so a basket ordered from the
+// page and an item ordered by typing or tapping all converge on one
+// identical experience from here on.
+export async function handleWebMenuOrder(customer, items) {
+  let order = await getOpenOrder(customer.id);
+  if (order && ['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
+    const adds = items.map((i) => ({ productId: i.productId, name: i.name, price: i.price, quantity: i.quantity }));
+    await handleOrderModification(customer, order, { adds, removes: [], sets: [] });
     return;
   }
-  await reply(customer, 'What would you like to order?', 'items_menu_shown');
+  if (!order) {
+    order = await createDraftOrder(customer.id, customer.branch_id);
+    await transitionOrder(order, 'understand_request');
+    await transitionOrder(order, 'collect_info');
+  }
+  for (const item of items) {
+    await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+  }
+  await finishItemsCollection(customer, order, 'Got it. ');
 }
 
 export async function handleMenuItemTap({ phoneNumber, channelId, product, channel = 'whatsapp', branchId }) {

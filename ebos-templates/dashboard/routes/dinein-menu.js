@@ -7,6 +7,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { sendWhatsApp } from '../engine/whatsapp-send.js';
+import { renderMenuPage } from '../engine/menu-page-template.js';
 
 export const router = express.Router();
 
@@ -29,8 +30,10 @@ async function openSessionFor(table) {
 // prompt context (no images, no availability detail) and reused all over
 // the order-taking engine; bloating it with base64 photos for every call
 // site would be a real cost/latency regression there. This page needs the
-// opposite: every real detail, for a human looking at pictures.
-async function menuForBranch(branchId) {
+// opposite: every real detail, for a human looking at pictures. Exported --
+// routes/menu-page.js (the non-table, regular-ordering version of this
+// same page) uses the exact same query.
+export async function menuForBranch(branchId) {
   const { rows } = await pool.query(
     `select id, name, description, price, category, image_data_url, availability
      from product
@@ -107,7 +110,7 @@ router.post('/:qrToken/review', async (req, res) => {
     credentials
   );
   await pool.query(
-    `insert into message (customer_id, direction, channel, sender, body, trigger) values ($1, 'outbound', 'whatsapp', 'bot', $2, 'dinein_review')`,
+    `insert into message (customer_id, direction, channel, sender, body, trigger, processed_at) values ($1, 'outbound', 'whatsapp', 'bot', $2, 'dinein_review', now())`,
     [customer.id, `To confirm your order for Table ${table.label}: ${lines.replace(/\n/g, ', ')}. Total: NGN ${total}.`]
   );
 
@@ -117,108 +120,13 @@ router.post('/:qrToken/review', async (req, res) => {
 router.get('/:qrToken', async (req, res) => {
   const table = await resolveTable(req.params.qrToken);
   if (!table) return res.status(404).send('Table not found.');
-  res.set('Content-Type', 'text/html').send(renderMenuPage(req.params.qrToken, table));
+  const products = await menuForBranch(table.branch_id);
+  res.set('Content-Type', 'text/html').send(
+    renderMenuPage({
+      reviewPath: `/t/${req.params.qrToken}/review`,
+      businessName: table.business_name,
+      subtitle: `Table ${table.label} · ${table.branch_name}`,
+      products,
+    })
+  );
 });
-
-// One self-contained HTML page, no build step -- vanilla JS, inline CSS.
-// This is a guest-facing surface opened inside WhatsApp's in-app browser
-// (spec 4.3: no external links, no login, fast on 3G), deliberately not
-// folded into the React dashboard SPA, which is a completely different
-// (staff-only, authenticated) application.
-function renderMenuPage(qrToken, table) {
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>${escapeHtml(table.business_name)} -- Table ${escapeHtml(table.label)}</title>
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, system-ui, sans-serif; background: #fafafa; color: #111; padding-bottom: 90px; }
-  header { position: sticky; top: 0; background: #fff; padding: 14px 16px; border-bottom: 1px solid #eee; z-index: 5; }
-  header h1 { font-size: 18px; margin: 0; }
-  header p { margin: 2px 0 0; color: #666; font-size: 13px; }
-  .cats { display: flex; gap: 8px; overflow-x: auto; padding: 10px 16px; position: sticky; top: 56px; background: #fafafa; z-index: 4; }
-  .cat-btn { flex: none; padding: 6px 14px; border-radius: 999px; border: 1px solid #ddd; background: #fff; font-size: 13px; white-space: nowrap; }
-  .cat-btn.active { background: #111; color: #fff; border-color: #111; }
-  .item { display: flex; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #eee; background: #fff; }
-  .item img { width: 84px; height: 84px; border-radius: 8px; object-fit: cover; flex: none; background: #eee; }
-  .item .tile { width: 84px; height: 84px; border-radius: 8px; flex: none; background: #d9c9a3; display: flex; align-items: center; justify-content: center; font-size: 11px; text-align: center; padding: 4px; color: #333; }
-  .item .info { flex: 1; min-width: 0; }
-  .item .name { font-weight: 600; font-size: 15px; }
-  .item .desc { color: #666; font-size: 12px; margin-top: 2px; }
-  .item .price { font-weight: 600; margin-top: 6px; }
-  .item .add { margin-top: 6px; padding: 6px 14px; border-radius: 6px; border: none; background: #111; color: #fff; font-size: 13px; }
-  .item.soldout .add { background: #ccc; color: #666; }
-  .item .qty { font-size: 13px; color: #111; margin-top: 6px; }
-  .basket { position: fixed; bottom: 0; left: 0; right: 0; background: #111; color: #fff; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; }
-  .basket button { background: #fff; color: #111; border: none; padding: 10px 18px; border-radius: 8px; font-weight: 600; }
-  .basket.hidden { display: none; }
-  .err { padding: 12px 16px; background: #fdecea; color: #611; }
-</style></head>
-<body>
-<header><h1>${escapeHtml(table.business_name)}</h1><p>Table ${escapeHtml(table.label)}</p></header>
-<div id="cats" class="cats"></div>
-<div id="items"></div>
-<div id="basket" class="basket hidden"><span id="basketText"></span><button id="reviewBtn">Review order</button></div>
-<script>
-const QR = ${JSON.stringify(qrToken)};
-let products = [];
-let basket = {}; // productId -> qty
-
-function moneyLine(p) { return 'NGN ' + Number(p.price); }
-
-function render(category) {
-  const catsEl = document.getElementById('cats');
-  const cats = ['All', ...new Set(products.map(p => p.category || 'Menu'))];
-  catsEl.innerHTML = cats.map(c => '<button class="cat-btn' + (c === category ? ' active' : '') + '" data-cat="' + c + '">' + c + '</button>').join('');
-  catsEl.querySelectorAll('.cat-btn').forEach(b => b.onclick = () => render(b.dataset.cat));
-
-  const list = category === 'All' ? products : products.filter(p => (p.category || 'Menu') === category);
-  document.getElementById('items').innerHTML = list.map(p => {
-    const qty = basket[p.id] || 0;
-    const media = p.image_data_url
-      ? '<img src="' + p.image_data_url + '" alt="">'
-      : '<div class="tile">' + p.name + '</div>';
-    return '<div class="item' + (p.availability ? '' : ' soldout') + '">' + media +
-      '<div class="info"><div class="name">' + p.name + '</div>' +
-      (p.description ? '<div class="desc">' + p.description + '</div>' : '') +
-      '<div class="price">' + moneyLine(p) + '</div>' +
-      (p.availability
-        ? '<button class="add" data-id="' + p.id + '">' + (qty ? 'Add another (' + qty + ')' : 'Add') + '</button>'
-        : '<div class="qty">Sold out</div>') +
-      '</div></div>';
-  }).join('');
-  document.querySelectorAll('.add').forEach(b => b.onclick = () => { basket[b.dataset.id] = (basket[b.dataset.id] || 0) + 1; render(category); updateBasket(); });
-}
-
-function updateBasket() {
-  const count = Object.values(basket).reduce((a, b) => a + b, 0);
-  const total = Object.entries(basket).reduce((sum, [id, qty]) => {
-    const p = products.find(p => p.id === id);
-    return sum + (p ? Number(p.price) * qty : 0);
-  }, 0);
-  const el = document.getElementById('basket');
-  if (!count) { el.classList.add('hidden'); return; }
-  el.classList.remove('hidden');
-  document.getElementById('basketText').textContent = count + ' item' + (count > 1 ? 's' : '') + ' -- NGN ' + total;
-}
-
-document.getElementById('reviewBtn').onclick = async () => {
-  const items = Object.entries(basket).map(([productId, quantity]) => ({ productId, quantity }));
-  const res = await fetch('/t/' + QR + '/review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
-  const data = await res.json();
-  if (!res.ok) { alert(data.error || 'Something went wrong.'); return; }
-  document.body.innerHTML = '<div style="padding:40px 20px;text-align:center;font-family:sans-serif;"><h2>Order sent!</h2><p>Check WhatsApp to confirm it.</p></div>';
-};
-
-fetch('/t/' + QR + '/menu.json').then(r => r.json()).then(data => {
-  products = data.products;
-  render('All');
-}).catch(() => {
-  document.getElementById('items').innerHTML = '<div class="err">Could not load the menu. Please try again.</div>';
-});
-</script>
-</body></html>`;
-}
-
-function escapeHtml(s) {
-  return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
