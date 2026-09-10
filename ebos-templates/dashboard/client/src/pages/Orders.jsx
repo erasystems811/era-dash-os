@@ -79,6 +79,23 @@ function NewOrderForm({ onCreated, onCancel }) {
   const byId = new Map((products || []).map((p) => [p.id, p]));
   const subtotal = items.reduce((sum, i) => sum + Number(byId.get(i.productId)?.price || 0) * i.quantity, 0);
 
+  // Grouped by category so this stays pickable once a menu grows past a
+  // handful of items -- Chidera's call, 2026-09-03: "when the menu becomes
+  // up to 100 items it wont be easy to pick anymore". "Other" (uncategorised
+  // products) sorts last, everything else alphabetically, so the list is
+  // scannable instead of whatever order they happen to have been created in.
+  const productsByCategory = new Map();
+  for (const p of products || []) {
+    const cat = p.category || 'Other';
+    if (!productsByCategory.has(cat)) productsByCategory.set(cat, []);
+    productsByCategory.get(cat).push(p);
+  }
+  const categoryGroups = [...productsByCategory.entries()].sort(([a], [b]) => {
+    if (a === 'Other') return 1;
+    if (b === 'Other') return -1;
+    return a.localeCompare(b);
+  });
+
   async function submit(e) {
     e.preventDefault();
     setError(null);
@@ -145,10 +162,14 @@ function NewOrderForm({ onCreated, onCancel }) {
           <div className="field">
             <select value={pickProductId} onChange={(e) => setPickProductId(e.target.value)}>
               <option value="">Choose an item...</option>
-              {products.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({naira(p.price)})
-                </option>
+              {categoryGroups.map(([category, items]) => (
+                <optgroup key={category} label={category}>
+                  {items.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({naira(p.price)})
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </div>
