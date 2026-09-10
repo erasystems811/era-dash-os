@@ -641,14 +641,6 @@ async function answerFromKnowledgeBase(message) {
   return { answer, isGeneralAvailability };
 }
 
-// This has NO menu/business data at all, deliberately -- it exists only to
-// greet, never to answer anything. Found live: without the explicit ban
-// below, given a message that both greeted AND asked a real question ("is
-// there white rice and stew?"), it just guessed -- confidently said yes to
-// something not on the menu, with nothing to ground the answer, then had to
-// be corrected by the real (grounded) reply a moment later.
-const GREETING_SYSTEM = `You open a WhatsApp conversation for a business, replying to a customer's first message. Match what they actually said -- if they said "good evening", greet them back for the evening; if they used no greeting at all, don't force one. Warm and professional customer service, not a casual friend: no slang, keep emoji minimal or none. Use commas or periods for pauses, never a dash of any kind (no em dash, en dash, or hyphen used as punctuation). End by inviting them to share what they'd like to order. Do not list examples of what you can help with or describe your own capabilities -- a staff member doesn't announce their job description, just ask plainly. One or two short sentences, plain text, no markdown.\n\nIf the message also asks a real question (menu, prices, hours, anything factual) alongside the greeting, do NOT answer it here -- you have no real data to answer from, and guessing is never acceptable. Just greet and invite them to order; the real question gets answered separately, for real, right after.`;
-
 // A combo/special offer is a real product (product.is_combo) created
 // through its own form (routes/api.js's POST /catalogue/combo) -- Chidera
 // 2026-09-10: "a special offer is a combo so it should be created not
@@ -683,8 +675,16 @@ async function findSpecialsCategory(branchId) {
 // same message's own body text, which WhatsApp auto-links and makes
 // tappable on its own -- no second bubble, no second bot round-trip, and
 // still one tap either way.
+// No AI call here anymore -- Chidera 2026-09-11: "i need that first what
+// would you like to order with menu to go out instantly no typing again."
+// classifyIntent only ever routes here for a PURE greeting with nothing
+// else in it (a real question or an order in the same message goes to
+// 'enquiry'/'order' instead, never here), so there's nothing substantive
+// left for an AI call to react to -- greetingAckFor already does the same
+// tone-matching deterministically (used the same way in handleEnquiry/
+// handleCollectInfo already), just without the network round trip.
 async function handleGreeting(customer, text) {
-  const message = await askText(GREETING_SYSTEM, text);
+  const message = `${greetingAckFor(text)}What would you like to order today?`.trim();
   if (customer.channel !== 'whatsapp') {
     await reply(customer, message, 'greeting');
     return;
@@ -730,6 +730,25 @@ function greetingAckFor(text) {
     ack += "I'm doing well, thank you for asking. ";
   }
   return ack;
+}
+
+// A confident, deterministic shortcut around classifyIntent's own AI call
+// -- Chidera 2026-09-11: "i need that first what would you like to order
+// with menu to go out instantly no typing again." Reuses the exact same
+// patterns greetingAckFor already matches: strips every greeting phrase
+// out of the message, and if literally nothing else is left (just
+// whitespace/punctuation), this is confidently "just saying hi" with no
+// question or order riding along -- classifyIntent's own definition of
+// 'greeting' -- so there's nothing an AI call could add by looking at it.
+// Anything with real content left over ("hi, do you have jollof?") still
+// goes through classifyIntent as normal, unaffected.
+function isPureGreeting(text) {
+  const stripped = text
+    .replace(/good\s*(morning|afternoon|evening)/gi, '')
+    .replace(/\b(hi+|hello+|hey+|yo|greetings)\b/gi, '')
+    .replace(/how\s*(far|you\s*(dey|de)|are\s*you|is\s*(your\s*day|it\s*going))\b/gi, '')
+    .replace(/[\s!.,?]+/g, '');
+  return stripped.length === 0;
 }
 
 async function handleEnquiry(customer, text) {
@@ -2775,7 +2794,7 @@ async function handlePendingBatch(customer, text) {
     return;
   }
 
-  const { intent, wantsHuman } = await classifyIntent(text);
+  const { intent, wantsHuman } = isPureGreeting(text) ? { intent: 'greeting', wantsHuman: false } : await classifyIntent(text);
   if (wantsHuman) {
     await handover(customer, 'Customer asked for a person');
     return;
