@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- maximum-scale=1/user-scalable=no locks the viewport -- Chidera's
+         call, 2026-09-03: "like Netflix, not shaking, I can only zoom in
+         and it goes back to default" -- no pinch-zoom drift, no persisted
+         zoom state, feels like a native app shell rather than a web page. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>EBOS Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -10,8 +14,8 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap"
       rel="stylesheet"
     />
-    <script type="module" crossorigin src="/assets/index-HoAvK_Kw.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BkmLNM4M.css">
+    <script type="module" crossorigin src="/assets/index-C27ZkAD9.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-2bMUPd3X.css">
   </head>
   <body>
     <div id="root"></div>

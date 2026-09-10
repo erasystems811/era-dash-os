@@ -62,6 +62,15 @@ export default function Catalogue() {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(EMPTY);
   const [editError, setEditError] = useState(null);
+  // Per-item customization questions (water: room temp or cold, rice:
+  // peppered or not, ...) -- opt-in per item on purpose, per Chidera
+  // 2026-09-10: some restaurants want this, some don't (pre-made meals,
+  // nothing to ask). Loaded alongside the rest of an item's edit form
+  // rather than a separate page, since it's only ever edited in that
+  // context.
+  const [questions, setQuestions] = useState([]);
+  const [newQuestion, setNewQuestion] = useState('');
+  const [questionError, setQuestionError] = useState(null);
 
   function load() {
     api.get('/catalogue').then(setItems);
@@ -152,6 +161,33 @@ export default function Catalogue() {
       category: p.category || '',
       image_data_url: p.image_data_url || '',
     });
+    setNewQuestion('');
+    api.get(`/catalogue/${p.id}/questions`).then(setQuestions);
+  }
+
+  async function addQuestion(productId) {
+    if (!newQuestion.trim()) return;
+    setQuestionError(null);
+    try {
+      const q = await api.post(`/catalogue/${productId}/questions`, { question: newQuestion.trim() });
+      setQuestions((qs) => [...qs, q]);
+      setNewQuestion('');
+    } catch (err) {
+      // Found live, 2026-09-10: this used to fail with no feedback at all
+      // on error -- looked exactly like the click did nothing, with no way
+      // to tell "it didn't save" from "I forgot to click the button".
+      setQuestionError(err.message);
+    }
+  }
+
+  async function removeQuestion(questionId) {
+    setQuestionError(null);
+    try {
+      await api.delete(`/catalogue/questions/${questionId}`);
+      setQuestions((qs) => qs.filter((q) => q.id !== questionId));
+    } catch (err) {
+      setQuestionError(err.message);
+    }
   }
 
   async function onItemPhoto(e, setter) {
@@ -277,6 +313,43 @@ export default function Catalogue() {
                           />
                         </div>
                       )}
+                    </div>
+                    <div className="form-row">
+                      <div className="field" style={{ width: '100%' }}>
+                        <label>Ask customers about this item</label>
+                        <p style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: -4 }}>
+                          Optional -- if this item has choices customers should be asked about (water: room temperature
+                          or cold, rice: peppered or not), add them here. Leave empty and the bot won't ask anything
+                          extra for this item. Saves right away when you click "Add question" -- separate from the
+                          Save button below, which only saves name/price/photo.
+                        </p>
+                        {questionError && <div className="error-banner">{questionError}</div>}
+                        {questions.map((q) => (
+                          <div key={q.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                            <span style={{ flex: 1 }}>{q.question}</span>
+                            <button type="button" className="danger" onClick={() => removeQuestion(q.id)}>
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <input
+                            value={newQuestion}
+                            onChange={(e) => setNewQuestion(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                addQuestion(p.id);
+                              }
+                            }}
+                            placeholder="e.g. Room temperature or cold?"
+                            style={{ flex: 1 }}
+                          />
+                          <button type="button" className="secondary" onClick={() => addQuestion(p.id)} disabled={!newQuestion.trim()}>
+                            Add question
+                          </button>
+                        </div>
+                      </div>
                     </div>
                     <button onClick={() => saveEdit(p.id)} style={{ marginRight: 8 }}>
                       Save

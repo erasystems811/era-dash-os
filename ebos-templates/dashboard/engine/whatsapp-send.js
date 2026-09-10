@@ -62,6 +62,41 @@ export async function sendWhatsApp(to, text, credentials) {
   return postMessage(phoneNumberId, accessToken, { messaging_product: 'whatsapp', to, type: 'text', text: { body: text } });
 }
 
+// Up to 3 tappable reply buttons on one message -- Meta's own hard cap,
+// same "3 buttons max, a list beyond that" rule the dine-in addon spec
+// uses. Tapping one sends its title back as a real text message from the
+// customer (message.interactive.button_reply in the webhook), same as any
+// typed message -- title is capped at 20 characters by Meta, not this
+// module's choice.
+export async function sendWhatsAppButtons(to, bodyText, buttons, credentials, headerImageUrl) {
+  if (process.env.EBOS_SANDBOX === '1') {
+    console.log(`\n[sandbox -> ${to}]: ${bodyText} [buttons: ${buttons.map((b) => b.title).join(' | ')}]`);
+    return { sandbox: true };
+  }
+  const phoneNumberId = credentials?.phoneNumberId || process.env.META_PHONE_NUMBER_ID;
+  const accessToken = credentials?.accessToken || process.env.META_ACCESS_TOKEN;
+  if (!phoneNumberId || !accessToken) {
+    throw new Error('META_PHONE_NUMBER_ID / META_ACCESS_TOKEN not set -- WhatsApp is not connected yet.');
+  }
+  // Only a real https URL works as a header image (Meta fetches it itself,
+  // same as any other link-based media send) -- a data: URI like
+  // business.logo_data_url falls back to no header rather than a failed
+  // send, since PUBLIC_URL-gated re-serving of it is a bigger change than
+  // this warrants right now.
+  const header = headerImageUrl?.startsWith('http') ? { type: 'header', header: { type: 'image', image: { link: headerImageUrl } } } : {};
+  return postMessage(phoneNumberId, accessToken, {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'button',
+      ...(header.header ? { header: header.header } : {}),
+      body: { text: bodyText.slice(0, 1024) },
+      action: { buttons: buttons.slice(0, 3).map((b) => ({ type: 'reply', reply: { id: b.id, title: b.title.slice(0, 20) } })) },
+    },
+  });
+}
+
 // Sends a real file (the invoice PDF), not a text link a customer has to
 // tap out to a browser -- WhatsApp fetches the file itself from `link`
 // (must be a real public URL, PUBLIC_URL-based), no separate upload step

@@ -1,6 +1,6 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, acknowledgeMenuTap, retryFailedSendAsTemplate } from './flow.js';
-import { menuRowKind, handleMenuNavigation, productNameForRowId } from './menu-message.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, retryFailedSendAsTemplate } from './flow.js';
+import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
 export const router = express.Router();
@@ -111,17 +111,24 @@ router.post('/', async (req, res) => {
           // never queued through the normal debounce pipeline below, a
           // button tap should feel instant, not wait out the same window a
           // typed message does. A category/"More" row just shows the next
-          // list; a product row is browsing, not ordering -- WhatsApp only
-          // allows one tap at a time with no real multi-select, so tapping
-          // just acknowledges what they looked at and asks them to type
-          // their real order (see acknowledgeMenuTap for why).
+          // list; a product row really orders it now (see flow.js's
+          // handleMenuItemTap) -- no AI call needed to know what was
+          // picked, the tap alone is unambiguous.
           if (message.type === 'interactive' && message.interactive?.type === 'list_reply') {
             const rowId = message.interactive.list_reply.id;
             if (menuRowKind(rowId) === 'product') {
-              const productName = await productNameForRowId(rowId);
-              if (productName) await acknowledgeMenuTap({ phoneNumber: message.from, itemName: productName, channel: 'whatsapp', branchId });
+              const product = await productForRowId(rowId);
+              if (product) await handleMenuItemTap({ phoneNumber: message.from, product, channel: 'whatsapp', branchId });
             } else {
               await handleMenuNavigation(message.from, rowId, branchId).catch((err) => console.error('handleMenuNavigation failed:', err.message));
+            }
+            continue;
+          }
+          // The "Place an order" reply button on the first greeting (see
+          // flow.js's handleGreeting) -- also instant, same as a list tap.
+          if (message.type === 'interactive' && message.interactive?.type === 'button_reply') {
+            if (message.interactive.button_reply.id === 'start_order') {
+              await handleStartOrderTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
             }
             continue;
           }

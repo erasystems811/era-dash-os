@@ -426,7 +426,10 @@ create table if not exists "order" (
   -- the one-time chat message -- Paystack's checkout URL for this specific
   -- reference, set once at initialization (engine/payment.js).
   payment_link_url text,
-  fulfilment_type text check (fulfilment_type in ('delivery', 'pickup')),
+  -- 'table' is the dine-in add-on's own fulfilment type (settled at the
+  -- table, never delivered or collected -- EBOS-Addon-Schema-Dine-In.md
+  -- section 5.3/5.4).
+  fulfilment_type text check (fulfilment_type in ('delivery', 'pickup', 'table')),
   -- Null unless the business has more than one branch row -- see branch
   -- table's comment. Which branch fulfils this order, so pickup/delivery
   -- source address is that branch's, not a guess.

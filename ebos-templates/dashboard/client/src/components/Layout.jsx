@@ -50,6 +50,9 @@ export default function Layout() {
   // Voice ordering add-on -- same "genuinely inert while off" rule as
   // deliveryMode above.
   const [voiceEnabled, setVoiceEnabled] = useState(false);
+  // Dine-in add-on (QR table ordering) -- same "genuinely inert while off"
+  // rule as deliveryMode/voiceEnabled above.
+  const [dineinEnabled, setDineinEnabled] = useState(false);
   const location = useLocation();
   // Zero DOM below one branch, not just hidden -- a single-location
   // business must not be able to tell this feature exists at all. Also
@@ -62,6 +65,7 @@ export default function Layout() {
   const addOnItems = [
     ...(deliveryMode === 'own_riders' ? [{ to: '/delivery', label: 'Delivery' }] : []),
     ...(voiceEnabled ? [{ to: '/voice', label: 'Voice' }] : []),
+    ...(dineinEnabled ? [{ to: '/dinein', label: 'Dine-in' }] : []),
   ];
   // Branches is hidden (not just filtered) for a branch-locked manager --
   // closes a real gap that used to exist: the page itself used to show
@@ -76,6 +80,7 @@ export default function Layout() {
     api.get('/business').then((b) => setBusinessName(b?.name || ''));
     api.get('/delivery-config').then((c) => setDeliveryMode(c?.mode || 'none'));
     api.get('/voice-config').then((c) => setVoiceEnabled(Boolean(c?.enabled)));
+    api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
   }, []);
 
   // A route change is the clearest signal the user picked something on

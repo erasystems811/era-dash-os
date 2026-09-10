@@ -8,7 +8,7 @@ import { classifyIntent, detectWantsHuman, detectDelayComplaint } from './classi
 import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extractOrderItems, extractOrderModifications, extractFulfilmentChange, loadBotFields, describeForExtraction, branchOptions, resolveMenu, getSharingMode } from './fields.js';
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
-import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
+import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, sendWhatsAppButtons, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
 import { sendMenuList } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
@@ -620,9 +620,21 @@ async function answerFromKnowledgeBase(message) {
 // be corrected by the real (grounded) reply a moment later.
 const GREETING_SYSTEM = `You open a WhatsApp conversation for a business, replying to a customer's first message. Match what they actually said -- if they said "good evening", greet them back for the evening; if they used no greeting at all, don't force one. Warm and professional customer service, not a casual friend: no slang, keep emoji minimal or none. Use commas or periods for pauses, never a dash of any kind (no em dash, en dash, or hyphen used as punctuation). End by inviting them to share what they'd like to order. Do not list examples of what you can help with or describe your own capabilities -- a staff member doesn't announce their job description, just ask plainly. One or two short sentences, plain text, no markdown.\n\nIf the message also asks a real question (menu, prices, hours, anything factual) alongside the greeting, do NOT answer it here -- you have no real data to answer from, and guessing is never acceptable. Just greet and invite them to order; the real question gets answered separately, for real, right after.`;
 
+// A "Place an order" button on the very first greeting -- Chidera's call,
+// 2026-09-10: a customer who taps this skips straight to the real menu
+// list (see the button_reply handling in webhook-whatsapp.js), the same
+// way a table's QR code does for dine-in, with no AI classifyIntent call
+// needed to work out they wanted to order. WhatsApp only -- Instagram/voice
+// have no reply-button equivalent, so they keep the plain-text greeting.
 async function handleGreeting(customer, text) {
   const message = await askText(GREETING_SYSTEM, text);
-  await reply(customer, message, 'greeting');
+  if (customer.channel !== 'whatsapp') {
+    await reply(customer, message, 'greeting');
+    return;
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppButtons(recipientFor(customer), message, [{ id: 'start_order', title: 'Place an order' }], credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: message, trigger: 'greeting' });
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,
@@ -687,13 +699,21 @@ async function summariseOrder(order) {
     [order.id]
   );
   const lines = rows.map((r) => `${r.quantity}x ${r.name} (NGN ${r.price} each)`).join(', ');
+  // One item per line, for callers that want a structured breakdown
+  // (finishItemsCollection's own confirm message) instead of `lines`
+  // above's single comma-run paragraph -- Chidera's call, 2026-09-10:
+  // "can it start stating price confirmation in a structured line by line
+  // way not paragraph". Colon separator, not a dash -- reply()'s own
+  // normalizeDashes turns " - " into ", ", which would silently collapse
+  // this right back into a run-on line.
+  const itemLines = rows.map((r) => `${r.quantity}x ${r.name}: NGN ${r.price}`);
   const itemsTotal = rows.reduce((sum, r) => sum + Number(r.price) * r.quantity, 0);
   // delivery_fee is 0 until handleCollectFulfilment sets it (only known once
   // fulfilment_type/address are collected, and only for real Chowdeck
   // delivery) -- reading it straight off the order row here means callers
   // before and after that point both get the right total automatically.
   const deliveryFee = Number(order.delivery_fee || 0);
-  return { lines, itemsTotal, deliveryFee, total: itemsTotal + deliveryFee };
+  return { lines, itemLines, itemsTotal, deliveryFee, total: itemsTotal + deliveryFee };
 }
 
 // A bare re-ask ("What would you like to order today?") on a second try
@@ -852,8 +872,15 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
       );
       const mods = await extractOrderModifications(text, currentItemsForMod, order.branch_id);
       if (mods) {
-        const { lines } = await applyOrderModifications(order, mods, { allowRemovals: true });
-        prefix = `${prefix}Got it, added that on, your order's now ${lines}. `;
+        // Not "your order's now X" here -- found live, 2026-09-10: this
+        // used to restate the whole order, then finishItemsCollection's
+        // own confirm message restated it again right after, listing
+        // everything twice in one reply. finishItemsCollection is always
+        // the very next thing that runs from here (nothing else follows
+        // this branch), so a bare acknowledgment is enough -- the real
+        // breakdown shows up once, in that message.
+        await applyOrderModifications(order, mods, { allowRemovals: true });
+        prefix = `${prefix}Got it. `;
       } else {
         const fields = await loadBotFields();
         const field = fields.find((f) => f.key === outstanding[0]);
@@ -871,21 +898,197 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
     Object.assign(order, reloaded[0]);
   }
 
+  return finishItemsCollection(customer, order, prefix);
+}
+
+// Finds the earliest catalogue-question still unanswered across every item
+// on this order, in item-then-question order -- null once every item's
+// questions (if it has any at all) are all answered. Kept as its own query
+// (not parsed out of order_item.modification's free text) so "has this
+// specific question been asked yet" is a real fact, not a guess.
+async function askNextItemQuestion(orderId) {
+  const { rows } = await pool.query(
+    `select oi.id as order_item_id, pq.id as question_id, pq.question, p.name as product_name
+     from order_item oi
+     join product p on p.id = oi.product_id
+     join product_question pq on pq.product_id = p.id
+     where oi.order_id = $1
+       and not exists (
+         select 1 from order_item_answer oa where oa.order_item_id = oi.id and oa.question_id = pq.id
+       )
+     order by oi.id, pq.position
+     limit 1`,
+    [orderId]
+  );
+  return rows[0] || null;
+}
+
+// Cross-sell, per Chidera 2026-09-10: a real question with the actual
+// options named ("Would you like to add a drink? We have: Coke, Fanta,
+// Chapman.") asked and answered as its own exchange BEFORE the final "to
+// confirm" summary, not decoration folded into it or sent after -- "you
+// must be clear on what customer wants before asking that total yes to
+// confirm thing". Only ever for a category this business actually sells
+// (never invented, same rule as everywhere else the menu gets named), and
+// each category is offered at most once per order (order.upsell_offered)
+// so declining it doesn't get asked again on every turn. Keyed off
+// product.category, the same field the Catalogue page already groups by --
+// no new setup for a restaurant that's already categorized its menu, and
+// it simply never fires for one that hasn't.
+const UPSELL_GROUPS = [
+  { key: 'drink', keywords: ['drink', 'beverage', 'juice'], label: 'a drink' },
+  { key: 'protein', keywords: ['protein', 'meat'], label: 'a protein' },
+];
+
+function categoryMatchesGroup(category, keywords) {
+  if (!category) return false;
+  const lower = category.toLowerCase();
+  return keywords.some((k) => lower.includes(k));
+}
+
+function catalogueOptions(menu, keywords) {
+  return menu.filter((p) => categoryMatchesGroup(p.category, keywords)).map((p) => p.name);
+}
+
+// Next upsell group worth asking about, if any -- already-ordered
+// categories and already-offered-this-order categories are both excluded,
+// so this naturally returns null once every real cross-sell opportunity is
+// either satisfied or already declined.
+async function nextUpsellGroup(order, orderItems) {
+  if (!orderItems.length) return null;
+  const menu = await resolveMenu(order.branch_id);
+  const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
+  const offered = order.upsell_offered || [];
+  for (const group of UPSELL_GROUPS) {
+    if (offered.includes(group.key)) continue;
+    const options = catalogueOptions(menu, group.keywords);
+    if (!options.length) continue;
+    const orderHasIt = orderedCategories.some((c) => categoryMatchesGroup(c, group.keywords));
+    if (!orderHasIt) return { ...group, options };
+  }
+  return null;
+}
+
+// The tail end of item collection -- shared between the normal path
+// (handleCollectInfo above), handlePendingItemQuestion, and
+// handlePendingUpsell below, so all three end up asking for the next
+// item-question, the next missing field, the next upsell, or moving to
+// confirmation the same way, instead of multiple versions drifting apart.
+// The item-question check runs first and unconditionally, every time this
+// is reached -- including right after handlePendingUpsell adds a drink,
+// so a drink that itself has a product_question ("hot or cold?") still
+// gets asked, the same as if it had been the very first item ordered.
+async function finishItemsCollection(customer, order, prefix = '') {
+  const nextQuestion = await askNextItemQuestion(order.id);
+  if (nextQuestion) {
+    await pool.query('update "order" set pending_question_order_item_id = $1, pending_question_id = $2 where id = $3', [
+      nextQuestion.order_item_id,
+      nextQuestion.question_id,
+      order.id,
+    ]);
+    await reply(customer, `${prefix}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
+    return;
+  }
+
   const { rows: itemsAfter } = await pool.query('select * from order_item where order_id = $1', [order.id]);
   const stillOutstanding = await missingFieldsForOrder(order, itemsAfter);
   if (stillOutstanding.length) {
     const fields = await loadBotFields();
     const nextField = fields.find((f) => f.key === stillOutstanding[0]);
-    await send(await fieldPrompt(stillOutstanding[0], nextField?.question, order.branch_id));
+    await reply(customer, `${prefix}${await fieldPrompt(stillOutstanding[0], nextField?.question, order.branch_id)}`.trim());
+    return;
+  }
+
+  const upsell = await nextUpsellGroup(order, itemsAfter);
+  if (upsell) {
+    await pool.query('update "order" set pending_upsell_category = $1, upsell_offered = array_append(upsell_offered, $1) where id = $2', [
+      upsell.key,
+      order.id,
+    ]);
+    await reply(customer, `${prefix}Would you like to add ${upsell.label}? We have: ${upsell.options.join(', ')}.`.trim(), 'upsell_offered');
     return;
   }
 
   await transitionOrder(order, 'check_availability');
   await transitionOrder(order, 'calculate_price');
-  const { lines, total } = await summariseOrder(order);
+  const { itemLines, total } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
   await transitionOrder(order, 'confirm_order');
-  await send(`To confirm: ${lines}, total NGN ${total}. Reply yes to confirm, or let me know if you would like to change anything.`);
+  const summary = [...itemLines, `Total: NGN ${total}`].join('\n');
+  await reply(customer, `${prefix}To confirm:\n${summary}\n\nReply yes to confirm, or let me know if you would like to change anything.`.trim());
+}
+
+// The reply to the upsell question above. Checked in order:
+// 1) a real change to what's already in the order ("change it to jollof",
+//    "remove the fried rice") -- found live, 2026-09-10: without this
+//    check, a "change it to X" arriving right while a drink was being
+//    offered got read as "add X" through the item-matcher below instead
+//    of the swap it obviously meant, leaving both the old and new item on
+//    the order at once.
+// 2) failing that, the same real item-matcher the main order uses
+//    (extractOrderItems), so "yes, a coke" or just "coke" both work the
+//    same way an item mention always does elsewhere, not a bespoke
+//    yes/no parser.
+// Anything that matches neither (including a plain decline) just moves
+// on -- already marked offered, so it's never asked again this order.
+async function handlePendingUpsell(customer, order, text) {
+  const { rows: currentItems } = await pool.query(
+    `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+    [order.id]
+  );
+  const mods = await extractOrderModifications(text, currentItems, order.branch_id);
+  order.pending_upsell_category = null;
+  await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+
+  if (mods) {
+    // Same reasoning as handleCollectInfo's own mods branch -- no "your
+    // order's now X" here, finishItemsCollection's own confirm message is
+    // the one place that lists it.
+    await applyOrderModifications(order, mods, { allowRemovals: true });
+    return finishItemsCollection(customer, order, 'Got it. ');
+  }
+
+  const { matched } = await extractOrderItems(text, order.branch_id);
+  let added = '';
+  if (matched.length) {
+    for (const m of matched) {
+      await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, m.productId, m.quantity, m.price]);
+    }
+    added = `Added ${matched.map((m) => `${m.quantity}x ${m.name}`).join(', ')}. `;
+  }
+  return finishItemsCollection(customer, order, added);
+}
+
+// The reply to a question just asked by askNextItemQuestion above -- taken
+// literally as the answer (no yes/no or item-change classification here on
+// purpose, this is a short, deliberately simple exchange), recorded both
+// as a real (order_item, question) fact and folded into order_item.modification
+// for anywhere that already displays that column (Kanban card, order
+// detail). Then either the next unanswered question, or back into the
+// normal flow via finishItemsCollection once every item's questions are done.
+async function handlePendingItemQuestion(customer, order, text) {
+  const answer = text.trim();
+  const { rows: qRows } = await pool.query('select question from product_question where id = $1', [order.pending_question_id]);
+  const questionText = qRows[0]?.question || '';
+
+  await pool.query(
+    `insert into order_item_answer (order_item_id, question_id, answer) values ($1, $2, $3)
+     on conflict (order_item_id, question_id) do update set answer = excluded.answer`,
+    [order.pending_question_order_item_id, order.pending_question_id, answer]
+  );
+  const { rows: itemRows } = await pool.query('select modification from order_item where id = $1', [order.pending_question_order_item_id]);
+  const existingMod = itemRows[0]?.modification;
+  const newMod = existingMod ? `${existingMod}; ${questionText}: ${answer}` : `${questionText}: ${answer}`;
+  await pool.query('update order_item set modification = $1 where id = $2', [newMod, order.pending_question_order_item_id]);
+
+  order.pending_question_order_item_id = null;
+  order.pending_question_id = null;
+  await pool.query('update "order" set pending_question_order_item_id = null, pending_question_id = null where id = $1', [order.id]);
+
+  // finishItemsCollection's own item-question check (its very first thing)
+  // picks up the next unanswered question itself if there is one -- no
+  // need to duplicate that lookup here too.
+  return finishItemsCollection(customer, order, 'Got it. ');
 }
 
 // "Confirmed" (order.status) and "engine_state = confirm_order" are not the
@@ -918,7 +1121,25 @@ async function handleConfirmOrder(customer, order, text) {
     // question ("does that include delivery?") deserves a real answer, not
     // a rigid repeat of the same prompt regardless of what they asked.
     const answer = await answerOrThenShowMenu(customer, order, text, `Waiting on them to confirm yes, or say what they would like to change.`);
-    await reply(customer, answer ? `${answer} Just let me know, yes to confirm, or what you would like to change.` : 'No problem, just let me know what you would like to change, or reply yes to confirm as is.');
+    if (answer) {
+      await reply(customer, `${answer} Just let me know, yes to confirm, or what you would like to change.`);
+      return;
+    }
+    // dispatch() already ran extractOrderModifications on this exact text
+    // before handleConfirmOrder was ever reached, and it found nothing --
+    // but that's a stricter AI call, reasoning about whether this is a
+    // CHANGE to the current order. Found live, 2026-09-10: "I'll have
+    // chapman" failed that stricter check and fell all the way through to
+    // a canned non-answer, even though the plainer item-matcher
+    // (extractOrderItems, same one used for a fresh order) reads it
+    // correctly every time. One more, more lenient try before giving up --
+    // a name-only, deterministic reply, not the vague generic one.
+    const { matched } = await extractOrderItems(text, order.branch_id);
+    if (matched.length) {
+      await handleOrderModification(customer, order, { adds: matched, removes: [], sets: [] });
+      return;
+    }
+    await reply(customer, 'No problem, just let me know what you would like to change, or reply yes to confirm as is.');
     return;
   }
 
@@ -1174,6 +1395,23 @@ async function sendPaymentInstructions(customer, order) {
 // answered with the payment-waiting nudge, ignoring the question entirely.
 // null means this message wasn't actually asking anything (idle chatter,
 // "ok", "thanks") -- caller falls through to its normal canned handling.
+// A cheap word-overlap check against real catalogue item names -- used as
+// a deterministic net under the AI's own "not available" verdict below,
+// same idiom as BROWSE_PATTERNS is for its "general browse" verdict.
+// Found live, 2026-09-10: "is there rice?" got a false "No, we don't have
+// that" from the model twice running, despite two real rice items on the
+// menu -- real product-name overlap with the question always outranks a
+// per-call judgment on whether something exists.
+function menuKeywordMatch(text, menu) {
+  const words = (text.toLowerCase().match(/[a-z]{3,}/g) || []).filter((w) => !STOPWORDS.has(w));
+  if (!words.length) return [];
+  return menu.filter((p) => {
+    const nameLower = p.name.toLowerCase();
+    return words.some((w) => nameLower.includes(w));
+  });
+}
+const STOPWORDS = new Set(['the', 'you', 'any', 'are', 'and', 'for', 'have', 'there', 'got', 'that', 'this']);
+
 async function answerOrderQuestion(order, text, statusLine) {
   const { lines, total, deliveryFee } = await summariseOrder(order);
   // Not just menu prices -- "when do you close?" mid-order needs the same
@@ -1185,10 +1423,24 @@ async function answerOrderQuestion(order, text, statusLine) {
   const orderLine = lines ? `their order so far: ${lines}${deliveryFee > 0 ? `, plus NGN ${deliveryFee} delivery fee` : ''}, total NGN ${total}` : `nothing added to their order yet`;
   const system = `You're a staff member replying MID-CONVERSATION to an existing customer you're already talking to -- ${orderLine}. ${statusLine}\n\nThis is not an opening message. Never use first-contact phrases like "thanks for reaching out" or any greeting -- reply exactly like someone already in the middle of a conversation would.\n\n${businessContext}\n\n${menuContext}\n\n${kbContext}\n\nDoes this message ask a real question (their order, the menu, business hours/location, delivery, payment, anything covered above) that deserves a direct answer? If yes, answer it directly and warmly using ONLY the real details given here. A direct, unambiguous consequence of a stated fact counts as answerable too -- e.g. "open 24/7" directly means "we don't close", and the menu above is the FULL list of what's available, so asked about anything not on it, the real answer is a short "no, we don't have that" (that clause only -- never also name what's actually available yourself, see the special case below for how that part is handled) rather than a non-answer. Never invent a fact that isn't supported by what's given, and never claim you're checking with the team or will follow up unless that's real (nothing here authorizes that) -- if it's genuinely not covered, just say plainly you don't have that info right now. Answer ONLY what was actually asked -- never ask your own follow-up question about delivery vs pickup, or which branch, even in passing. Those are asked separately, once, at the right point in the flow by a different fixed step -- asking about them here creates a second, fake version that doesn't actually get saved anywhere, so when the real fixed step asks for real later, it looks like a broken repeat of something they already answered. If the message isn't actually asking anything (small talk, "ok", "thanks"), reply with exactly {"answer": null, "isGeneralAvailability": false}.\n\nSpecial case -- does answering properly involve the full list of what's available? Either a BROAD browse question naming no specific item ("what do you have", "what's on the menu", "what's available", "can I see the menu/catalogue"), OR a specific item that's NOT available (where "here's what we do have" would be the natural next thing to say). For either, set "isGeneralAvailability": true -- for the broad case leave "answer" null, for the not-available case "answer" is only the short "no" clause. Never write out the item list yourself in either case -- a real, always-current menu with photos and prices is shown separately as an interactive button right after (this JSON's "answer" is only a fallback for whenever that button truly can't be shown). This is different from a question naming or clearly implying a specific item that IS available ("do you have jollof", "how much is suya", "any rice dish?", "is there something spicy") -- that's answerable, not general, so answer it directly as usual with real semantic matching against the actual menu (meaning, not exact wording), isGeneralAvailability false.\n\nReply ONLY with JSON: {"answer": "<direct answer text>" or null, "isGeneralAvailability": true or false}.`;
   const result = await askJson(system, text);
-  return {
-    answer: typeof result?.answer === 'string' && result.answer.trim() ? result.answer.trim() : null,
-    isGeneralAvailability: Boolean(result?.isGeneralAvailability),
-  };
+  const answer = typeof result?.answer === 'string' && result.answer.trim() ? result.answer.trim() : null;
+  const isGeneralAvailability = Boolean(result?.isGeneralAvailability);
+
+  // Per this prompt's own contract, isGeneralAvailability + a real answer
+  // together only ever mean the "specific item, NOT available" case (the
+  // broad-browse case always leaves answer null) -- exactly the verdict
+  // menuKeywordMatch above exists to double-check.
+  if (isGeneralAvailability && answer) {
+    const menu = await resolveMenu(order.branch_id);
+    const matches = menuKeywordMatch(text, menu);
+    if (matches.length) {
+      return {
+        answer: `We do have that -- ${matches.map((m) => m.name).join(' and ')} ${matches.length > 1 ? 'are' : 'is'} available.`,
+        isGeneralAvailability: false,
+      };
+    }
+  }
+  return { answer, isGeneralAvailability };
 }
 
 // A fast, deterministic net under the AI's own isGeneralAvailability
@@ -1380,9 +1632,9 @@ async function applyOrderModifications(order, mods, { allowRemovals }) {
     }
   }
 
-  const { lines, total } = await summariseOrder(order);
+  const { itemLines, total } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
-  return { lines, total, addedValue };
+  return { itemLines, total, addedValue };
 }
 
 async function handleOrderModification(customer, order, mods) {
@@ -1393,10 +1645,11 @@ async function handleOrderModification(customer, order, mods) {
     if (!mods.adds.length) return;
   }
 
-  const { lines, total, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid });
+  const { itemLines, total, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid });
+  const summary = itemLines.join('\n');
 
   if (paid) {
-    await reply(customer, `Got it, added that on. Your order's now ${lines}, new total NGN ${total} (NGN ${addedValue} more than what's already paid). Our team will confirm the extra payment with you.`);
+    await reply(customer, `Got it, added that on. Your order:\n${summary}\nNew total: NGN ${total} (NGN ${addedValue} more than what's already paid). Our team will confirm the extra payment with you.`);
     await handover(customer, 'Customer added items to an already-paid order, extra payment needs confirming', null, false);
     return;
   }
@@ -1413,7 +1666,7 @@ async function handleOrderModification(customer, order, mods) {
   // would be an illegal confirm_payment -> confirm_payment move).
   await pool.query(`update "order" set confirmed_at = null where id = $1`, [order.id]);
   order.confirmed_at = null;
-  await reply(customer, `Got it, your order's now ${lines}, new total NGN ${total}. Reply yes to confirm, or let me know if you would like to change anything else.`);
+  await reply(customer, `Got it, your order:\n${summary}\nNew total: NGN ${total}. Reply yes to confirm, or let me know if you would like to change anything else.`);
 }
 
 // Switching delivery<->pickup after it was already set (dispatch() only
@@ -1593,6 +1846,24 @@ async function handlePostPaymentFulfilmentChange(customer, order, newType) {
 }
 
 async function dispatch(customer, order, text) {
+  // Mid-way through asking an item's customization question(s) -- see
+  // askNextItemQuestion/handlePendingItemQuestion. Checked before anything
+  // else regardless of engine_state (this only ever gets set during item
+  // collection, engine_state never actually changes for it), so the reply
+  // is captured as the answer instead of running through the normal
+  // modification/intent checks below, which could easily misread a short
+  // answer like "cold" or "no pepper" as something else entirely.
+  if (order.pending_question_id) {
+    return handlePendingItemQuestion(customer, order, text);
+  }
+  // Mid-way through the drink/protein cross-sell offer -- see
+  // nextUpsellGroup/handlePendingUpsell. Same reasoning as the
+  // pending_question_id check above: this reply should be read as an
+  // answer to that specific question, not run through the normal
+  // modification/intent checks below.
+  if (order.pending_upsell_category) {
+    return handlePendingUpsell(customer, order, text);
+  }
   if (['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
     const { rows: currentItems } = await pool.query(
       `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
@@ -1767,7 +2038,7 @@ export async function completePayment(orderId) {
 // manual nudge) still picks it up in the next batch.
 // Exported so sandbox/test-conversation.mjs can wait the real amount
 // instead of a hardcoded guess that could silently drift out of sync.
-export const DEBOUNCE_MS = 15_000;
+export const DEBOUNCE_MS = 6_000;
 const pendingTimers = new Map();
 
 // A single one-shot typing indicator at the start of a debounce cycle used
@@ -2032,7 +2303,79 @@ export async function resumeBotControl(customerId) {
   }
 }
 
+// Dine-in add-on (EBOS-Addon-Schema-Dine-In.md), Stage 2. A guest's QR scan
+// always sends exactly "Menu Table {label}" (routes/dinein.js's
+// qrDataUrlFor) -- deterministic, no AI call. Returns true when this
+// handled the message (a real scan, or the answer to "which table"),
+// false to let normal routing continue untouched. Off entirely when the
+// add-on isn't enabled -- one cheap query, then nothing else runs.
+async function getDineinConfig() {
+  const { rows } = await pool.query('select * from dinein_config limit 1');
+  return rows[0] || null;
+}
+
+async function sendDineinWelcome(customer, table) {
+  const dinein = await getDineinConfig();
+  const { rows: bizRows } = await pool.query('select name, logo_data_url from business limit 1');
+  const biz = bizRows[0];
+  const body = `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
+  const buttons = [
+    { id: 'dinein_menu', title: 'See the menu' },
+    { id: 'dinein_waiter', title: 'Call a waiter' },
+    { id: 'dinein_specials', title: "Today's specials" },
+  ];
+  const headerImage = dinein?.welcome_image_url || biz?.logo_data_url || null;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppButtons(recipientFor(customer), body, buttons, credentials, headerImage);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body, trigger: 'dinein_welcome' });
+}
+
+async function handleDineinScan(customer, text) {
+  const dinein = await getDineinConfig();
+  if (!dinein?.enabled) return false;
+
+  const scanMatch = /^menu\s+table\s+(.+)$/i.exec(text.trim());
+  let label = scanMatch?.[1]?.trim();
+
+  if (!label) {
+    // Not a fresh scan -- only worth a second look if the LAST thing the
+    // bot said was "which table are you at" (spec 2.2: ask once, then
+    // carry on). Anything else falls through to normal routing untouched.
+    const { rows } = await pool.query(
+      `select 1 from message where customer_id = $1 and trigger = 'dinein_ask_table' and created_at > now() - interval '10 minutes'
+       order by created_at desc limit 1`,
+      [customer.id]
+    );
+    if (!rows.length) return false;
+    label = text.trim();
+  }
+
+  const { rows: tableRows } = await pool.query(
+    `select * from restaurant_table where branch_id = $1 and lower(label) = lower($2) and status = 'active'`,
+    [customer.branch_id, label]
+  );
+  const table = tableRows[0];
+  if (!table) {
+    await reply(customer, 'Please, what table are you at?', 'dinein_ask_table');
+    return true;
+  }
+
+  // Most recent open session for this table, or a fresh one -- per spec
+  // 6.4, a second party on the same table later is a new session, but
+  // this guest re-scanning (or WhatsApp redelivering) mid-meal must not
+  // open a duplicate (table_session_one_open_idx enforces this at the DB
+  // level too, this is just avoiding hitting that constraint at all).
+  const { rows: sessionRows } = await pool.query(`select * from table_session where table_id = $1 and closed_at is null`, [table.id]);
+  if (!sessionRows.length) {
+    await pool.query(`insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3)`, [table.id, table.branch_id, customer.id]);
+  }
+
+  await sendDineinWelcome(customer, table);
+  return true;
+}
+
 async function handlePendingBatch(customer, text) {
+  if (await handleDineinScan(customer, text)) return;
   // Checked first, before ANY other routing -- deterministic and free.
   // Applies everywhere EXCEPT while an order is still actively being
   // processed (Chidera's call, 2026-09-02: a staff member had just quoted
@@ -2161,10 +2504,63 @@ async function handlePendingBatch(customer, text) {
 // between looking and ordering. Instead: acknowledge what they looked at
 // by name, and let them order in their own words, exactly like every order
 // in this system already works (typed, any number of items in one go).
-export async function acknowledgeMenuTap({ phoneNumber, channelId, itemName, channel = 'whatsapp', branchId }) {
+// A tap on a real menu item now really orders it -- Chidera's call,
+// 2026-09-10: picking from the list should work the same everywhere,
+// reconfirm, then carry on into the normal flow (missing fields, item
+// questions, upsell, payment), same as typing the item's name would, and
+// with no AI call needed at all to know what was picked (the tap itself is
+// unambiguous) -- real API cost saved on the single most common message a
+// customer sends. Quantity is always 1 per tap (WhatsApp's list message has
+// no quantity picker); tapping the same item again, or typing "make it 3",
+// both already work as real modifications once it's in the order.
+// The "Place an order" button tapped (see handleGreeting above) -- shows
+// the real menu list directly, the same button sendMenuList already sends
+// for a typed "what do you have", but with zero AI calls: the button tap
+// alone is enough to know what was meant, unlike a typed message which
+// still needs classifyIntent to tell an order-browse from anything else.
+export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${itemName}]` });
-  await reply(customer, `${itemName} is available. Please let me know how many and anything else you would like, and I will take your order.`, 'menu_tap_ack');
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' });
+  // sendMenuList calls the real Graph API directly, not gated by
+  // EBOS_SANDBOX itself (see menu-message.js) -- same guard
+  // handleCollectInfo's own catalogShown path already uses, so a sandbox
+  // run never makes a real outbound call here either.
+  const shown = process.env.EBOS_SANDBOX !== '1' && (await sendMenuList(recipientFor(customer), "Here's our menu, tap below to see everything we have.", customer.branch_id));
+  if (shown) {
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: '[interactive menu button sent]', trigger: 'menu_shown' });
+    return;
+  }
+  await reply(customer, 'What would you like to order?', 'items_menu_shown');
+}
+
+export async function handleMenuItemTap({ phoneNumber, channelId, product, channel = 'whatsapp', branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${product.name}]` });
+
+  let order = await getOpenOrder(customer.id);
+  const item = { productId: product.id, name: product.name, price: product.price, quantity: 1 };
+
+  if (order && ['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
+    // Already past initial item collection -- this is a real modification
+    // (an add), not a first pick, so it gets the same "added that on, your
+    // order's now..." treatment any other mid-confirm add already does.
+    await handleOrderModification(customer, order, { adds: [item], removes: [], sets: [] });
+    return;
+  }
+
+  if (!order) {
+    order = await createDraftOrder(customer.id, customer.branch_id);
+    // Same two transitions handleInboundMessage's own new-order path
+    // always does immediately after createDraftOrder -- skipping them
+    // left the order stuck at its default 'new_inquiry' state, which
+    // dispatch()'s switch doesn't handle at all (falls to the generic
+    // "already being handled" filler on the very next message). Found
+    // live, 2026-09-10, testing this exact path.
+    await transitionOrder(order, 'understand_request');
+    await transitionOrder(order, 'collect_info');
+  }
+  await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+  await finishItemsCollection(customer, order, `Added ${product.name}. `);
 }
 
 export async function handleInboundMessage({ phoneNumber, channelId, text, channel = 'whatsapp', messageId, branchId }) {

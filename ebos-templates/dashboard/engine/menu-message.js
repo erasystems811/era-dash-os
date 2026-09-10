@@ -8,13 +8,11 @@
 // tab keeps working too), this one is what actually answers "what do you
 // have" reliably in-chat.
 //
-// This list is for browsing, not ordering -- WhatsApp only allows one row
-// tapped at a time with no real multi-select on the customer's side, so a
-// tap doesn't add anything to the order (see webhook-whatsapp.js /
-// flow.js's acknowledgeMenuTap). It just confirms what they looked at and
-// asks them to type what they'd like, the same way ordering already works
-// everywhere else in this system -- any number of items, in their own
-// words, in one message or several.
+// Tapping a real product row really orders it (see webhook-whatsapp.js /
+// flow.js's handleMenuItemTap) -- one at a time, since WhatsApp's list
+// message has no multi-select or quantity picker, but a second tap or a
+// typed "make it 3" both work as real modifications once it's in the
+// order. No AI call needed to know what a tap meant, unlike a typed order.
 import { pool } from '../lib/db.js';
 import { resolveMenu } from './fields.js';
 
@@ -191,10 +189,11 @@ export async function handleMenuNavigation(to, rowId, branchId) {
   }
 }
 
-// Looks up a tapped product row back to a real product name -- the webhook
-// uses this to acknowledge what the customer looked at by name (see
-// flow.js's acknowledgeMenuTap) without treating the tap itself as an order.
-export async function productNameForRowId(productId) {
-  const { rows } = await pool.query('select name from product where id = $1', [productId]);
-  return rows[0]?.name || null;
+// Looks up a tapped product row back to the real, current product -- the
+// webhook uses this to actually add it to the order (see flow.js's
+// handleMenuItemTap), never a name/price the customer might be shown from
+// a stale render.
+export async function productForRowId(productId) {
+  const { rows } = await pool.query('select id, name, price from product where id = $1 and availability = true', [productId]);
+  return rows[0] || null;
 }
