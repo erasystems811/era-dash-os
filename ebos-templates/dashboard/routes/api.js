@@ -368,6 +368,40 @@ router.post('/voice-config', requireEraAdmin, async (req, res) => {
   res.json(rows[0]);
 });
 
+// Dine-in add-on toggle -- same dual-auth/ERA-switches-it shape as
+// delivery-config/voice-config immediately above. Chidera 2026-09-11:
+// this route was referenced (routes/dinein.js's own header comment even
+// claims it exists) but never actually defined -- Layout.jsx's nav check
+// and DineIn.jsx's own config load both silently got back null forever
+// (the SPA's index.html, not JSON, swallowed by api.js's error handling),
+// which meant the Dine-in nav link never showed AND the whole Dine-in
+// page rendered blank (`if (!config || !tables) return null;`) even
+// after the routes/dinein.js router-mounting fix earlier this session.
+router.get('/dinein-config', async (req, res) => {
+  const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
+  if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
+  const { rows } = await pool.query(
+    `select business_id, enabled, feedback_enabled, feedback_delay_minutes, auto_close_hours,
+       pos_mode, review_link, welcome_image_url
+     from dinein_config limit 1`
+  );
+  res.json(rows[0] || {
+    enabled: false, feedback_enabled: true, feedback_delay_minutes: 120, auto_close_hours: 4,
+    pos_mode: 'none', review_link: null, welcome_image_url: null,
+  });
+});
+
+router.post('/dinein-config', requireEraAdmin, async (req, res) => {
+  const { enabled } = req.body;
+  const { rows } = await pool.query(
+    `insert into dinein_config (business_id, enabled) values ((select id from business limit 1), $1)
+     on conflict (business_id) do update set enabled = excluded.enabled returning *`,
+    [enabled]
+  );
+  res.json(rows[0]);
+});
+
 router.use(requireStaffApi);
 router.use(scopeToBranch);
 
