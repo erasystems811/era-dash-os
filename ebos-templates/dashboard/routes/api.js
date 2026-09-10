@@ -781,7 +781,14 @@ router.get('/catalogue', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/catalogue', requireEditorApi, async (req, res) => {
+// requireStaffApi, not requireEditorApi -- Catalogue and Knowledge base
+// (every requireStaffApi route from here through the knowledge-base block
+// below) are deliberately open to Tier 3 (PIN) staff too, same "widened so
+// staff can work normally, not just view" call as the orders write routes
+// above (Chidera's own words, 2026-09-03: "when i say they can see
+// knowledge base and catalogue it means they can edit it and work on it
+// normally not just view only").
+router.post('/catalogue', requireStaffApi, async (req, res) => {
   const f = req.body;
   const { rows } = await pool.query(
     'insert into product (name, description, price, availability_type, duration_minutes, category, image_data_url) values ($1, $2, $3, $4, $5, $6, $7) returning *',
@@ -806,7 +813,7 @@ router.post('/catalogue', requireEditorApi, async (req, res) => {
 // why. A photo-based import also replaces the stored menu_photo(s) so the
 // bot has the actual images to forward to customers (engine/flow.js); a
 // text-only import leaves any existing menu photo(s) alone.
-router.post('/catalogue/bulk-import', requireEditorApi, async (req, res) => {
+router.post('/catalogue/bulk-import', requireStaffApi, async (req, res) => {
   const { text, images } = req.body;
   if (!text && !images?.length) return res.status(400).json({ error: 'Paste some menu text or attach photo(s).' });
   let items;
@@ -866,7 +873,7 @@ router.get('/catalogue/import/pending', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/catalogue/import/:id/approve', requireEditorApi, async (req, res) => {
+router.post('/catalogue/import/:id/approve', requireStaffApi, async (req, res) => {
   const { rows } = await pool.query('select * from product where id = $1', [req.params.id]);
   const product = rows[0];
   if (!product || !product.import_status) return res.status(404).json({ error: 'Not found.' });
@@ -890,7 +897,7 @@ router.post('/catalogue/import/:id/approve', requireEditorApi, async (req, res) 
   res.json(updated[0]);
 });
 
-router.post('/catalogue/import/:id/reject', requireEditorApi, async (req, res) => {
+router.post('/catalogue/import/:id/reject', requireStaffApi, async (req, res) => {
   const { rows } = await pool.query('select * from product where id = $1', [req.params.id]);
   const product = rows[0];
   if (!product || !product.import_status) return res.status(404).json({ error: 'Not found.' });
@@ -907,7 +914,7 @@ router.post('/catalogue/import/:id/reject', requireEditorApi, async (req, res) =
   res.json(updated[0]);
 });
 
-router.post('/catalogue/:id', requireEditorApi, async (req, res) => {
+router.post('/catalogue/:id', requireStaffApi, async (req, res) => {
   const f = req.body;
   const { rows } = await pool.query(
     'update product set name = $1, description = $2, price = $3, availability_type = $4, duration_minutes = $5, category = $6, image_data_url = coalesce($7, image_data_url) where id = $8 returning *',
@@ -917,13 +924,13 @@ router.post('/catalogue/:id', requireEditorApi, async (req, res) => {
   res.json(rows[0]);
 });
 
-router.post('/catalogue/:id/toggle', requireEditorApi, async (req, res) => {
+router.post('/catalogue/:id/toggle', requireStaffApi, async (req, res) => {
   const { rows } = await pool.query('update product set availability = not availability where id = $1 returning *', [req.params.id]);
   syncBestEffort();
   res.json(rows[0]);
 });
 
-router.delete('/catalogue/:id', requireEditorApi, async (req, res) => {
+router.delete('/catalogue/:id', requireStaffApi, async (req, res) => {
   await pool.query('delete from product where id = $1', [req.params.id]);
   deleteBestEffort(req.params.id);
   res.json({ ok: true });
@@ -1076,12 +1083,12 @@ router.get('/knowledge-base', async (req, res) => {
   res.json(rows);
 });
 
-router.post('/knowledge-base', requireEditorApi, async (req, res) => {
+router.post('/knowledge-base', requireStaffApi, async (req, res) => {
   const { rows } = await pool.query('insert into knowledge_base (question, answer) values ($1, $2) returning *', [req.body.question, req.body.answer]);
   res.status(201).json(rows[0]);
 });
 
-router.post('/knowledge-base/:id', requireEditorApi, async (req, res) => {
+router.post('/knowledge-base/:id', requireStaffApi, async (req, res) => {
   const { rows } = await pool.query(
     'update knowledge_base set question = $1, answer = $2 where id = $3 returning *',
     [req.body.question, req.body.answer, req.params.id]
@@ -1089,7 +1096,7 @@ router.post('/knowledge-base/:id', requireEditorApi, async (req, res) => {
   res.json(rows[0]);
 });
 
-router.delete('/knowledge-base/:id', requireEditorApi, async (req, res) => {
+router.delete('/knowledge-base/:id', requireStaffApi, async (req, res) => {
   await pool.query('delete from knowledge_base where id = $1', [req.params.id]);
   res.json({ ok: true });
 });

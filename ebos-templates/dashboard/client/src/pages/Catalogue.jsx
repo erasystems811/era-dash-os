@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { useStaff, canEdit } from '../StaffContext.jsx';
 
 const EMPTY = { name: '', description: '', price: '', availability_type: 'stock', duration_minutes: '', category: '', image_data_url: '' };
 const UNCATEGORIZED = 'Uncategorized';
@@ -45,8 +44,13 @@ function readFileAsBase64(file) {
 }
 
 export default function Catalogue() {
-  const { staff } = useStaff();
-  const editable = canEdit(staff);
+  // Every tier that can reach this page (owner/manager/PIN staff) can edit
+  // it -- Chidera's call, 2026-09-03: "when i say they can see knowledge
+  // base and catalogue it means they can edit it and work on it normally
+  // not just view only". Kept as its own constant (not just deleting every
+  // `editable &&` below) so the RBAC decision stays one documented line,
+  // not scattered assumptions.
+  const editable = true;
   const [items, setItems] = useState(null);
   const [pending, setPending] = useState(null);
   const [form, setForm] = useState(EMPTY);

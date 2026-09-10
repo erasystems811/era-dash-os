@@ -1,10 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { useStaff, canEdit } from '../StaffContext.jsx';
 
 export default function KnowledgeBase() {
-  const { staff } = useStaff();
-  const editable = canEdit(staff);
+  // Every tier that can reach this page (owner/manager/PIN staff) can edit
+  // it -- Chidera's call, 2026-09-03: "when i say they can see knowledge
+  // base and catalogue it means they can edit it and work on it normally
+  // not just view only". Kept as its own constant (not just deleting every
+  // `editable &&` below) so the RBAC decision stays one documented line,
+  // not scattered assumptions.
+  const editable = true;
   const [entries, setEntries] = useState(null);
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
