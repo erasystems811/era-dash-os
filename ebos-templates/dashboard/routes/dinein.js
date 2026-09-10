@@ -99,6 +99,34 @@ router.post('/tables/:id/regenerate-qr', requireEditorApi, async (req, res) => {
   res.json(rows[0]);
 });
 
+// Newest first, negative first (spec section 10) -- score isn't
+// alphabetically 'bad' < 'good' < 'alright', so an explicit case order
+// rather than relying on text sort.
+router.get('/feedback', async (req, res) => {
+  const { rows } = await pool.query(
+    `select f.*, rt.label as table_label, c.name as customer_name, c.phone_number,
+            (select string_agg(p.name || ' x' || oi.quantity, ', ') from order_item oi join product p on p.id = oi.product_id join "order" o on o.id = oi.order_id where o.session_id = f.session_id) as ordered
+     from feedback f
+     join table_session ts on ts.id = f.session_id
+     join restaurant_table rt on rt.id = ts.table_id
+     join customers c on c.id = f.customer_id
+     where ($1::uuid is null or f.branch_id = $1)
+     order by case f.score when 'bad' then 0 when 'alright' then 1 else 2 end, f.created_at desc
+     limit 200`,
+    [req.branchId]
+  );
+  res.json(rows);
+});
+
+router.post('/feedback/:id/action', requireEditorApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `update feedback set status = 'actioned', actioned_by = $1 where id = $2 returning *`,
+    [req.staff.id, req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
+  res.json(rows[0]);
+});
+
 router.post('/waiter-calls/:id/resolve', async (req, res) => {
   const { rows } = await pool.query(
     `update waiter_call set status = 'resolved', resolved_by = $1, resolved_at = now() where id = $2 returning *`,

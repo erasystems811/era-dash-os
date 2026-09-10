@@ -130,7 +130,7 @@ router.post('/', async (req, res) => {
             const buttonId = message.interactive.button_reply.id;
             if (buttonId === 'start_order') {
               await handleStartOrderTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
-            } else if (['dinein_menu', 'dinein_waiter', 'dinein_specials'].includes(buttonId)) {
+            } else if (['dinein_menu', 'dinein_waiter', 'dinein_specials', 'dinein_feedback_good', 'dinein_feedback_alright', 'dinein_feedback_bad'].includes(buttonId)) {
               await handleDineinButtonTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
             }
             continue;

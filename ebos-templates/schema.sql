@@ -869,7 +869,8 @@ create table if not exists dinein_config (
   business_id uuid primary key references business(id),
   enabled boolean not null default false,
   feedback_enabled boolean not null default true,
-  feedback_delay_minutes int not null default 20,
+  -- Chidera's call, 2026-09-10: 120, not the spec's original 20.
+  feedback_delay_minutes int not null default 120,
   auto_close_hours int not null default 4,
   pos_mode text not null default 'none' check (pos_mode in ('none', 'webhook', 'api', 'database', 'printer')),
   pos_config text,
@@ -921,6 +922,22 @@ create table if not exists waiter_call (
   resolved_at timestamptz
 );
 create index if not exists waiter_call_open_idx on waiter_call (table_id) where status = 'open';
+
+-- Sent feedback_delay_minutes after a table closes, never on an
+-- auto-closed session (table_session.feedback_state tracks this so a
+-- sweep never sends it twice).
+create table if not exists feedback (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references table_session(id),
+  branch_id uuid not null references branch(id),
+  customer_id uuid not null references customers(id),
+  score text check (score in ('good', 'alright', 'bad')),
+  comment text,
+  status text not null default 'new' check (status in ('new', 'seen', 'actioned', 'closed')),
+  actioned_by uuid references staff(id),
+  created_at timestamptz not null default now()
+);
+create index if not exists feedback_branch_idx on feedback (branch_id, created_at desc);
 
 -- A dine-in order's own channel/fulfilment shape -- settled at the table,
 -- never delivered or collected, no payment confirmation step.

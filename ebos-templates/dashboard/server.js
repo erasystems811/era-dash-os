@@ -20,7 +20,7 @@ import { router as riderApiRoutes } from './routes/rider.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
-import { recoverPendingMessages, closeStaleOrders } from './engine/flow.js';
+import { recoverPendingMessages, closeStaleOrders, sweepDineinFeedback } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -153,4 +153,12 @@ app.listen(port, () => {
   setInterval(() => {
     sweepOfferEscalation().catch((err) => console.error('sweepOfferEscalation failed:', err));
   }, 15_000);
+  // Dine-in feedback (Stage 7) -- a 120-minute (Chidera's call, 2026-09-10)
+  // default delay doesn't need tight polling; 5 minutes keeps the actual
+  // send within a few minutes of due, same "cheap and inert until the
+  // add-on is on" shape as closeStaleOrders above.
+  sweepDineinFeedback().catch((err) => console.error('sweepDineinFeedback failed:', err));
+  setInterval(() => {
+    sweepDineinFeedback().catch((err) => console.error('sweepDineinFeedback failed:', err));
+  }, 5 * 60 * 1000);
 });
