@@ -945,7 +945,20 @@ router.delete('/catalogue/:id', requireStaffApi, async (req, res) => {
 // falls out of this top-200 window; /conversations/search below is how staff
 // still reach them.
 router.get('/conversations', async (req, res) => {
-  const { rows } = await pool.query(`select * from customers order by last_message_at desc nulls last limit 200`);
+  // Same order-stage lookup /conversations/needs-attention already does --
+  // Chidera's call, 2026-09-03: "on conversation-active tab let stage show
+  // there too". One shared query for both tabs (client/src/pages/
+  // Conversations.jsx) instead of a second near-duplicate endpoint.
+  const { rows } = await pool.query(`
+    select c.*, coalesce(o.status, 'new') as stage
+    from customers c
+    left join lateral (
+      select status from "order"
+      where customer_id = c.id and status != 'cancelled'
+      order by created_at desc limit 1
+    ) o on true
+    order by c.last_message_at desc nulls last limit 200
+  `);
   res.json(rows);
 });
 

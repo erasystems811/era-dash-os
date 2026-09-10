@@ -240,7 +240,11 @@ function ActiveConversations() {
   }, []);
 
   if (!conversations) return null;
-  const rows = conversations.filter((c) => c.handled_by === 'bot');
+  // A completed order isn't ongoing work any more -- Chidera's call,
+  // 2026-09-03: "if an order is completed it goes to all conversations
+  // back". Doesn't touch AllConversations at all, so it's still there,
+  // just not cluttering the tab meant for "still being worked on".
+  const rows = conversations.filter((c) => c.handled_by === 'bot' && c.stage !== 'completed');
 
   return (
     <div className="card">
