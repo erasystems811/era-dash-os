@@ -447,6 +447,14 @@ create table if not exists "order" (
   -- handleCollectFulfilment.
   delivery_zone_candidate_id uuid references delivery_zone(id),
   delivery_area_prompted_at timestamptz,
+  -- Set the moment status actually becomes 'completed' -- both the
+  -- staff-driven /orders/:id/status route and routes/rider.js's own
+  -- auto-completion (delivery code entered) set this explicitly, never
+  -- inferred from updated_at (that column isn't reliably bumped by every
+  -- path that completes an order). Drives the 24h "want to order again?"
+  -- window instead of the normal root greeting -- see engine/flow.js's
+  -- recentlyCompletedOrder.
+  completed_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
