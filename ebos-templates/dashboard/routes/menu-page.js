@@ -86,7 +86,7 @@ router.get('/:token', async (req, res) => {
       reviewPath: `/m/${req.params.token}/review`,
       businessName: branding.business_name || '',
       subtitle: 'Pick what you would like, then review your order.',
-      coverPhotoUrl: branding.cover_photo_data_url,
+      hasCoverPhoto: branding.has_cover_photo,
       waNumber,
       products,
       pendingOrder,

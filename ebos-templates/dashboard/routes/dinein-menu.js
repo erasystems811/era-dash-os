@@ -14,7 +14,8 @@ export const router = express.Router();
 
 async function resolveTable(qrToken) {
   const { rows } = await pool.query(
-    `select rt.*, b.name as branch_name, biz.name as business_name, biz.cover_photo_data_url
+    `select rt.*, b.name as branch_name, biz.name as business_name,
+       (biz.cover_photo_data_url is not null) as has_cover_photo
      from restaurant_table rt join branch b on b.id = rt.branch_id, business biz
      where rt.qr_token = $1 and rt.status = 'active'`,
     [qrToken]
@@ -22,11 +23,14 @@ async function resolveTable(qrToken) {
   return rows[0] || null;
 }
 
-// Cover photo -- shared with routes/menu-page.js, which has no table row
-// to piggyback this onto the way resolveTable above does.
+// has_cover_photo, not the photo itself -- shared with routes/menu-page.js,
+// which has no table row to piggyback this onto the way resolveTable above
+// does. Just the boolean means this never has to pull a potentially large
+// data: URI into Node just to check whether one's set (routes/product-
+// photo.js's /photo/cover serves the actual bytes, on its own request).
 export async function resolveMenuBranding(branchId) {
   const { rows } = await pool.query(
-    `select biz.name as business_name, biz.cover_photo_data_url
+    `select biz.name as business_name, (biz.cover_photo_data_url is not null) as has_cover_photo
      from branch b, business biz
      where b.id = $1`,
     [branchId]
@@ -143,7 +147,7 @@ router.get('/:qrToken', async (req, res) => {
       reviewPath: `/t/${req.params.qrToken}/review`,
       businessName: table.business_name,
       subtitle: `Table ${table.label} · ${table.branch_name}`,
-      coverPhotoUrl: table.cover_photo_data_url,
+      hasCoverPhoto: table.has_cover_photo,
       waNumber,
       products,
       // A dine-in round is always a fresh order (a table ordering drinks,

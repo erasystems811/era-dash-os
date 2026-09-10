@@ -14,15 +14,27 @@ import { pool } from '../lib/db.js';
 
 export const router = express.Router();
 
-router.get('/:productId', async (req, res) => {
-  const { rows } = await pool.query('select image_data_url from product where id = $1', [req.params.productId]);
-  const dataUrl = rows[0]?.image_data_url;
+function sendDataUrl(res, dataUrl) {
   const match = dataUrl && /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
   if (!match) return res.status(404).end();
   res.set('Content-Type', match[1]);
-  // Not "immutable" -- a business can re-upload a product's photo in
-  // Catalogue.jsx and a customer opening the menu an hour later should
-  // see the new one, not one cached from before the change.
+  // Not "immutable" -- a business can re-upload this photo and a customer
+  // opening the menu an hour later should see the new one.
   res.set('Cache-Control', 'public, max-age=3600');
   res.send(Buffer.from(match[2], 'base64'));
+}
+
+// Registered before /:productId below -- otherwise that route would match
+// "cover" as a literal (nonexistent) product id first. The business's
+// menu-page cover photo (Settings > Branding), same reasoning as a
+// product's own photo: a real <img src> here is what actually keeps the
+// menu page light, not the data: URI embedded straight into its HTML.
+router.get('/cover', async (req, res) => {
+  const { rows } = await pool.query('select cover_photo_data_url from business limit 1');
+  sendDataUrl(res, rows[0]?.cover_photo_data_url);
+});
+
+router.get('/:productId', async (req, res) => {
+  const { rows } = await pool.query('select image_data_url from product where id = $1', [req.params.productId]);
+  sendDataUrl(res, rows[0]?.image_data_url);
 });

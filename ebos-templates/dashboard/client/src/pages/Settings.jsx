@@ -7,6 +7,7 @@ export default function Settings() {
   const editable = canEdit(staff);
   const [business, setBusiness] = useState(null);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState(null);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [passwordError, setPasswordError] = useState(null);
@@ -27,9 +28,19 @@ export default function Settings() {
   async function save(e) {
     e.preventDefault();
     setSaved(false);
-    const updated = await api.post('/business', business);
-    setBusiness(updated);
-    setSaved(true);
+    setSaveError(null);
+    try {
+      const updated = await api.post('/business', business);
+      setBusiness(updated);
+      setSaved(true);
+    } catch (err) {
+      // Was unhandled before -- a save that failed (e.g. a photo too large
+      // for the server to accept) just did nothing visible at all, no
+      // error and no "Saved.", which looked exactly like the upload was
+      // silently ignored. Found live, 2026-09-10: "i put a cover photo
+      // and its not showing" -- it never actually saved.
+      setSaveError(err.message);
+    }
   }
 
   function set(key, value) {
@@ -109,6 +120,7 @@ export default function Settings() {
 
       <div className="card">
         {saved && <div style={{ color: 'var(--success)', marginBottom: 12, fontSize: 13 }}>Saved.</div>}
+        {saveError && <div style={{ color: 'var(--danger, #c0392b)', marginBottom: 12, fontSize: 13 }}>Could not save: {saveError}</div>}
         <form onSubmit={save}>
           <div className="form-row">
             <div className="field">

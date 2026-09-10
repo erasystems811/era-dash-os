@@ -37,8 +37,15 @@ const app = express();
 // express.raw() -- everything else gets normal parsed JSON/form bodies.
 app.use('/webhook/paystack', paystackWebhook);
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+// Express's own default JSON body limit is 100kb -- far too small for any
+// of the data: URI image uploads this app already does (business logo,
+// cover photo, product photos in Catalogue.jsx), which arrive as regular
+// JSON bodies through this same middleware. A phone photo easily runs a
+// few MB before base64 even adds its ~33% overhead. Found live,
+// 2026-09-10: a cover photo upload was silently rejected (413) and just
+// never saved, with nothing in the UI to explain why.
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: false, limit: '20mb' }));
 
 // Public webhooks -- Meta and Paystack call these directly, no session.
 app.use('/webhook/whatsapp', whatsappWebhook);

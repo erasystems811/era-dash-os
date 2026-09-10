@@ -6,8 +6,10 @@
 // Chidera 2026-09-10) -- Fraunces/Inter, warm paper background, pill
 // buttons -- not the plainer first pass this replaced.
 //
-// coverPhotoUrl: business.cover_photo_data_url (Settings > Branding) --
-// null falls back to the plain dark header, same as before this existed.
+// hasCoverPhoto: whether business.cover_photo_data_url (Settings >
+// Branding) is set -- false falls back to the plain dark header, same as
+// before this existed. Just a boolean, not the photo itself -- see
+// /photo/cover below for why.
 // waNumber: the business's own WhatsApp number (digits only, no leading
 // zero/plus) -- after a successful order this page redirects to
 // https://wa.me/<waNumber>, which WhatsApp's in-app browser intercepts and
@@ -37,7 +39,7 @@
 // request to defer and would have downloaded as part of this same HTML
 // regardless of the attribute. So the page paints instantly AND stays
 // light no matter how many photos a business has.
-export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoUrl, waNumber, products, pendingOrder }) {
+export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPhoto, waNumber, products, pendingOrder }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
   const lightProducts = products.map((p) => ({
     id: p.id,
@@ -48,8 +50,11 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoU
     availability: p.availability,
     hasPhoto: Boolean(p.image_data_url),
   }));
-  const headerStyle = coverPhotoUrl
-    ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('${coverPhotoUrl.replace(/'/g, '%27')}');background-size:cover;background-position:center`
+  // /photo/cover, not the raw data: URI -- same reasoning as a product's
+  // own photo (routes/product-photo.js): a real, separate image request
+  // instead of a blob embedded straight into this page's HTML.
+  const headerStyle = hasCoverPhoto
+    ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover');background-size:cover;background-position:center`
     : 'position:relative';
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -106,7 +111,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoU
   .sheetEmpty{padding:24px 0;text-align:center;color:var(--mid);font-size:13px}
 </style></head>
 <body>
-<div class="mtop${coverPhotoUrl ? ' photo' : ''}" style="${headerStyle}">${waDigits ? '<button class="back" id="back">← Back to chat</button>' : ''}<div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
+<div class="mtop${hasCoverPhoto ? ' photo' : ''}" style="${headerStyle}">${waDigits ? '<button class="back" id="back">← Back to chat</button>' : ''}<div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
   <div id="sec" class="sec"></div>
