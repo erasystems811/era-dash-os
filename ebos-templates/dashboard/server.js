@@ -15,6 +15,7 @@ import { loadStaff } from './lib/auth.js';
 import { router as apiRoutes } from './routes/api.js';
 import { router as documentRoutes } from './routes/documents.js';
 import { router as trackingRoutes } from './routes/tracking.js';
+import { router as dineinMenuRoutes } from './routes/dinein-menu.js';
 import { router as riderApiRoutes } from './routes/rider.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
@@ -47,6 +48,9 @@ app.use('/documents', documentRoutes);
 // /documents above, and the tracking_url stored on `delivery` (see
 // routes/rider.js's /offers/:id/accept) already points here.
 app.use('/track', trackingRoutes);
+// Public dine-in menu page (EBOS-Addon-Schema-Dine-In.md section 4) -- a
+// guest opens this from a WhatsApp button, never logged in.
+app.use('/t', dineinMenuRoutes);
 
 // Scoped to /api, not global -- the rider session below needs its own,
 // completely separate cookie-session instance on its own path (/rider), and

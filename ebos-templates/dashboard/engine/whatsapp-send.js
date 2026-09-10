@@ -97,6 +97,32 @@ export async function sendWhatsAppButtons(to, bodyText, buttons, credentials, he
   });
 }
 
+// A single button that actually opens a URL (Meta's "CTA URL" interactive
+// type) -- different from sendWhatsAppButtons' reply buttons, which only
+// ever send text back. This is how the dine-in menu page (routes/
+// dinein-menu.js) actually opens inside WhatsApp's in-app browser.
+export async function sendWhatsAppCtaUrl(to, bodyText, buttonText, url, credentials) {
+  if (process.env.EBOS_SANDBOX === '1') {
+    console.log(`\n[sandbox -> ${to}]: ${bodyText} [open: ${buttonText} -> ${url}]`);
+    return { sandbox: true };
+  }
+  const phoneNumberId = credentials?.phoneNumberId || process.env.META_PHONE_NUMBER_ID;
+  const accessToken = credentials?.accessToken || process.env.META_ACCESS_TOKEN;
+  if (!phoneNumberId || !accessToken) {
+    throw new Error('META_PHONE_NUMBER_ID / META_ACCESS_TOKEN not set -- WhatsApp is not connected yet.');
+  }
+  return postMessage(phoneNumberId, accessToken, {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'cta_url',
+      body: { text: bodyText.slice(0, 1024) },
+      action: { name: 'cta_url', parameters: { display_text: buttonText.slice(0, 20), url } },
+    },
+  });
+}
+
 // Sends a real file (the invoice PDF), not a text link a customer has to
 // tap out to a browser -- WhatsApp fetches the file itself from `link`
 // (must be a real public URL, PUBLIC_URL-based), no separate upload step

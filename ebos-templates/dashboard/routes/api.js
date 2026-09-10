@@ -1013,6 +1013,13 @@ router.get('/conversations/needs-attention', async (req, res) => {
      from callback_task ct
      join customers c on c.id = ct.customer_id
      where ct.status = 'open' and ($1::uuid is null or ct.branch_id = $1)
+     union all
+     select 'waiter_call' as kind, wc.id, 'Table ' || rt.label, null, null, null,
+            'Called a waiter' as reason, wc.created_at as at, null::uuid as order_id, null as order_reference, null as zone_name, null::uuid as callback_task_id,
+            null as stage
+     from waiter_call wc
+     join restaurant_table rt on rt.id = wc.table_id
+     where wc.status = 'open' and ($1::uuid is null or rt.branch_id = $1)
      order by at asc nulls last
      limit 200`,
     [req.branchId]

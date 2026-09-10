@@ -66,6 +66,16 @@ export default function DineIn() {
     load();
   }
 
+  async function closeTable(id) {
+    setError(null);
+    try {
+      await api.post(`/dinein/tables/${id}/close`);
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function removeTable(id) {
     setError(null);
     try {
@@ -196,6 +206,11 @@ export default function DineIn() {
                   <td>{t.qr_data_url ? <img src={t.qr_data_url} alt="" style={{ height: 44, width: 44 }} /> : <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>no number set</span>}</td>
                   {editable && (
                     <td style={{ display: 'flex', gap: 8 }}>
+                      {t.has_open_session && (
+                        <button className="secondary" onClick={() => closeTable(t.id)}>
+                          Close table
+                        </button>
+                      )}
                       <button className="secondary" onClick={() => startEdit(t)}>
                         Edit
                       </button>

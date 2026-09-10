@@ -8,7 +8,7 @@ import { classifyIntent, detectWantsHuman, detectDelayComplaint } from './classi
 import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extractOrderItems, extractOrderModifications, extractFulfilmentChange, loadBotFields, describeForExtraction, branchOptions, resolveMenu, getSharingMode } from './fields.js';
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
-import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, sendWhatsAppButtons, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
+import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
 import { sendMenuList } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
@@ -1181,6 +1181,25 @@ async function handleReconfirmAfterEdit(customer, order, text) {
 }
 
 async function handleCollectFulfilment(customer, order, text) {
+  // Dine-in (payment_mode = 'at_table') never asks for delivery/pickup or
+  // takes payment through the bot -- spec 5.4: "settled at the table...
+  // the order completes without a payment confirmation step." Still walks
+  // the real state machine (confirm_payment -> payment_acceptance ->
+  // fulfilment are the only legal next steps from confirm_order, see
+  // bot_state's seed data), just with no message or wait at any of them --
+  // same status/receipt handling completePayment gives every other order,
+  // minus the delivery/pickup-specific messaging that makes no sense for
+  // someone already sitting at the table.
+  if (order.payment_mode === 'at_table') {
+    await transitionOrder(order, 'confirm_payment');
+    await transitionOrder(order, 'payment_acceptance');
+    await pool.query(`update "order" set status = 'preparation' where id = $1`, [order.id]);
+    await createReceipt(order);
+    await transitionOrder(order, 'fulfilment');
+    await reply(customer, 'Your order has been placed. Thank you!', 'dinein_order_placed');
+    return;
+  }
+
   const outstanding = await missingFulfilmentFields(order);
   if (outstanding.length && text !== null) {
     const fields = await loadBotFields();
@@ -2372,6 +2391,50 @@ async function handleDineinScan(customer, text) {
 
   await sendDineinWelcome(customer, table);
   return true;
+}
+
+// The 3 welcome-card buttons (see sendDineinWelcome) -- resolved by the
+// customer's own most recent open table_session, not re-parsed from
+// anything in the tap itself (a button tap carries no table info of its
+// own, unlike the scan message).
+async function currentDineinSession(customer) {
+  const { rows } = await pool.query(
+    `select ts.*, rt.label as table_label, rt.qr_token
+     from table_session ts join restaurant_table rt on rt.id = ts.table_id
+     where ts.customer_id = $1 and ts.closed_at is null
+     order by ts.opened_at desc limit 1`,
+    [customer.id]
+  );
+  return rows[0] || null;
+}
+
+export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, channel = 'whatsapp', branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${buttonId}]` });
+  const session = await currentDineinSession(customer);
+  if (!session) {
+    await reply(customer, 'Please scan your table\'s QR code to get started.', 'dinein_no_session');
+    return;
+  }
+
+  if (buttonId === 'dinein_waiter') {
+    await pool.query('insert into waiter_call (session_id, table_id) values ($1, $2)', [session.id, session.table_id]);
+    await reply(customer, "Someone's on the way!", 'dinein_waiter_called');
+    return;
+  }
+
+  // 'dinein_menu' and 'dinein_specials' both open the same live menu page
+  // for now -- there's no separate "specials" concept modeled in the
+  // catalogue yet (no flag on product), so rather than invent one
+  // silently, both just point at the real, current, always-accurate menu.
+  if (!process.env.PUBLIC_URL) {
+    await reply(customer, 'Sorry, the menu link is not set up right now -- please ask a waiter.', 'dinein_menu_unavailable');
+    return;
+  }
+  const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}`;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppCtaUrl(recipientFor(customer), `Here's our menu for Table ${session.table_label}.`, 'View menu', url, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
 }
 
 async function handlePendingBatch(customer, text) {

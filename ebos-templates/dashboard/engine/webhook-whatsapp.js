@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, retryFailedSendAsTemplate } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, retryFailedSendAsTemplate } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -127,8 +127,11 @@ router.post('/', async (req, res) => {
           // The "Place an order" reply button on the first greeting (see
           // flow.js's handleGreeting) -- also instant, same as a list tap.
           if (message.type === 'interactive' && message.interactive?.type === 'button_reply') {
-            if (message.interactive.button_reply.id === 'start_order') {
+            const buttonId = message.interactive.button_reply.id;
+            if (buttonId === 'start_order') {
               await handleStartOrderTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
+            } else if (['dinein_menu', 'dinein_waiter', 'dinein_specials'].includes(buttonId)) {
+              await handleDineinButtonTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
             }
             continue;
           }

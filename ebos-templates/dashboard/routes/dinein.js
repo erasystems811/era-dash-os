@@ -99,6 +99,29 @@ router.post('/tables/:id/regenerate-qr', requireEditorApi, async (req, res) => {
   res.json(rows[0]);
 });
 
+router.post('/waiter-calls/:id/resolve', async (req, res) => {
+  const { rows } = await pool.query(
+    `update waiter_call set status = 'resolved', resolved_by = $1, resolved_at = now() where id = $2 returning *`,
+    [req.staff?.id || null, req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
+  res.json(rows[0]);
+});
+
+// Stage 6 -- the dashboard fallback for closing a table (spec 6.2: build
+// this regardless of POS access, it's the only close path a client with no
+// POS has at all). Schedules nothing itself yet -- feedback (stage 7)
+// isn't built, so table_session.feedback_state just stays 'none' for now.
+router.post('/tables/:id/close', requireEditorApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `update table_session set closed_at = now(), closed_by = 'staff', closed_by_staff = $1
+     where table_id = $2 and closed_at is null returning *`,
+    [req.staff.id, req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'No open session for this table.' });
+  res.json(rows[0]);
+});
+
 router.delete('/tables/:id', requireEditorApi, async (req, res) => {
   try {
     await pool.query('delete from restaurant_table where id = $1', [req.params.id]);
