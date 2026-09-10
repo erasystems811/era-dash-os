@@ -14,57 +14,87 @@
 // hands straight back to that chat thread instead of leaving the guest
 // stranded on a "site". Chidera 2026-09-10: "it should automatically take
 // them back to the chat, why is it staying in the site?"
-export function renderMenuPage({ reviewPath, businessName, subtitle, products, coverPhotoUrl, waNumber }) {
+//
+// App-shell layout (Chidera 2026-09-10: "it shouldn't feel like a website
+// sef... keep the headers stiff... let that under website feel footer
+// with the < and > and share and restart sign stop coming up and down on
+// scroll"): html/body never scroll -- only the inner #scroll div does.
+// WhatsApp's in-app browser shows/hides its own nav chrome in response to
+// the DOCUMENT scrolling, so pinning the document itself and moving all
+// scrolling into one inner div is what stops that chrome from animating,
+// and incidentally is also what makes the header and basket bar truly
+// static instead of just "sticky" (which still lets the page itself move).
+// Product data (incl. photos) is fetched from menuJsonPath after first
+// paint instead of embedded in the HTML -- embedding it made the initial
+// page weight jump with every photo a business adds, which is exactly the
+// "why is it loading first" lag being complained about here; fetching it
+// separately means the header/shell paints instantly and only the photos
+// a guest actually scrolls to ever decode (loading="lazy" below).
+export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoUrl, waNumber }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
+  const menuJsonPath = reviewPath.replace(/\/review$/, '/menu.json');
   const headerStyle = coverPhotoUrl
     ? ` style="background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('${coverPhotoUrl.replace(/'/g, '%27')}');background-size:cover;background-position:center"`
     : '';
   return `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>${escapeHtml(businessName)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--hot:#C5452B;--wa:#0F7A5A}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:"Inter",system-ui,sans-serif;background:#fff;color:var(--ink);line-height:1.5;padding-bottom:80px}
-  .mtop{background:var(--ink);color:var(--paper);padding:20px 16px 16px}
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;overflow:hidden;overscroll-behavior:none}
+  body{display:flex;flex-direction:column;height:100vh;height:100dvh;font-family:"Inter",system-ui,sans-serif;background:#fff;color:var(--ink);line-height:1.5}
+  .mtop{flex:0 0 auto;background:var(--ink);color:var(--paper);padding:20px 16px 16px;min-height:78px}
   .mtop.photo{padding:76px 16px 18px;min-height:190px;display:flex;flex-direction:column;justify-content:flex-end}
   .mtop .nm{font-family:"Fraunces",serif;font-size:24px;font-weight:700;line-height:1}
   .mtop .mt{font-size:12px;color:#B3A597;margin-top:5px}
-  .cats{position:sticky;top:0;background:#fff;display:flex;gap:7px;padding:11px 14px;overflow-x:auto;border-bottom:1px solid var(--line);z-index:3}
+  .scroll{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain}
+  .cats{position:sticky;top:0;background:#fff;display:flex;gap:7px;padding:11px 14px;overflow-x:auto;border-bottom:1px solid var(--line);z-index:3;-webkit-overflow-scrolling:touch}
   .cats::-webkit-scrollbar{display:none}
-  .cats button{border:1px solid var(--line);background:#fff;color:var(--mid);font-family:inherit;font-size:12.5px;font-weight:500;white-space:nowrap;padding:6px 14px;border-radius:999px}
+  .cats button{border:1px solid var(--line);background:#fff;color:var(--mid);font-family:inherit;font-size:12.5px;font-weight:500;white-space:nowrap;padding:6px 14px;border-radius:999px;touch-action:manipulation}
   .cats button.active{background:var(--ink);color:#fff;border-color:var(--ink)}
   .sec{padding:16px 14px 4px}
   .sec h2{font-family:"Fraunces",serif;font-size:17px;font-weight:600}
+  .sec p{font-size:13px;color:var(--mid)}
   .grid{padding:8px 14px 20px}
   .item{border-bottom:1px solid #F0EBE2;padding-bottom:16px;margin-bottom:16px}
   .item:last-child{border-bottom:0}
-  .shot{width:100%;height:168px;border-radius:10px;position:relative;overflow:hidden;background-size:cover;background-position:center;display:grid;place-items:center;margin-bottom:10px;background-color:#8E5220}
+  .shot{width:100%;height:168px;border-radius:10px;position:relative;overflow:hidden;display:grid;place-items:center;margin-bottom:10px;background-color:#8E5220}
+  .shot img{width:100%;height:100%;object-fit:cover;display:block}
   .shot span{color:rgba(255,255,255,.75);font-size:10.5px;letter-spacing:.16em;border:1px solid rgba(255,255,255,.35);padding:4px 10px;border-radius:999px}
   .item h3{font-family:"Fraunces",serif;font-size:17px;font-weight:600;margin-bottom:3px}
   .item .d{font-size:13px;color:var(--mid);margin-bottom:9px;line-height:1.45}
   .ln{display:flex;align-items:center;gap:12px}
   .pr{font-weight:600;font-size:15.5px}
-  .add{margin-left:auto;border:1px solid var(--hot);color:var(--hot);background:#fff;font-family:inherit;font-size:13px;font-weight:600;padding:7px 16px;border-radius:999px}
-  .add.in{background:var(--hot);color:#fff}
+  .add{margin-left:auto;border:1px solid var(--hot);color:var(--hot);background:#fff;font-family:inherit;font-size:13px;font-weight:600;padding:7px 16px;border-radius:999px;touch-action:manipulation}
   .gone{margin-left:auto;font-size:12px;color:var(--mid);font-style:italic}
-  .bask{position:fixed;bottom:0;left:0;right:0;background:var(--ink);color:#fff;padding:13px 15px;display:flex;align-items:center;gap:10px;font-size:13.5px}
-  .bask .go{margin-left:auto;background:var(--wa);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:13px;padding:9px 16px;border-radius:999px}
+  .qty{margin-left:auto;display:flex;align-items:center;border:1px solid var(--hot);border-radius:999px;overflow:hidden}
+  .qty button{background:#fff;color:var(--hot);border:0;font-family:inherit;font-size:16px;font-weight:700;width:32px;height:30px;line-height:1;touch-action:manipulation}
+  .qty button:active{background:#f7e7e3}
+  .qty .qn{min-width:22px;text-align:center;font-size:13px;font-weight:600;color:var(--ink)}
+  .bask{flex:0 0 auto;background:var(--ink);color:#fff;padding:13px 15px;display:flex;align-items:center;gap:10px;font-size:13.5px}
+  .bask .go{margin-left:auto;background:var(--wa);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:13px;padding:9px 16px;border-radius:999px;touch-action:manipulation}
   .err{padding:12px 16px;background:#fdecea;color:#611}
+  .loading{padding:40px 16px;text-align:center;color:var(--mid);font-size:13px}
 </style></head>
 <body>
 <div class="mtop${coverPhotoUrl ? ' photo' : ''}"${headerStyle}><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
-<div id="cats" class="cats"></div>
-<div id="sec" class="sec"></div>
-<div id="grid" class="grid"></div>
+<div class="scroll">
+  <div id="cats" class="cats"></div>
+  <div id="sec" class="sec"></div>
+  <div id="grid" class="grid"><div class="loading">Loading menu&hellip;</div></div>
+</div>
 <div class="bask"><span id="bc">Nothing added yet</span><button class="go" id="go">Review order</button></div>
 <script>
-const PRODUCTS = ${JSON.stringify(products)};
+const MENU_JSON_PATH = ${JSON.stringify(menuJsonPath)};
 const REVIEW_PATH = ${JSON.stringify(reviewPath)};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
+let PRODUCTS = [];
 let basket = {};
-let cur = (PRODUCTS[0] && (PRODUCTS[0].category || 'Menu')) || 'Menu';
+let cur = 'Menu';
 
 function naira(n) { return 'NGN ' + Number(n).toLocaleString(); }
 
@@ -82,24 +112,34 @@ function renderCats() {
   document.querySelectorAll('#cats button').forEach(b => b.onclick = () => { cur = b.dataset.c; renderCats(); render(); });
 }
 
+function changeQty(id, delta) {
+  const next = (basket[id] || 0) + delta;
+  if (next <= 0) delete basket[id]; else basket[id] = next;
+  render();
+  updateBasket();
+}
+
 function render() {
   const list = PRODUCTS.filter(p => (p.category || 'Menu') === cur);
   document.getElementById('sec').innerHTML = '<h2>' + cur + '</h2>';
   document.getElementById('grid').innerHTML = list.map(p => {
     const shot = p.image_data_url
-      ? '<div class="shot" style="background-image:url(\\'' + p.image_data_url + '\\')"></div>'
+      ? '<div class="shot"><img loading="lazy" decoding="async" src="' + p.image_data_url + '" alt=""></div>'
       : '<div class="shot"><span>' + p.name.toUpperCase() + '</span></div>';
-    const added = basket[p.id];
+    const qty = basket[p.id] || 0;
+    const control = !p.availability
+      ? '<span class="gone">finished for today</span>'
+      : qty > 0
+        ? '<div class="qty"><button class="qm" data-id="' + p.id + '">\\u2212</button><span class="qn">' + qty + '</span><button class="qp" data-id="' + p.id + '">+</button></div>'
+        : '<button class="add" data-id="' + p.id + '">Add</button>';
     return '<div class="item">' + shot +
       '<h3>' + p.name + '</h3>' +
       (p.description ? '<p class="d">' + p.description + '</p>' : '') +
-      '<div class="ln"><span class="pr">' + naira(p.price) + '</span>' +
-      (p.availability
-        ? '<button class="add' + (added ? ' in' : '') + '" data-id="' + p.id + '">' + (added ? 'Added (' + added + ')' : 'Add') + '</button>'
-        : '<span class="gone">finished for today</span>') +
-      '</div></div>';
+      '<div class="ln"><span class="pr">' + naira(p.price) + '</span>' + control + '</div></div>';
   }).join('');
-  document.querySelectorAll('.add').forEach(b => b.onclick = () => { basket[b.dataset.id] = (basket[b.dataset.id] || 0) + 1; render(); updateBasket(); });
+  document.querySelectorAll('.add').forEach(b => b.onclick = () => changeQty(b.dataset.id, 1));
+  document.querySelectorAll('.qp').forEach(b => b.onclick = () => changeQty(b.dataset.id, 1));
+  document.querySelectorAll('.qm').forEach(b => b.onclick = () => changeQty(b.dataset.id, -1));
 }
 
 function updateBasket() {
@@ -124,9 +164,23 @@ document.getElementById('go').onclick = async () => {
   if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
 };
 
-renderCats();
-render();
-updateBasket();
+async function boot() {
+  try {
+    const res = await fetch(MENU_JSON_PATH);
+    const data = await res.json();
+    PRODUCTS = data.products || [];
+  } catch (e) {
+    document.getElementById('grid').innerHTML = '<p class="err">Could not load the menu. <a href="#" id="retry">Try again</a></p>';
+    var retry = document.getElementById('retry');
+    if (retry) retry.onclick = function (ev) { ev.preventDefault(); boot(); };
+    return;
+  }
+  cur = (PRODUCTS[0] && (PRODUCTS[0].category || 'Menu')) || 'Menu';
+  renderCats();
+  render();
+  updateBasket();
+}
+boot();
 </script>
 </body></html>`;
 }

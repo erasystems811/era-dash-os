@@ -135,13 +135,11 @@ router.post('/:qrToken/review', async (req, res) => {
 router.get('/:qrToken', async (req, res) => {
   const table = await resolveTable(req.params.qrToken);
   if (!table) return res.status(404).send('Table not found.');
-  const products = await menuForBranch(table.branch_id);
   res.set('Content-Type', 'text/html').send(
     renderMenuPage({
       reviewPath: `/t/${req.params.qrToken}/review`,
       businessName: table.business_name,
       subtitle: `Table ${table.label} · ${table.branch_name}`,
-      products,
       coverPhotoUrl: table.cover_photo_data_url,
       waNumber: table.wa_number,
     })

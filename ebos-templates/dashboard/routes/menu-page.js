@@ -50,13 +50,11 @@ router.get('/:token', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
   const branding = await resolveMenuBranding(customer.branch_id);
-  const products = await menuForBranch(customer.branch_id);
   res.set('Content-Type', 'text/html').send(
     renderMenuPage({
       reviewPath: `/m/${req.params.token}/review`,
       businessName: branding.business_name || '',
       subtitle: 'Pick what you would like, then review your order.',
-      products,
       coverPhotoUrl: branding.cover_photo_data_url,
       waNumber: branding.wa_number,
     })
