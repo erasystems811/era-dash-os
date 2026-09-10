@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleMenuChoiceTap, retryFailedSendAsTemplate } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleMenuChoiceTap, handleUpsellListTap, retryFailedSendAsTemplate } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -116,7 +116,13 @@ router.post('/', async (req, res) => {
           // picked, the tap alone is unambiguous.
           if (message.type === 'interactive' && message.interactive?.type === 'list_reply') {
             const rowId = message.interactive.list_reply.id;
-            if (menuRowKind(rowId) === 'product') {
+            if (rowId.startsWith('upsell::')) {
+              // flow.js's sendUpsellList -- a completely separate row-id
+              // space from the general menu list below, so it's checked
+              // first rather than risk menuRowKind ever treating one as an
+              // ordinary product id.
+              await handleUpsellListTap({ phoneNumber: message.from, channelId: message.from, rowId, channel: 'whatsapp', branchId });
+            } else if (menuRowKind(rowId) === 'product') {
               const product = await productForRowId(rowId);
               if (product) await handleMenuItemTap({ phoneNumber: message.from, product, channel: 'whatsapp', branchId });
             } else {

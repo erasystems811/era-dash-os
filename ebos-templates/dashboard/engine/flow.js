@@ -9,7 +9,7 @@ import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extrac
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
 import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
-import { sendMenuList } from './menu-message.js';
+import { sendMenuList, sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
@@ -1055,8 +1055,15 @@ function categoryMatchesGroup(category, keywords) {
   return keywords.some((k) => lower.includes(k));
 }
 
+// Full product rows, not just names -- Chidera 2026-09-10: "an upsell
+// should bring up that view drinks thats like a list and click button...
+// if i want to reduce api cost what will be the best option?" A tap needs
+// a real product id to route the same zero-AI-cost way any other menu-list
+// tap already does (see sendUpsellList/handleUpsellListTap below); the
+// text fallback (sendUpsellList returning false, or a typed reply --
+// handlePendingUpsell) just reads .name off these instead.
 function catalogueOptions(menu, keywords) {
-  return menu.filter((p) => categoryMatchesGroup(p.category, keywords)).map((p) => p.name);
+  return menu.filter((p) => categoryMatchesGroup(p.category, keywords));
 }
 
 // Next upsell group worth asking about, if any -- already-ordered
@@ -1076,6 +1083,42 @@ async function nextUpsellGroup(order, orderItems) {
     if (!orderHasIt) return { ...group, options };
   }
   return null;
+}
+
+// The upsell offer as a real WhatsApp List Message (tap to add) instead of
+// free text an AI call has to parse -- Chidera 2026-09-10: "an upsell
+// should bring up that view drinks thats like a list and click button...
+// if i want to reduce api cost what will be the best option?" A tap costs
+// zero AI calls (handleUpsellListTap below just reads the row id straight
+// back to a real product, same as any other menu-list tap), where the old
+// free-text version could burn up to three separate AI calls just parsing
+// one reply ("is this a change?", "does this name an item?", "are they
+// saying yes without naming one?" -- the last of those existed specifically
+// to patch the ambiguity a list tap makes impossible by construction).
+// Capped at 8 options + a "No thanks" row (9 total, under WhatsApp's
+// 10-row hard limit) -- an upsell nudge doesn't need the main menu's own
+// pagination, it's a short nudge, not a browse.
+// Row ids are prefixed (upsell::<productId>, upsell::skip) rather than a
+// bare product id -- keeps this completely separate from the general
+// "View menu" list's own row-id space (menu-message.js), which a bare id
+// would otherwise collide with.
+async function sendUpsellList(customer, upsell, prefix = '') {
+  if (customer.channel !== 'whatsapp') return false;
+  if (!process.env.META_PHONE_NUMBER_ID || !process.env.META_ACCESS_TOKEN) return false;
+  const rows = upsell.options.slice(0, 8).map((p) => ({
+    id: `upsell::${p.id}`,
+    title: p.name.slice(0, 24),
+    description: `NGN ${Number(p.price).toLocaleString()}`,
+  }));
+  rows.push({ id: 'upsell::skip', title: 'No thanks', description: `Skip ${upsell.label}` });
+  await sendListMessage(recipientFor(customer), {
+    bodyText: `${prefix}Would you like to add ${upsell.label}?`.trim(),
+    buttonText: 'Choose',
+    sectionTitle: upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1),
+    rows,
+  });
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `Would you like to add ${upsell.label}? We have: ${upsell.options.map((o) => o.name).join(', ')}.`, trigger: 'upsell_offered' });
+  return true;
 }
 
 // The tail end of item collection -- shared between the normal path
@@ -1114,7 +1157,10 @@ async function finishItemsCollection(customer, order, prefix = '') {
       upsell.key,
       order.id,
     ]);
-    await reply(customer, `${prefix}Would you like to add ${upsell.label}? We have: ${upsell.options.join(', ')}.`.trim(), 'upsell_offered');
+    const sent = await sendUpsellList(customer, upsell, prefix);
+    if (!sent) {
+      await reply(customer, `${prefix}Would you like to add ${upsell.label}? We have: ${upsell.options.map((o) => o.name).join(', ')}.`.trim(), 'upsell_offered');
+    }
     return;
   }
 
@@ -1186,13 +1232,45 @@ async function handlePendingUpsell(customer, order, text) {
     const options = group ? catalogueOptions(menu, group.keywords) : [];
     // pending_upsell_category deliberately left set -- their next message
     // is still the answer to this same offer, not a fresh one.
-    await reply(customer, `Great, which one would you like? We have: ${options.join(', ')}.`, 'upsell_clarify');
+    await reply(customer, `Great, which one would you like? We have: ${options.map((o) => o.name).join(', ')}.`, 'upsell_clarify');
     return;
   }
 
   order.pending_upsell_category = null;
   await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
   return finishItemsCollection(customer, order, '');
+}
+
+// A tap on sendUpsellList's List Message above -- the zero-AI-cost path,
+// handled entirely separately from handlePendingUpsell (which only ever
+// sees a TYPED reply now, since a list tap arrives as its own webhook
+// event and never reaches dispatch()/the pending_upsell_category text
+// check at all). Row ids are 'upsell::<productId>' or 'upsell::skip', set
+// by sendUpsellList -- webhook-whatsapp.js routes here before its normal
+// menu-list row handling, since this id space is deliberately separate
+// from that one.
+export async function handleUpsellListTap({ phoneNumber, channelId, rowId, channel = 'whatsapp', branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+  const order = await getOpenOrder(customer.id);
+  // A stale tap on an old list (the offer's already been answered another
+  // way, or the order's moved on/gone) -- nothing to do, and nothing to
+  // clear that isn't already cleared.
+  if (!order || !order.pending_upsell_category) return;
+
+  order.pending_upsell_category = null;
+  await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+
+  const picked = rowId.slice('upsell::'.length);
+  if (picked === 'skip') {
+    await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: No thanks]', processed: true });
+    return finishItemsCollection(customer, order, '');
+  }
+
+  const product = await productForRowId(picked);
+  if (!product) return finishItemsCollection(customer, order, '');
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${product.name}]`, processed: true });
+  await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, 1, $3)', [order.id, product.id, product.price]);
+  return finishItemsCollection(customer, order, `Added ${product.name}. `);
 }
 
 // The reply to a question just asked by askNextItemQuestion above -- taken
@@ -2949,6 +3027,13 @@ export async function handleWebMenuOrder(customer, items) {
   // Still collecting items (collect_info) -- apply the diff directly, then
   // let finishItemsCollection carry on exactly as a fresh order would
   // (upsell prompts, item questions, moving on to confirm_order).
+  // Same stray-offer cleanup as handleMenuItemTap above -- this edit is
+  // what answers any upsell that was left pending, whether or not it
+  // actually touched that category.
+  if (order.pending_upsell_category) {
+    order.pending_upsell_category = null;
+    await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+  }
   for (const item of adds) {
     await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
   }
@@ -2986,6 +3071,15 @@ export async function handleMenuItemTap({ phoneNumber, channelId, product, chann
     // live, 2026-09-10, testing this exact path.
     await transitionOrder(order, 'understand_request');
     await transitionOrder(order, 'collect_info');
+  }
+  // A stray upsell offer left pending would otherwise hijack this
+  // customer's NEXT typed message (dispatch() checks pending_upsell_
+  // category before anything else) -- this add itself is what answers it,
+  // one way or another, same as handleUpsellListTap/handlePendingUpsell
+  // clearing it on their own paths.
+  if (order.pending_upsell_category) {
+    order.pending_upsell_category = null;
+    await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
   }
   await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
   await finishItemsCollection(customer, order, `Added ${product.name}. `);

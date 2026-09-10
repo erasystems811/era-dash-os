@@ -34,7 +34,7 @@ function creds() {
   return { phoneNumberId, accessToken };
 }
 
-async function sendListMessage(to, { bodyText, buttonText, sectionTitle, rows }) {
+export async function sendListMessage(to, { bodyText, buttonText, sectionTitle, rows }) {
   const { phoneNumberId, accessToken } = creds();
   const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`, {
     method: 'POST',
