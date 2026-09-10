@@ -8,7 +8,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage } from '../engine/menu-page-template.js';
 import { menuForBranch, resolveMenuBranding } from './dinein-menu.js';
-import { handleWebMenuOrder } from '../engine/flow.js';
+import { handleWebMenuOrder, getOpenOrder } from '../engine/flow.js';
 
 export const router = express.Router();
 
@@ -22,8 +22,26 @@ router.get('/:token/menu.json', async (req, res) => {
   if (!customer) return res.status(404).json({ error: 'Link not found.' });
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const products = await menuForBranch(customer.branch_id);
-  res.json({ business_name: bizRows[0]?.name, products });
+  const pendingOrder = await pendingOrderPayload(customer.id);
+  res.json({ business_name: bizRows[0]?.name, products, pendingOrder });
 });
+
+// So a guest who reopens "View menu" sees (and can edit) what's already
+// pending instead of a page with no memory of it -- Chidera 2026-09-10:
+// "how are they aware that the first one is still pending... how can they
+// remove as well?" getOpenOrder is the same lookup the actual order
+// engine uses (flow.js), so this always agrees with what a chat message
+// would say.
+async function pendingOrderPayload(customerId) {
+  const order = await getOpenOrder(customerId);
+  if (!order) return null;
+  const { rows: items } = await pool.query('select product_id, quantity from order_item where order_id = $1', [order.id]);
+  if (!items.length) return null;
+  return {
+    items: items.map((i) => ({ productId: i.product_id, quantity: i.quantity })),
+    total: Number(order.total) || 0,
+  };
+}
 
 router.post('/:token/review', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);

@@ -79,11 +79,14 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoU
   .bask .go{margin-left:auto;background:var(--wa);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:13px;padding:9px 16px;border-radius:999px;touch-action:manipulation}
   .err{padding:12px 16px;background:#fdecea;color:#611}
   .loading{padding:40px 16px;text-align:center;color:var(--mid);font-size:13px}
+  .pending{margin:12px 14px 0;padding:10px 12px;background:#FBF3E7;border:1px solid #EAD9B8;border-radius:10px;font-size:12.5px;color:var(--ink);line-height:1.4}
+  .pending b{font-weight:600}
 </style></head>
 <body>
 <div class="mtop${coverPhotoUrl ? ' photo' : ''}"${headerStyle}><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
+  <div id="pending" class="pending" hidden></div>
   <div id="sec" class="sec"></div>
   <div id="grid" class="grid"><div class="loading">Loading menu&hellip;</div></div>
 </div>
@@ -165,16 +168,33 @@ document.getElementById('go').onclick = async () => {
 };
 
 async function boot() {
+  let pendingOrder = null;
   try {
     const res = await fetch(MENU_JSON_PATH);
     const data = await res.json();
     PRODUCTS = data.products || [];
+    pendingOrder = data.pendingOrder || null;
   } catch (e) {
     document.getElementById('grid').innerHTML = '<p class="err">Could not load the menu. <a href="#" id="retry">Try again</a></p>';
     var retry = document.getElementById('retry');
     if (retry) retry.onclick = function (ev) { ev.preventDefault(); boot(); };
     return;
   }
+
+  // A guest reopening this link may already have an order sitting with us
+  // -- show it pre-loaded into the basket (steppers and all) instead of a
+  // page with no memory of it, so adjusting or removing something already
+  // pending is as direct as adding something new. Chidera 2026-09-10:
+  // "how are they aware that the first one is still pending... how can
+  // they remove as well?"
+  if (pendingOrder && pendingOrder.items && pendingOrder.items.length) {
+    pendingOrder.items.forEach(function (i) { basket[i.productId] = i.quantity; });
+    const pendingEl = document.getElementById('pending');
+    const count = pendingOrder.items.reduce(function (s, i) { return s + i.quantity; }, 0);
+    pendingEl.innerHTML = 'You already have <b>' + count + ' item' + (count > 1 ? 's' : '') + '</b> pending (' + naira(pendingOrder.total) + ') &mdash; shown below. Adjust or add more, then tap Review order.';
+    pendingEl.hidden = false;
+  }
+
   cur = (PRODUCTS[0] && (PRODUCTS[0].category || 'Menu')) || 'Menu';
   renderCats();
   render();

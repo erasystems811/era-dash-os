@@ -128,10 +128,20 @@ router.post('/', async (req, res) => {
           // flow.js's handleGreeting) -- also instant, same as a list tap.
           if (message.type === 'interactive' && message.interactive?.type === 'button_reply') {
             const buttonId = message.interactive.button_reply.id;
+            const buttonTitle = message.interactive.button_reply.title;
             if (buttonId === 'start_order') {
               await handleStartOrderTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
             } else if (['dinein_menu', 'dinein_waiter', 'dinein_specials', 'dinein_feedback_good', 'dinein_feedback_alright', 'dinein_feedback_bad'].includes(buttonId)) {
               await handleDineinButtonTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
+            } else if (buttonId === 'order_confirm_yes' || buttonId === 'order_confirm_no') {
+              // flow.js's sendConfirmButtons (the "Yes, confirm" / "No,
+              // change it" read-back prompt) -- put through the exact same
+              // text pipeline a typed "yes"/"no" would take, so every
+              // state-dependent branch already in dispatch() handles it
+              // correctly with no new logic needed here. Uses the button's
+              // own title, not a hardcoded 'yes'/'no', so the transcript
+              // reads the same as if they'd typed it themselves.
+              await handleInboundMessage({ phoneNumber: message.from, text: buttonTitle, channel: 'whatsapp', messageId: message.id, branchId });
             }
             continue;
           }

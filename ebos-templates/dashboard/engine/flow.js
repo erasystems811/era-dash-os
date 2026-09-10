@@ -154,6 +154,31 @@ async function reply(customer, text, logTag = 'bot_flow_step') {
   });
 }
 
+// The order read-back's yes/no ask, as tappable buttons instead of a
+// "reply yes" text prompt -- Chidera 2026-09-10: "that press yes to
+// confirm or change something let it be buttons to like in the demo we
+// saw" (EBOS-Web-Menu-Demo.html's "Yes, send it" / "No, let me change
+// it"). Tapping either just puts that exact wording through the normal
+// text pipeline (webhook-whatsapp.js's button_reply handling), so every
+// state-dependent yes/no branch already in dispatch() (handleConfirmOrder,
+// handleReconfirmAfterEdit, ...) handles it correctly with no new logic
+// here -- a tap is just a faster way to say the same thing typing would.
+// Non-WhatsApp channels (Instagram) keep the plain text prompt, same as
+// every other button-vs-text gate in this file.
+export async function sendConfirmButtons(customer, bodyText, trigger) {
+  if (customer.channel !== 'whatsapp') {
+    await reply(customer, `${bodyText} Reply yes to confirm, or let me know what you'd like to change.`, trigger);
+    return;
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  const buttons = [
+    { id: 'order_confirm_yes', title: 'Yes, confirm' },
+    { id: 'order_confirm_no', title: 'No, change it' },
+  ];
+  await sendWhatsAppButtons(recipientFor(customer), bodyText, buttons, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger });
+}
+
 // A real staff member, typing their own words from the dashboard's
 // conversation view -- not the bot. Same WhatsApp send path (still runs
 // through sanitizeText, so no markdown-style bullets), but logged as
@@ -372,7 +397,7 @@ export function newReference(prefix) {
 // though nobody ever formally closed it. `updated_at` is bumped every time
 // this actually returns an order (the "touch" below), so the 3-hour window
 // is since the last REAL interaction, not since the order was created.
-async function getOpenOrder(customerId) {
+export async function getOpenOrder(customerId) {
   const { rows } = await pool.query(
     `select * from "order" where customer_id = $1 and engine_state not in ('completed', 'cancelled')
        and updated_at > now() - interval '3 hours'
@@ -1025,7 +1050,7 @@ async function finishItemsCollection(customer, order, prefix = '') {
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
   await transitionOrder(order, 'confirm_order');
   const summary = [...itemLines, `Total: NGN ${total}`].join('\n');
-  await reply(customer, `${prefix}To confirm:\n${summary}\n\nReply yes to confirm, or let me know if you would like to change anything.`.trim());
+  await sendConfirmButtons(customer, `${prefix}To confirm:\n${summary}`.trim(), 'order_confirm_asked');
 }
 
 // The reply to the upsell question above. Checked in order:
@@ -1695,7 +1720,7 @@ async function handleOrderModification(customer, order, mods) {
   // would be an illegal confirm_payment -> confirm_payment move).
   await pool.query(`update "order" set confirmed_at = null where id = $1`, [order.id]);
   order.confirmed_at = null;
-  await reply(customer, `Got it, your order:\n${summary}\nNew total: NGN ${total}. Reply yes to confirm, or let me know if you would like to change anything else.`);
+  await sendConfirmButtons(customer, `Got it, your order:\n${summary}\nNew total: NGN ${total}.`, 'order_confirm_asked');
 }
 
 // Switching delivery<->pickup after it was already set (dispatch() only
@@ -2745,20 +2770,63 @@ export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'w
 // questions, upsell, the confirm read-back) so a basket ordered from the
 // page and an item ordered by typing or tapping all converge on one
 // identical experience from here on.
+// `items` is the FULL desired basket, not just what's new -- the menu page
+// pre-populates its basket from any pending order (routes/menu-page.js's
+// /menu.json now returns it), so a customer who reopens the link sees and
+// can edit what's already there (Chidera 2026-09-10: "how are they aware
+// that the first one is still pending... how can they remove as well?").
+// That means a second submission has to be diffed against what's already
+// on the order -- an untouched quantity is a no-op, a lowered one is a
+// real reduction/removal, and only a genuinely new product is an add.
 export async function handleWebMenuOrder(customer, items) {
   let order = await getOpenOrder(customer.id);
-  if (order && ['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
-    const adds = items.map((i) => ({ productId: i.productId, name: i.name, price: i.price, quantity: i.quantity }));
-    await handleOrderModification(customer, order, { adds, removes: [], sets: [] });
-    return;
-  }
+
   if (!order) {
     order = await createDraftOrder(customer.id, customer.branch_id);
     await transitionOrder(order, 'understand_request');
     await transitionOrder(order, 'collect_info');
+    for (const item of items) {
+      await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+    }
+    await finishItemsCollection(customer, order, 'Got it. ');
+    return;
   }
+
+  const { rows: existingItems } = await pool.query('select product_id, quantity from order_item where order_id = $1', [order.id]);
+  const existingMap = new Map(existingItems.map((r) => [r.product_id, r.quantity]));
+  const submittedIds = new Set(items.map((i) => i.productId));
+
+  const adds = [];
+  const sets = [];
+  const removes = [];
   for (const item of items) {
+    if (existingMap.has(item.productId)) {
+      if (existingMap.get(item.productId) !== item.quantity) sets.push({ productId: item.productId, quantity: item.quantity });
+    } else {
+      adds.push(item);
+    }
+  }
+  for (const productId of existingMap.keys()) {
+    if (!submittedIds.has(productId)) removes.push({ productId });
+  }
+  if (!adds.length && !sets.length && !removes.length) return; // resubmitted with nothing actually changed
+
+  if (['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
+    await handleOrderModification(customer, order, { adds, removes, sets });
+    return;
+  }
+
+  // Still collecting items (collect_info) -- apply the diff directly, then
+  // let finishItemsCollection carry on exactly as a fresh order would
+  // (upsell prompts, item questions, moving on to confirm_order).
+  for (const item of adds) {
     await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+  }
+  for (const item of sets) {
+    await pool.query('update order_item set quantity = $1 where order_id = $2 and product_id = $3', [item.quantity, order.id, item.productId]);
+  }
+  for (const item of removes) {
+    await pool.query('delete from order_item where order_id = $1 and product_id = $2', [order.id, item.productId]);
   }
   await finishItemsCollection(customer, order, 'Got it. ');
 }

@@ -5,9 +5,8 @@
 // same as routes/documents.js and routes/tracking.js.
 import express from 'express';
 import { pool } from '../lib/db.js';
-import { getWhatsAppCredentials } from '../engine/branch-channel.js';
-import { sendWhatsApp } from '../engine/whatsapp-send.js';
 import { renderMenuPage } from '../engine/menu-page-template.js';
+import { sendConfirmButtons } from '../engine/flow.js';
 
 export const router = express.Router();
 
@@ -118,16 +117,7 @@ router.post('/:qrToken/review', async (req, res) => {
   // here rather than waiting for dispatch() (which only reacts to an
   // inbound customer message, and there isn't one right now).
   const lines = resolved.map((i) => `${i.quantity}x ${i.name}: NGN ${i.price}`).join('\n');
-  const credentials = await getWhatsAppCredentials(table.branch_id);
-  await sendWhatsApp(
-    customer.phone_number,
-    `To confirm your order for Table ${table.label}:\n${lines}\nTotal: NGN ${total}\n\nReply yes to send it to the kitchen, or let me know what you'd like to change.`,
-    credentials
-  );
-  await pool.query(
-    `insert into message (customer_id, direction, channel, sender, body, trigger, processed_at) values ($1, 'outbound', 'whatsapp', 'bot', $2, 'dinein_review', now())`,
-    [customer.id, `To confirm your order for Table ${table.label}: ${lines.replace(/\n/g, ', ')}. Total: NGN ${total}.`]
-  );
+  await sendConfirmButtons(customer, `To confirm your order for Table ${table.label}:\n${lines}\nTotal: NGN ${total}`, 'dinein_review');
 
   res.json({ ok: true });
 });
