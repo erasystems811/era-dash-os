@@ -67,10 +67,10 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPho
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%;overflow:hidden;overscroll-behavior:none}
   body{display:flex;flex-direction:column;height:100vh;height:100dvh;font-family:"Inter",system-ui,sans-serif;background:#fff;color:var(--ink);line-height:1.5}
-  .mtop{flex:0 0 auto;background:var(--ink);color:var(--paper);padding:20px 16px 16px;min-height:78px}
-  .mtop.photo{padding:76px 16px 18px;min-height:190px;display:flex;flex-direction:column;justify-content:flex-end}
-  .mtop .nm{font-family:"Fraunces",serif;font-size:24px;font-weight:700;line-height:1}
-  .mtop .mt{font-size:12px;color:#B3A597;margin-top:5px}
+  .mtop{flex:0 0 auto;background:var(--ink);color:var(--paper);padding:12px 16px 10px;min-height:52px}
+  .mtop.photo{padding:38px 16px 12px;min-height:120px;display:flex;flex-direction:column;justify-content:flex-end}
+  .mtop .nm{font-family:"Fraunces",serif;font-size:19px;font-weight:700;line-height:1}
+  .mtop .mt{font-size:11.5px;color:#B3A597;margin-top:3px}
   .scroll{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain}
   .cats{position:sticky;top:0;background:#fff;display:flex;gap:7px;padding:11px 14px;overflow-x:auto;border-bottom:1px solid var(--line);z-index:3;-webkit-overflow-scrolling:touch}
   .cats::-webkit-scrollbar{display:none}
@@ -98,7 +98,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPho
   .bask{flex:0 0 auto;background:var(--ink);color:#fff;padding:13px 15px;display:flex;align-items:center;gap:10px;font-size:13.5px}
   .bask .go{margin-left:auto;background:var(--wa);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:13px;padding:9px 16px;border-radius:999px;touch-action:manipulation}
   .bask #bc{touch-action:manipulation;text-decoration:underline;text-decoration-color:rgba(255,255,255,.35);text-underline-offset:3px}
-  .back{display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,.16);color:#fff;border:0;border-radius:999px;padding:6px 13px 6px 10px;font-family:inherit;font-size:12.5px;font-weight:600;margin-bottom:10px;touch-action:manipulation}
+  .back{display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,.16);color:#fff;border:0;border-radius:999px;padding:5px 12px 5px 9px;font-family:inherit;font-size:12px;font-weight:600;margin-bottom:6px;touch-action:manipulation}
   .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:8}
   .sheet{position:fixed;left:0;right:0;bottom:0;background:#fff;border-radius:16px 16px 0 0;max-height:70vh;overflow-y:auto;z-index:9;padding:16px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -8px 24px rgba(0,0,0,.18)}
   .sheetHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}

@@ -29,6 +29,7 @@ import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../en
 import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort, deleteBestEffort } from '../engine/whatsapp-catalog.js';
 import { router as deliveryRoutes } from './delivery.js';
 import { router as voiceRoutes } from './voice.js';
+import { router as dineinRoutes } from './dinein.js';
 import { encrypt } from '../lib/crypto.js';
 import { maybeDispatchOwnRiders, manuallyRingForRider } from '../engine/delivery-dispatch.js';
 
@@ -372,6 +373,10 @@ router.use(scopeToBranch);
 
 router.use('/delivery', deliveryRoutes);
 router.use('/voice', voiceRoutes);
+// Was never mounted at all -- DineIn.jsx's tables/feedback/orders-pending
+// calls have been 404ing since dine-in Stage 1. Found live, 2026-09-10,
+// while adding the in-house-guests orders queue to this same router.
+router.use('/dinein', dineinRoutes);
 
 // payout_mode/provider/provider_keys are the restaurant's own to set, once
 // mode is on -- same level of trust as them already self-managing

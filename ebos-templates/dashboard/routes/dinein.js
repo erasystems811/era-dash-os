@@ -62,21 +62,31 @@ router.get('/tables', async (req, res) => {
 router.post('/tables', requireEditorApi, async (req, res) => {
   const f = req.body;
   if (!f.branch_id || !f.label) return res.status(400).json({ error: 'branch_id and label are required.' });
-  const { rows } = await pool.query(
-    'insert into restaurant_table (branch_id, label, qr_token, seats) values ($1, $2, $3, $4) returning *',
-    [f.branch_id, f.label, randomBytes(16).toString('hex'), f.seats || null]
-  );
-  res.json(rows[0]);
+  try {
+    const { rows } = await pool.query(
+      'insert into restaurant_table (branch_id, label, qr_token, seats) values ($1, $2, $3, $4) returning *',
+      [f.branch_id, f.label, randomBytes(16).toString('hex'), f.seats || null]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: `Table "${f.label}" already exists for this branch -- a scan needs a label to mean exactly one table.` });
+    throw err;
+  }
 });
 
 router.post('/tables/:id', requireEditorApi, async (req, res) => {
   const f = req.body;
-  const { rows } = await pool.query(
-    'update restaurant_table set label = $1, seats = $2, status = $3 where id = $4 returning *',
-    [f.label, f.seats || null, f.status || 'active', req.params.id]
-  );
-  if (!rows[0]) return res.status(404).json({ error: 'Table not found.' });
-  res.json(rows[0]);
+  try {
+    const { rows } = await pool.query(
+      'update restaurant_table set label = $1, seats = $2, status = $3 where id = $4 returning *',
+      [f.label, f.seats || null, f.status || 'active', req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Table not found.' });
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: `Table "${f.label}" already exists for this branch -- a scan needs a label to mean exactly one table.` });
+    throw err;
+  }
 });
 
 // A stolen or renumbered printed card is invalidated by giving the table a
@@ -93,6 +103,27 @@ router.post('/tables/:id/regenerate-qr', requireEditorApi, async (req, res) => {
   );
   if (!rows[0]) return res.status(404).json({ error: 'Table not found.' });
   res.json(rows[0]);
+});
+
+// Dine-in orders placed and waiting on the kitchen/bar, oldest first --
+// the dashboard's "in-house guests" queue (Chidera 2026-09-10: "a tab for
+// in house guests where it shows orders pending... and when fulfiled
+// there should be a served button to take them off"). "Served" itself is
+// just the existing POST /orders/:id/status {status:'completed'} -- same
+// close-out every other order already gets, not a second parallel path.
+router.get('/orders/pending', async (req, res) => {
+  const { rows } = await pool.query(
+    `select o.*, rt.label as table_label,
+            (select coalesce(json_agg(json_build_object('name', p.name, 'quantity', oi.quantity)), '[]')
+             from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
+     from "order" o
+     join restaurant_table rt on rt.id = o.table_id
+     where o.channel = 'dinein' and o.status not in ('completed', 'cancelled')
+       and ($1::uuid is null or o.branch_id = $1)
+     order by o.created_at asc`,
+    [req.branchId]
+  );
+  res.json(rows);
 });
 
 // Newest first, negative first (spec section 10) -- score isn't

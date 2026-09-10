@@ -905,6 +905,16 @@ create table if not exists restaurant_table (
   created_at timestamptz not null default now()
 );
 create index if not exists restaurant_table_branch_idx on restaurant_table (branch_id);
+-- A table's label is what a scan actually resolves by (flow.js's
+-- handleDineinScan: branch_id + lower(label), no other tiebreaker) -- two
+-- active tables sharing a label in the same branch would make scanning
+-- either one genuinely ambiguous, silently routing orders/waiter calls to
+-- whichever row Postgres happened to return. Chidera 2026-09-10: "the qr
+-- code for each table[] should be unique to identify each table." Partial
+-- (status = 'active' only) so a deactivated table's old label is free to
+-- reuse on a new one.
+create unique index if not exists restaurant_table_branch_label_active_idx
+  on restaurant_table (branch_id, lower(label)) where status = 'active';
 
 -- One open session per table at a time -- opened on the first scan, closed
 -- from the dashboard or a POS integration. "Which session does a waiter

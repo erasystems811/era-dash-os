@@ -2745,14 +2745,39 @@ async function ensureMenuToken(customer) {
   return token;
 }
 
-async function sendWebMenuLink(customer, bodyText) {
+async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu') {
   if (!process.env.PUBLIC_URL) return false;
   const token = await ensureMenuToken(customer);
   const url = `${process.env.PUBLIC_URL}/m/${token}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, 'View menu', url, credentials);
+  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, url, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'menu_shown', processed: true });
   return true;
+}
+
+// The "No, change it" half of sendConfirmButtons' read-back prompt --
+// matches the reference demo exactly (EBOS-Web-Menu-Demo.html: "No
+// problem. Open the menu again and change whatever you like." + a "See
+// the menu" button), sent directly rather than through the normal AI
+// confirm-detection pipeline (handleConfirmOrder's own "no" branch asks a
+// vaguer "what would you like to change" with no button at all) -- the
+// tap itself is already unambiguous, same reasoning as every other
+// instant button handler in this file. Chidera 2026-09-10.
+export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: No, change it]', processed: true });
+
+  const message = 'No problem. Open the menu again and change whatever you like.';
+  const session = await currentDineinSession(customer);
+  if (session && process.env.PUBLIC_URL) {
+    const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}`;
+    const credentials = await getWhatsAppCredentials(customer.branch_id);
+    await sendWhatsAppCtaUrl(recipientFor(customer), message, 'See the menu', url, credentials);
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'order_confirm_no', processed: true });
+    return;
+  }
+  const shown = await sendWebMenuLink(customer, message, 'See the menu');
+  if (!shown) await reply(customer, message, 'order_confirm_no');
 }
 
 export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {

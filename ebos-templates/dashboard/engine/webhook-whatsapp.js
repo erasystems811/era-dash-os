@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, retryFailedSendAsTemplate } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, retryFailedSendAsTemplate } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -133,15 +133,18 @@ router.post('/', async (req, res) => {
               await handleStartOrderTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
             } else if (['dinein_menu', 'dinein_waiter', 'dinein_specials', 'dinein_feedback_good', 'dinein_feedback_alright', 'dinein_feedback_bad'].includes(buttonId)) {
               await handleDineinButtonTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
-            } else if (buttonId === 'order_confirm_yes' || buttonId === 'order_confirm_no') {
-              // flow.js's sendConfirmButtons (the "Yes, confirm" / "No,
-              // change it" read-back prompt) -- put through the exact same
-              // text pipeline a typed "yes"/"no" would take, so every
-              // state-dependent branch already in dispatch() handles it
+            } else if (buttonId === 'order_confirm_yes') {
+              // flow.js's sendConfirmButtons -- put through the exact same
+              // text pipeline a typed "yes" would take, so every state-
+              // dependent confirm branch already in dispatch() handles it
               // correctly with no new logic needed here. Uses the button's
-              // own title, not a hardcoded 'yes'/'no', so the transcript
-              // reads the same as if they'd typed it themselves.
+              // own title, not a hardcoded 'yes', so the transcript reads
+              // the same as if they'd typed it themselves.
               await handleInboundMessage({ phoneNumber: message.from, text: buttonTitle, channel: 'whatsapp', messageId: message.id, branchId });
+            } else if (buttonId === 'order_confirm_no') {
+              // Sent directly, not through the AI confirm pipeline -- see
+              // handleOrderConfirmNoTap's own comment for why.
+              await handleOrderConfirmNoTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
             }
             continue;
           }
