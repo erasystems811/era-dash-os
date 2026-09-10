@@ -968,6 +968,34 @@ router.post('/catalogue/combo', requireStaffApi, async (req, res) => {
   });
 });
 
+// Per-item customization questions (product_question) -- Catalogue.jsx's
+// own add/list/remove UI has been calling these three routes all along,
+// but they were never actually defined here. The table and the bot side
+// (engine/flow.js's askNextItemQuestion) were both real and working --
+// this was the one missing piece, which is exactly why adding a question
+// from the dashboard never seemed to do anything. Chidera 2026-09-11:
+// "when i add questions per food item it doesnt reeflect."
+router.get('/catalogue/:id/questions', async (req, res) => {
+  const { rows } = await pool.query('select * from product_question where product_id = $1 order by position, created_at', [req.params.id]);
+  res.json(rows);
+});
+
+router.post('/catalogue/:id/questions', requireStaffApi, async (req, res) => {
+  const question = (req.body?.question || '').trim();
+  if (!question) return res.status(400).json({ error: 'A question is required.' });
+  const { rows: existing } = await pool.query('select coalesce(max(position), -1) as max_position from product_question where product_id = $1', [req.params.id]);
+  const { rows } = await pool.query(
+    'insert into product_question (product_id, question, position) values ($1, $2, $3) returning *',
+    [req.params.id, question, existing[0].max_position + 1]
+  );
+  res.status(201).json(rows[0]);
+});
+
+router.delete('/catalogue/questions/:questionId', requireStaffApi, async (req, res) => {
+  await pool.query('delete from product_question where id = $1', [req.params.questionId]);
+  res.json({ ok: true });
+});
+
 router.post('/catalogue/:id', requireStaffApi, async (req, res) => {
   const f = req.body;
   const { rows } = await pool.query(
