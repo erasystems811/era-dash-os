@@ -1341,7 +1341,7 @@ router.get('/documents', async (req, res) => {
 
 router.get('/business', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query(
-    'select id, name, type, phone_number, address, operating_hours, delivery_enabled, whatsapp_connection, handover_number, bank_name, bank_account_number, bank_account_name, logo_data_url, brand_color from business limit 1'
+    'select id, name, type, phone_number, address, operating_hours, delivery_enabled, whatsapp_connection, handover_number, bank_name, bank_account_number, bank_account_name, logo_data_url, brand_color, cover_photo_data_url from business limit 1'
   );
   res.json(rows[0] || null);
 });
@@ -1400,7 +1400,7 @@ router.post('/business', requireEditorApi, async (req, res) => {
   const { rows } = await pool.query(
     `update business set name = $1, address = $2, phone_number = $3, delivery_enabled = $4, whatsapp_connection = $5,
        handover_number = $6, bank_name = $7, bank_account_number = $8, bank_account_name = $9,
-       logo_data_url = $10, brand_color = $11
+       logo_data_url = $10, brand_color = $11, cover_photo_data_url = $12
      where id = (select id from business limit 1) returning *`,
     [
       f.name,
@@ -1414,6 +1414,7 @@ router.post('/business', requireEditorApi, async (req, res) => {
       f.bank_account_name || null,
       f.logo_data_url || null,
       f.brand_color || '#111827',
+      f.cover_photo_data_url || null,
     ]
   );
   res.json(rows[0]);

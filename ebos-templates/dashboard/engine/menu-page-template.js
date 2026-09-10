@@ -5,7 +5,20 @@
 // matches the reference demo (Downloads/EBOS-Web-Menu-Demo.html,
 // Chidera 2026-09-10) -- Fraunces/Inter, warm paper background, pill
 // buttons -- not the plainer first pass this replaced.
-export function renderMenuPage({ reviewPath, businessName, subtitle, products }) {
+//
+// coverPhotoUrl: business.cover_photo_data_url (Settings > Branding) --
+// null falls back to the plain dark header, same as before this existed.
+// waNumber: the business's own WhatsApp number (digits only, no leading
+// zero/plus) -- after a successful order this page redirects to
+// https://wa.me/<waNumber>, which WhatsApp's in-app browser intercepts and
+// hands straight back to that chat thread instead of leaving the guest
+// stranded on a "site". Chidera 2026-09-10: "it should automatically take
+// them back to the chat, why is it staying in the site?"
+export function renderMenuPage({ reviewPath, businessName, subtitle, products, coverPhotoUrl, waNumber }) {
+  const waDigits = String(waNumber || '').replace(/\D/g, '');
+  const headerStyle = coverPhotoUrl
+    ? ` style="background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('${coverPhotoUrl.replace(/'/g, '%27')}');background-size:cover;background-position:center"`
+    : '';
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>${escapeHtml(businessName)}</title>
@@ -15,6 +28,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, products })
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:"Inter",system-ui,sans-serif;background:#fff;color:var(--ink);line-height:1.5;padding-bottom:80px}
   .mtop{background:var(--ink);color:var(--paper);padding:20px 16px 16px}
+  .mtop.photo{padding:76px 16px 18px;min-height:190px;display:flex;flex-direction:column;justify-content:flex-end}
   .mtop .nm{font-family:"Fraunces",serif;font-size:24px;font-weight:700;line-height:1}
   .mtop .mt{font-size:12px;color:#B3A597;margin-top:5px}
   .cats{position:sticky;top:0;background:#fff;display:flex;gap:7px;padding:11px 14px;overflow-x:auto;border-bottom:1px solid var(--line);z-index:3}
@@ -40,7 +54,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, products })
   .err{padding:12px 16px;background:#fdecea;color:#611}
 </style></head>
 <body>
-<div class="mtop"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
+<div class="mtop${coverPhotoUrl ? ' photo' : ''}"${headerStyle}><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
 <div id="cats" class="cats"></div>
 <div id="sec" class="sec"></div>
 <div id="grid" class="grid"></div>
@@ -48,6 +62,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, products })
 <script>
 const PRODUCTS = ${JSON.stringify(products)};
 const REVIEW_PATH = ${JSON.stringify(reviewPath)};
+const WA_DIGITS = ${JSON.stringify(waDigits)};
 let basket = {};
 let cur = (PRODUCTS[0] && (PRODUCTS[0].category || 'Menu')) || 'Menu';
 
@@ -102,7 +117,11 @@ document.getElementById('go').onclick = async () => {
   const res = await fetch(REVIEW_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
   const data = await res.json();
   if (!res.ok) { alert(data.error || 'Something went wrong.'); return; }
-  document.body.innerHTML = '<div style="padding:60px 20px;text-align:center;font-family:Inter,sans-serif;"><h2 style="font-family:Fraunces,serif;">Order sent!</h2><p style="color:#6E6156;margin-top:8px;">Check WhatsApp to confirm it.</p></div>';
+  document.body.innerHTML = '<div style="padding:60px 20px;text-align:center;font-family:Inter,sans-serif;"><h2 style="font-family:Fraunces,serif;">Order sent!</h2><p style="color:#6E6156;margin-top:8px;">Taking you back to the chat\\u2026</p></div>';
+  // Hands the guest straight back to the WhatsApp thread instead of
+  // leaving them stranded on this page -- wa.me is what WhatsApp's own
+  // in-app browser intercepts and swaps back to the chat for.
+  if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
 };
 
 renderCats();

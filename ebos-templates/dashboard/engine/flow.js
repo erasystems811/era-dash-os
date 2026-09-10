@@ -644,9 +644,13 @@ async function handleGreeting(customer, text) {
     await reply(customer, message, 'greeting');
     return;
   }
-  const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppButtons(recipientFor(customer), message, [{ id: 'start_order', title: 'Place an order' }], credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: message, trigger: 'greeting' });
+  // Straight to the real web menu -- Chidera's call, 2026-09-10: "no need
+  // for place an order just put view menu button straight". One tap
+  // (View menu) instead of two (Place an order, then a second message
+  // with the actual link) -- sendWebMenuLink handles PUBLIC_URL not being
+  // set by falling back to plain text on its own.
+  const shown = await sendWebMenuLink(customer, message);
+  if (!shown) await reply(customer, message, 'greeting');
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,

@@ -44,6 +44,14 @@ export default function Settings() {
     reader.readAsDataURL(file);
   }
 
+  function onCoverPhotoChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => set('cover_photo_data_url', reader.result);
+    reader.readAsDataURL(file);
+  }
+
   function setWa(key, value) {
     setWaProfile((p) => ({ ...p, [key]: value }));
   }
@@ -159,6 +167,16 @@ export default function Settings() {
             <div className="field">
               <label>Brand colour</label>
               <input type="color" value={business.brand_color || '#111827'} onChange={(e) => set('brand_color', e.target.value)} disabled={!editable} style={{ padding: 2, height: 38 }} />
+            </div>
+          </div>
+          <div className="form-row">
+            <div className="field">
+              <label>Web menu cover photo</label>
+              <p className="hint">The headline photo across the top of the WhatsApp web menu customers see.</p>
+              {business.cover_photo_data_url && (
+                <img src={business.cover_photo_data_url} alt="Cover" style={{ width: '100%', maxWidth: 320, height: 120, objectFit: 'cover', borderRadius: 8, display: 'block', marginBottom: 8 }} />
+              )}
+              {editable && <input type="file" accept="image/*" onChange={onCoverPhotoChange} />}
             </div>
           </div>
           <h3>Payment</h3>

@@ -28,6 +28,12 @@ create table if not exists business (
   -- for what's realistically always a small logo image.
   logo_data_url text,
   brand_color text not null default '#111827',
+  -- Headline photo across the top of the web menu page (engine/menu-page-
+  -- template.js) -- Chidera 2026-09-10: "the menu when sent at first is to
+  -- have a one head line photo... create space for cover photo in back
+  -- end". Same data: URI pattern as logo_data_url above, same reasoning.
+  -- Null falls back to a plain dark header with just the business name.
+  cover_photo_data_url text,
   -- Meta's native WhatsApp Catalogue (the shop icon in-chat) -- separate
   -- from the product table's own use in the bot's order flow. Creating the
   -- catalog is self-service (engine/whatsapp-catalog.js); connecting it to

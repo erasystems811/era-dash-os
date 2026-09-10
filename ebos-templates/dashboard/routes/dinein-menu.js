@@ -13,12 +13,27 @@ export const router = express.Router();
 
 async function resolveTable(qrToken) {
   const { rows } = await pool.query(
-    `select rt.*, b.name as branch_name, biz.name as business_name
+    `select rt.*, b.name as branch_name, biz.name as business_name,
+       biz.cover_photo_data_url, coalesce(b.whatsapp_number, biz.phone_number) as wa_number
      from restaurant_table rt join branch b on b.id = rt.branch_id, business biz
      where rt.qr_token = $1 and rt.status = 'active'`,
     [qrToken]
   );
   return rows[0] || null;
+}
+
+// Cover photo + the business's own WhatsApp number (for the wa.me
+// return-to-chat redirect) -- shared with routes/menu-page.js, which has
+// no table row to piggyback this onto the way resolveTable above does.
+export async function resolveMenuBranding(branchId) {
+  const { rows } = await pool.query(
+    `select biz.name as business_name, biz.cover_photo_data_url,
+       coalesce(b.whatsapp_number, biz.phone_number) as wa_number
+     from branch b, business biz
+     where b.id = $1`,
+    [branchId]
+  );
+  return rows[0] || {};
 }
 
 async function openSessionFor(table) {
@@ -127,6 +142,8 @@ router.get('/:qrToken', async (req, res) => {
       businessName: table.business_name,
       subtitle: `Table ${table.label} · ${table.branch_name}`,
       products,
+      coverPhotoUrl: table.cover_photo_data_url,
+      waNumber: table.wa_number,
     })
   );
 });
