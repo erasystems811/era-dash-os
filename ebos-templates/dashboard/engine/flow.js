@@ -1597,8 +1597,17 @@ async function sendPaymentInstructions(customer, order) {
   const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
   const b = biz[0] || {};
   const hasBankDetails = b.bank_name && b.bank_account_number && b.bank_account_name;
+  // Structured, one fact per line -- same reasoning as the item-by-item
+  // price confirmation (Chidera's earlier call: "structured line by line
+  // way not paragraph"), now for the bank details too. Chidera 2026-09-11:
+  // "that message that comes before invoice should stop showing in a
+  // paragraph form and show in a structured manner." A bank name, account
+  // number, and account name run together in one comma sentence is
+  // exactly the kind of thing that's easy to misread or fat-finger
+  // copying out -- each on its own line reads the way a real transfer
+  // slip would.
   const payLine = hasBankDetails
-    ? `Please pay NGN ${total}${deliveryFeeLine} to ${b.bank_name}, ${b.bank_account_number}, ${b.bank_account_name}, then send proof of payment here.`
+    ? `Please pay NGN ${total}${deliveryFeeLine}.\n\nBank: ${b.bank_name}\nAccount number: ${b.bank_account_number}\nAccount name: ${b.bank_account_name}\n\nThen send proof of payment here.`
     : `Your total is NGN ${total}${deliveryFeeLine}. Let me get someone to confirm payment details with you.`;
   await reply(customer, `${invoiceLine}\n\n${payLine}`);
   // ackText false -- payLine already told them someone will confirm payment
@@ -1788,9 +1797,12 @@ async function handleWaitingOnPayment(customer, order, text) {
   const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
   const b = biz[0] || {};
   if (b.bank_name && b.bank_account_number && b.bank_account_name) {
+    // Same structured, one-fact-per-line format as sendPaymentInstructions'
+    // own bank details -- this is the same information, just on a repeat
+    // reminder, so it shouldn't read differently.
     await reply(
       customer,
-      `Pay NGN ${order.total} to ${b.bank_name}, ${b.bank_account_number}, ${b.bank_account_name}, then send proof of payment here.`,
+      `Pay NGN ${order.total}.\n\nBank: ${b.bank_name}\nAccount number: ${b.bank_account_number}\nAccount name: ${b.bank_account_name}\n\nThen send proof of payment here.`,
       'payment_reminder'
     );
     return;
