@@ -8,7 +8,7 @@ import { classifyIntent, detectWantsHuman, detectDelayComplaint } from './classi
 import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extractOrderItems, extractOrderModifications, extractFulfilmentChange, loadBotFields, describeForExtraction, branchOptions, resolveMenu, getSharingMode } from './fields.js';
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
-import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppImage, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
+import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
 import { sendMenuList, sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
@@ -57,14 +57,6 @@ async function senderFor(customer) {
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   return (to, text) => sendWhatsApp(to, text, credentials);
-}
-// sendInstagramDocument's attachment type ('file') already fetches by URL
-// generically, so it doubles as the image sender there -- only WhatsApp
-// distinguishes an 'image' message type from a 'document' one.
-async function imageSenderFor(customer) {
-  if (customer.channel === 'instagram') return sendInstagramDocument;
-  const credentials = await getWhatsAppCredentials(customer.branch_id);
-  return (to, link, caption) => sendWhatsAppImage(to, link, caption, credentials);
 }
 // Pure display text for staff-facing alerts -- customer.phone_number is
 // always null for an Instagram customer (DMs never expose one), so that
@@ -693,13 +685,14 @@ async function handleGreeting(customer, text) {
   // category including this one; the second button just jumps straight to
   // it for someone who came here specifically for the deal.
   const specialsCategory = await findSpecialsCategory(customer.branch_id);
+  const headerImageUrl = await businessCoverPhotoUrl();
   if (specialsCategory) {
     const credentials = await getWhatsAppCredentials(customer.branch_id);
     const buttons = [
       { id: 'menu_see', title: 'See menu' },
       { id: 'menu_specials', title: 'Special offers' },
     ];
-    await sendWhatsAppButtons(recipientFor(customer), message, buttons, credentials);
+    await sendWhatsAppButtons(recipientFor(customer), message, buttons, credentials, headerImageUrl);
     await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: message, trigger: 'greeting' });
     return;
   }
@@ -708,7 +701,7 @@ async function handleGreeting(customer, text) {
   // (View menu) instead of two (Place an order, then a second message
   // with the actual link) -- sendWebMenuLink handles PUBLIC_URL not being
   // set by falling back to plain text on its own.
-  const shown = await sendWebMenuLink(customer, message);
+  const shown = await sendWebMenuLink(customer, message, 'View menu', null, headerImageUrl);
   if (!shown) await reply(customer, message, 'greeting');
 }
 
@@ -819,12 +812,11 @@ async function summariseOrder(order) {
 // have" instead of the same sentence verbatim).
 async function fieldPrompt(fieldKey, fallbackQuestion, branchId) {
   if (fieldKey === 'items') {
-    // A business with a menu photo on file gets it forwarded instead (see
-    // the items_menu_shown call site below) -- naming every item as text
-    // here too would defeat the point (that's exactly the "300 items is
-    // unreadable as text" problem the photo forward exists to avoid).
-    const { rows: photos } = await pool.query('select 1 from menu_photo limit 1');
-    if (photos.length) return fallbackQuestion || 'What would you like to order?';
+    // Chidera 2026-09-10: "let bot no longer send menu photos itself" --
+    // the real web menu page (sendWebMenuLink) is the intended way to show
+    // the menu now; this text listing is just the last-resort fallback
+    // when that isn't available, same as it always was for a catalogue
+    // small enough to actually read as text.
     const products = await resolveMenu(branchId);
     if (products.length) return `${fallbackQuestion || 'What would you like to order?'} We have: ${products.map((p) => p.name).join(', ')}.`;
   }
@@ -901,30 +893,18 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
           // call, 2026-09-10: "the menu is meant to be like a site now...
           // not just in dine in[,] the normal conversation flow". WhatsApp
           // only (Instagram has no CTA-URL button type) -- Instagram keeps
-          // the photo/text fallback below unchanged. Returns false only
-          // when PUBLIC_URL isn't set, so the photo/text fallback below
-          // still covers that real gap.
+          // the text fallback below unchanged.
+          //
+          // No menu-photo forward anymore either way -- Chidera 2026-09-10:
+          // "let bot no longer send menu photos itself". The real web menu
+          // (or, failing that, fieldPrompt's own text listing) is the only
+          // fallback now.
           let catalogShown = false;
           if (customer.channel !== 'instagram') {
             catalogShown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.").catch((err) => {
               console.error('sendWebMenuLink failed:', err.message);
               return false;
             });
-          }
-          // A real menu photo beats a text list once a catalogue is more
-          // than a handful of items -- "We have: X, Y, Z... [300 names]" is
-          // unreadable, but the actual printed menu is exactly what a
-          // customer would be handed in person. PUBLIC_URL-gated same as
-          // every other outbound file link here (invoice, receipt): no
-          // photo forward without a real public URL to serve it from.
-          if (!catalogShown && process.env.PUBLIC_URL) {
-            const { rows: photos } = await pool.query('select id from menu_photo order by position');
-            if (photos.length) {
-              const sendImage = await imageSenderFor(customer);
-              for (const photo of photos) {
-                await sendImage(recipientFor(customer), `${process.env.PUBLIC_URL}/documents/menu-photo/${photo.id}`);
-              }
-            }
           }
           // Found live: this used to call fieldPrompt('items', ...)
           // unconditionally, which -- whenever there's no menu photo either
@@ -933,8 +913,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
           // button AND a full text list of the same items in the same
           // turn. The button already covers "here's what's available"
           // once it's actually sent; only fall back to fieldPrompt's own
-          // (photo, or as a last resort, text-list) behaviour when it
-          // didn't.
+          // text-list behaviour when it didn't.
           await send(catalogShown ? 'What would you like to order?' : await fieldPrompt('items', 'What would you like to order?', order.branch_id), 'items_menu_shown');
         }
         return;
@@ -1736,35 +1715,10 @@ async function resolveGeneralAvailability(customer, isGeneralAvailability, answe
   if (!shouldShowMenu) return answer;
 
   if (customer.channel === 'instagram') {
-    // Real menu photo(s), same source and ordering handleCollectInfo's own
-    // items-field fallback already uses (position asc), take priority over
-    // the plain-text listing -- Chidera's call, 2026-09-03: "instagram main
-    // fallback should be a photo of the menus first (there could be more
-    // than 1 photo)". imageSenderFor already resolves to
-    // sendInstagramDocument for this channel, so no new send plumbing
-    // needed, just reusing what's there.
-    if (process.env.PUBLIC_URL) {
-      const { rows: photos } = await pool.query('select id from menu_photo order by position');
-      if (photos.length) {
-        const sendImage = await imageSenderFor(customer);
-        let sentAny = false;
-        for (const photo of photos) {
-          try {
-            await sendImage(recipientFor(customer), `${process.env.PUBLIC_URL}/documents/menu-photo/${photo.id}`);
-            sentAny = true;
-          } catch (err) {
-            console.error('Failed to forward menu photo:', err.message);
-          }
-        }
-        if (sentAny) {
-          await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[${photos.length} menu photo(s) sent]`, trigger: 'menu_shown' });
-          return answer;
-        }
-      }
-    }
-    // No menu photos configured (or the send failed outright) -- fall back
-    // to a real text listing rather than nothing, same "something beats
-    // silence" reasoning as before this photo path existed.
+    // Was a menu-photo forward (Chidera's call, 2026-09-03) -- superseded
+    // 2026-09-10: "let bot no longer send menu photos itself". Straight to
+    // the real text listing now, same "something beats silence" reasoning
+    // as before the photo path existed.
     const menuText = await formatMenuAsText(branchId);
     if (!menuText) return answer;
     return answer ? `${answer}\n\n${menuText}` : menuText;
@@ -2923,12 +2877,26 @@ async function ensureMenuToken(customer) {
   return token;
 }
 
-async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null) {
+// business.cover_photo_data_url is a data: URI (Settings > Branding) --
+// Meta has to fetch a header image itself from a real URL, so
+// routes/product-photo.js's /photo/cover (not the data: URI directly) is
+// what actually makes a header image possible here. Chidera 2026-09-10,
+// after "why is there no cover photo" turned out to mean the photo
+// attached directly to the button message in the chat itself, not the web
+// menu page's own header: "the place where there is the button its
+// attached to a photo or image... just make it happen."
+async function businessCoverPhotoUrl() {
+  if (!process.env.PUBLIC_URL) return null;
+  const { rows } = await pool.query('select cover_photo_data_url is not null as has_cover from business limit 1');
+  return rows[0]?.has_cover ? `${process.env.PUBLIC_URL}/photo/cover` : null;
+}
+
+async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null, headerImageUrl = null) {
   if (!process.env.PUBLIC_URL) return false;
   const token = await ensureMenuToken(customer);
   const url = `${process.env.PUBLIC_URL}/m/${token}${category ? `?cat=${encodeURIComponent(category)}` : ''}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, url, credentials);
+  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, url, credentials, headerImageUrl);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'menu_shown', processed: true });
   return true;
 }

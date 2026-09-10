@@ -101,9 +101,9 @@ export async function sendWhatsAppButtons(to, bodyText, buttons, credentials, he
 // type) -- different from sendWhatsAppButtons' reply buttons, which only
 // ever send text back. This is how the dine-in menu page (routes/
 // dinein-menu.js) actually opens inside WhatsApp's in-app browser.
-export async function sendWhatsAppCtaUrl(to, bodyText, buttonText, url, credentials) {
+export async function sendWhatsAppCtaUrl(to, bodyText, buttonText, url, credentials, headerImageUrl) {
   if (process.env.EBOS_SANDBOX === '1') {
-    console.log(`\n[sandbox -> ${to}]: ${bodyText} [open: ${buttonText} -> ${url}]`);
+    console.log(`\n[sandbox -> ${to}]: ${bodyText} [open: ${buttonText} -> ${url}]${headerImageUrl ? ` [header: ${headerImageUrl}]` : ''}`);
     return { sandbox: true };
   }
   const phoneNumberId = credentials?.phoneNumberId || process.env.META_PHONE_NUMBER_ID;
@@ -111,12 +111,18 @@ export async function sendWhatsAppCtaUrl(to, bodyText, buttonText, url, credenti
   if (!phoneNumberId || !accessToken) {
     throw new Error('META_PHONE_NUMBER_ID / META_ACCESS_TOKEN not set -- WhatsApp is not connected yet.');
   }
+  // Only a real https URL works as a header image (Meta fetches it itself)
+  // -- same gate sendWhatsAppButtons' own header uses. routes/product-
+  // photo.js's /photo/cover is exactly that: a real URL instead of the
+  // data: URI business.cover_photo_data_url actually is.
+  const header = headerImageUrl?.startsWith('http') ? { type: 'image', image: { link: headerImageUrl } } : null;
   return postMessage(phoneNumberId, accessToken, {
     messaging_product: 'whatsapp',
     to,
     type: 'interactive',
     interactive: {
       type: 'cta_url',
+      ...(header ? { header } : {}),
       body: { text: bodyText.slice(0, 1024) },
       action: { name: 'cta_url', parameters: { display_text: buttonText.slice(0, 20), url } },
     },
