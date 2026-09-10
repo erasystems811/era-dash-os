@@ -24,15 +24,30 @@
 // scrolling into one inner div is what stops that chrome from animating,
 // and incidentally is also what makes the header and basket bar truly
 // static instead of just "sticky" (which still lets the page itself move).
-// Product data (incl. photos) is fetched from menuJsonPath after first
-// paint instead of embedded in the HTML -- embedding it made the initial
-// page weight jump with every photo a business adds, which is exactly the
-// "why is it loading first" lag being complained about here; fetching it
-// separately means the header/shell paints instantly and only the photos
-// a guest actually scrolls to ever decode (loading="lazy" below).
-export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoUrl, waNumber }) {
+//
+// Everything renders synchronously from data embedded right here in the
+// HTML (categories, the current grid, any pending order) -- no fetch, no
+// "Loading menu..." placeholder. Chidera 2026-09-10, after an earlier pass
+// fetched this after first paint to keep photos out of the HTML: "i want
+// it to open straight like an image already there". The two goals aren't
+// actually in tension: `products` below carries hasPhoto (a boolean), not
+// the photo itself -- an item's actual picture is a real <img src> to
+// routes/product-photo.js, a genuinely separate, genuinely deferrable
+// request (`loading="lazy"`), unlike a data: URI, which has no separate
+// request to defer and would have downloaded as part of this same HTML
+// regardless of the attribute. So the page paints instantly AND stays
+// light no matter how many photos a business has.
+export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoUrl, waNumber, products, pendingOrder }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
-  const menuJsonPath = reviewPath.replace(/\/review$/, '/menu.json');
+  const lightProducts = products.map((p) => ({
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    price: p.price,
+    category: p.category,
+    availability: p.availability,
+    hasPhoto: Boolean(p.image_data_url),
+  }));
   const headerStyle = coverPhotoUrl
     ? ` style="background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('${coverPhotoUrl.replace(/'/g, '%27')}');background-size:cover;background-position:center"`
     : '';
@@ -77,8 +92,6 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoU
   .qty .qn{min-width:22px;text-align:center;font-size:13px;font-weight:600;color:var(--ink)}
   .bask{flex:0 0 auto;background:var(--ink);color:#fff;padding:13px 15px;display:flex;align-items:center;gap:10px;font-size:13.5px}
   .bask .go{margin-left:auto;background:var(--wa);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:13px;padding:9px 16px;border-radius:999px;touch-action:manipulation}
-  .err{padding:12px 16px;background:#fdecea;color:#611}
-  .loading{padding:40px 16px;text-align:center;color:var(--mid);font-size:13px}
   .pending{margin:12px 14px 0;padding:10px 12px;background:#FBF3E7;border:1px solid #EAD9B8;border-radius:10px;font-size:12.5px;color:var(--ink);line-height:1.4}
   .pending b{font-weight:600}
 </style></head>
@@ -88,16 +101,25 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoU
   <div id="cats" class="cats"></div>
   <div id="pending" class="pending" hidden></div>
   <div id="sec" class="sec"></div>
-  <div id="grid" class="grid"><div class="loading">Loading menu&hellip;</div></div>
+  <div id="grid" class="grid"></div>
 </div>
 <div class="bask"><span id="bc">Nothing added yet</span><button class="go" id="go">Review order</button></div>
 <script>
-const MENU_JSON_PATH = ${JSON.stringify(menuJsonPath)};
+const PRODUCTS = ${JSON.stringify(lightProducts)};
+const PENDING_ORDER = ${JSON.stringify(pendingOrder)};
 const REVIEW_PATH = ${JSON.stringify(reviewPath)};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
-let PRODUCTS = [];
 let basket = {};
-let cur = 'Menu';
+if (PENDING_ORDER && PENDING_ORDER.items) {
+  // A guest reopening this link may already have an order sitting with us
+  // -- pre-load it into the basket (steppers and all) instead of a page
+  // with no memory of it, so adjusting or removing something already
+  // pending is as direct as adding something new. Chidera 2026-09-10:
+  // "how are they aware that the first one is still pending... how can
+  // they remove as well?"
+  PENDING_ORDER.items.forEach(function (i) { basket[i.productId] = i.quantity; });
+}
+let cur = (PRODUCTS[0] && (PRODUCTS[0].category || 'Menu')) || 'Menu';
 
 function naira(n) { return 'NGN ' + Number(n).toLocaleString(); }
 
@@ -126,8 +148,8 @@ function render() {
   const list = PRODUCTS.filter(p => (p.category || 'Menu') === cur);
   document.getElementById('sec').innerHTML = '<h2>' + cur + '</h2>';
   document.getElementById('grid').innerHTML = list.map(p => {
-    const shot = p.image_data_url
-      ? '<div class="shot"><img loading="lazy" decoding="async" src="' + p.image_data_url + '" alt=""></div>'
+    const shot = p.hasPhoto
+      ? '<div class="shot"><img loading="lazy" decoding="async" src="/photo/' + p.id + '" alt=""></div>'
       : '<div class="shot"><span>' + p.name.toUpperCase() + '</span></div>';
     const qty = basket[p.id] || 0;
     const control = !p.availability
@@ -167,40 +189,15 @@ document.getElementById('go').onclick = async () => {
   if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
 };
 
-async function boot() {
-  let pendingOrder = null;
-  try {
-    const res = await fetch(MENU_JSON_PATH);
-    const data = await res.json();
-    PRODUCTS = data.products || [];
-    pendingOrder = data.pendingOrder || null;
-  } catch (e) {
-    document.getElementById('grid').innerHTML = '<p class="err">Could not load the menu. <a href="#" id="retry">Try again</a></p>';
-    var retry = document.getElementById('retry');
-    if (retry) retry.onclick = function (ev) { ev.preventDefault(); boot(); };
-    return;
-  }
-
-  // A guest reopening this link may already have an order sitting with us
-  // -- show it pre-loaded into the basket (steppers and all) instead of a
-  // page with no memory of it, so adjusting or removing something already
-  // pending is as direct as adding something new. Chidera 2026-09-10:
-  // "how are they aware that the first one is still pending... how can
-  // they remove as well?"
-  if (pendingOrder && pendingOrder.items && pendingOrder.items.length) {
-    pendingOrder.items.forEach(function (i) { basket[i.productId] = i.quantity; });
-    const pendingEl = document.getElementById('pending');
-    const count = pendingOrder.items.reduce(function (s, i) { return s + i.quantity; }, 0);
-    pendingEl.innerHTML = 'You already have <b>' + count + ' item' + (count > 1 ? 's' : '') + '</b> pending (' + naira(pendingOrder.total) + ') &mdash; shown below. Adjust or add more, then tap Review order.';
-    pendingEl.hidden = false;
-  }
-
-  cur = (PRODUCTS[0] && (PRODUCTS[0].category || 'Menu')) || 'Menu';
-  renderCats();
-  render();
-  updateBasket();
+if (PENDING_ORDER && PENDING_ORDER.items && PENDING_ORDER.items.length) {
+  const pendingEl = document.getElementById('pending');
+  const count = PENDING_ORDER.items.reduce(function (s, i) { return s + i.quantity; }, 0);
+  pendingEl.innerHTML = 'You already have <b>' + count + ' item' + (count > 1 ? 's' : '') + '</b> pending (' + naira(PENDING_ORDER.total) + ') &mdash; shown below. Adjust or add more, then tap Review order.';
+  pendingEl.hidden = false;
 }
-boot();
+renderCats();
+render();
+updateBasket();
 </script>
 </body></html>`;
 }

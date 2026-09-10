@@ -17,6 +17,7 @@ import { router as documentRoutes } from './routes/documents.js';
 import { router as trackingRoutes } from './routes/tracking.js';
 import { router as dineinMenuRoutes } from './routes/dinein-menu.js';
 import { router as menuPageRoutes } from './routes/menu-page.js';
+import { router as productPhotoRoutes } from './routes/product-photo.js';
 import { router as riderApiRoutes } from './routes/rider.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
@@ -55,6 +56,9 @@ app.use('/t', dineinMenuRoutes);
 // Public web menu page for regular (non-dine-in) ordering -- same page,
 // resolved by a per-customer token instead of a table.
 app.use('/m', menuPageRoutes);
+// A product's photo, served as a real image response instead of the raw
+// data: URI -- see routes/product-photo.js for why.
+app.use('/photo', productPhotoRoutes);
 
 // Scoped to /api, not global -- the rider session below needs its own,
 // completely separate cookie-session instance on its own path (/rider), and
