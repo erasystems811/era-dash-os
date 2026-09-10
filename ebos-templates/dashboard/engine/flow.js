@@ -670,59 +670,35 @@ async function findSpecialsCategory(branchId) {
 // way a table's QR code does for dine-in, with no AI classifyIntent call
 // needed to work out they wanted to order. WhatsApp only -- Instagram/voice
 // have no reply-button equivalent, so they keep the plain-text greeting.
+//
+// One tap, not two -- Chidera 2026-09-10, after the two-reply-button
+// version (tap "See menu" -> bot replies -> tap AGAIN to actually open
+// it): "i want straight to the see menu button no two step, see menue
+// shows menu web instantly and special offers go straight to the special
+// offers tab of the menu." Meta's cta_url message type (the only one that
+// opens a link on a single tap) allows exactly one button per message, so
+// two direct-opening buttons means two separate messages sent back to
+// back, not one message with two buttons -- each still opens on the very
+// first tap, which is the part that actually matters here.
 async function handleGreeting(customer, text) {
   const message = await askText(GREETING_SYSTEM, text);
   if (customer.channel !== 'whatsapp') {
     await reply(customer, message, 'greeting');
     return;
   }
-  // Two buttons only when there's a real second thing to offer -- a
-  // business with nothing in a specials-ish category gets exactly the
-  // same single "View menu" button as before, not an empty second option.
-  // Chidera 2026-09-10: "that first message... will have two buttons, the
-  // see menu and special offers[,] but see menu should still have a
-  // special offer category" -- the general menu link always shows every
-  // category including this one; the second button just jumps straight to
-  // it for someone who came here specifically for the deal.
-  const specialsCategory = await findSpecialsCategory(customer.branch_id);
   const headerImageUrl = await businessCoverPhotoUrl();
+  const shown = await sendWebMenuLink(customer, message, 'See menu', null, headerImageUrl);
+  if (!shown) {
+    await reply(customer, message, 'greeting');
+    return;
+  }
+  // A second, separate message only when there's a real second thing to
+  // offer -- a business with nothing in a specials-ish category gets
+  // exactly the one "See menu" message, not an empty second button.
+  const specialsCategory = await findSpecialsCategory(customer.branch_id);
   if (specialsCategory) {
-    const credentials = await getWhatsAppCredentials(customer.branch_id);
-    const buttons = [
-      { id: 'menu_see', title: 'See menu' },
-      { id: 'menu_specials', title: 'Special offers' },
-    ];
-    await sendWhatsAppButtons(recipientFor(customer), message, buttons, credentials, headerImageUrl);
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: message, trigger: 'greeting' });
-    return;
+    await sendWebMenuLink(customer, "Today's specials:", 'Special offers', specialsCategory);
   }
-  // Straight to the real web menu -- Chidera's call, 2026-09-10: "no need
-  // for place an order just put view menu button straight". One tap
-  // (View menu) instead of two (Place an order, then a second message
-  // with the actual link) -- sendWebMenuLink handles PUBLIC_URL not being
-  // set by falling back to plain text on its own.
-  const shown = await sendWebMenuLink(customer, message, 'View menu', null, headerImageUrl);
-  if (!shown) await reply(customer, message, 'greeting');
-}
-
-// The two greeting buttons above, tapped -- each just opens the same web
-// menu page, "Special offers" pre-scrolled to that category via ?cat=
-// (menu-page-template.js reads it as the starting tab instead of always
-// defaulting to the first one) rather than a separate page or a second
-// concept to keep in sync with the real catalogue.
-export async function handleMenuChoiceTap({ phoneNumber, channelId, buttonId, channel = 'whatsapp', branchId }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  const label = buttonId === 'menu_specials' ? 'Special offers' : 'See menu';
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${label}]`, processed: true });
-
-  if (buttonId === 'menu_specials') {
-    const specialsCategory = await findSpecialsCategory(customer.branch_id);
-    const shown = await sendWebMenuLink(customer, "Here's today's specials.", 'See specials', specialsCategory);
-    if (!shown) await reply(customer, "Here's today's specials.", 'menu_shown');
-    return;
-  }
-  const shown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.");
-  if (!shown) await reply(customer, 'What would you like to order?', 'items_menu_shown');
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,

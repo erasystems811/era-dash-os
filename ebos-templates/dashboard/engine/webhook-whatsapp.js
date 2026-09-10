@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleMenuChoiceTap, handleUpsellListTap, retryFailedSendAsTemplate } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, retryFailedSendAsTemplate } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -151,10 +151,6 @@ router.post('/', async (req, res) => {
               // Sent directly, not through the AI confirm pipeline -- see
               // handleOrderConfirmNoTap's own comment for why.
               await handleOrderConfirmNoTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
-            } else if (buttonId === 'menu_see' || buttonId === 'menu_specials') {
-              // The greeting's "See menu" / "Special offers" buttons (see
-              // flow.js's handleGreeting).
-              await handleMenuChoiceTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
             }
             continue;
           }
