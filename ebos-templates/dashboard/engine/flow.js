@@ -80,10 +80,22 @@ function displayNameFor(customer) {
 // message. Whoever spoke most recently (customer, bot, or staff) is what
 // "last message" means here, matching what the conversations list actually
 // shows.
-async function logMessage({ customerId, direction, channel, sender, body, trigger, platformMessageId }) {
+// `processed: true` marks an INBOUND log row as already handled at insert
+// time -- for a button/list tap, handled synchronously and directly, never
+// through processPendingMessages (see scheduleDebouncedProcessing/
+// handlePendingBatch). Without this, that row sits with processed_at still
+// null forever, and processPendingMessages' own "every unprocessed inbound
+// message" batch query (it only ever sets processed_at itself, at the end
+// of a normal debounce cycle) sweeps it into the NEXT real text message's
+// batch, silently prepending a stale "[tapped: ...]" marker onto whatever
+// the customer types next. Found live, 2026-09-10, testing dine-in
+// feedback: a "not good" tap's own log line ended up prepended to the
+// customer's real follow-up comment.
+async function logMessage({ customerId, direction, channel, sender, body, trigger, platformMessageId, processed }) {
   await pool.query(
-    `insert into message (customer_id, direction, channel, sender, body, trigger, platform_message_id) values ($1, $2, $3, $4, $5, $6, $7)`,
-    [customerId, direction, channel, sender, body, trigger || null, platformMessageId || null]
+    `insert into message (customer_id, direction, channel, sender, body, trigger, platform_message_id, processed_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [customerId, direction, channel, sender, body, trigger || null, platformMessageId || null, processed ? new Date() : null]
   );
   await pool.query(`update customers set last_message = $1, last_message_at = now() where id = $2`, [body, customerId]);
 }
@@ -2410,7 +2422,7 @@ async function currentDineinSession(customer) {
 
 export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${buttonId}]` });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${buttonId}]` , processed: true });
 
   // Feedback (Stage 7) happens on a CLOSED table_session -- checked first,
   // before the open-session lookup below (which would otherwise reject it
@@ -2489,7 +2501,8 @@ export async function sweepDineinFeedback() {
 
 async function handleDineinFeedbackTap(customer, buttonId) {
   const { rows } = await pool.query(
-    `select * from table_session where customer_id = $1 and feedback_state = 'sent' order by closed_at desc limit 1`,
+    `select ts.*, rt.label as table_label from table_session ts join restaurant_table rt on rt.id = ts.table_id
+     where ts.customer_id = $1 and ts.feedback_state = 'sent' order by ts.closed_at desc limit 1`,
     [customer.id]
   );
   const session = rows[0];
@@ -2695,7 +2708,7 @@ async function handlePendingBatch(customer, text) {
 // still needs classifyIntent to tell an order-browse from anything else.
 export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' , processed: true });
   // sendMenuList calls the real Graph API directly, not gated by
   // EBOS_SANDBOX itself (see menu-message.js) -- same guard
   // handleCollectInfo's own catalogShown path already uses, so a sandbox
@@ -2710,7 +2723,7 @@ export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'w
 
 export async function handleMenuItemTap({ phoneNumber, channelId, product, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${product.name}]` });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${product.name}]` , processed: true });
 
   let order = await getOpenOrder(customer.id);
   const item = { productId: product.id, name: product.name, price: product.price, quantity: 1 };
@@ -2788,7 +2801,7 @@ export async function handleVoiceTurn({ callerNumber, branchId, spokenText, isFi
   if (isFirstTurn) {
     await pool.query('update customers set last_voice_call_at = now() where id = $1', [customer.id]);
   }
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'voice', sender: 'customer', body: spokenText });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'voice', sender: 'customer', body: spokenText , processed: true });
 
   voiceReplyBuffers.set(customer.id, []);
   await handlePendingBatch(customer, spokenText);
@@ -2891,7 +2904,7 @@ export async function handleClosedHoursCall({ callerNumber, branchId, opensAt })
 // channel below rather than two separate function signatures.
 export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[${kind}]` });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[${kind}]` , processed: true });
 
   // Same principle as handlePendingBatch -- a pending handover alone
   // doesn't mean a human is actually on this thread yet, only a real
