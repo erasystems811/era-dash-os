@@ -1,17 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import { compressImageToDataUrl } from '../imageUpload.js';
 
 const EMPTY = { name: '', description: '', price: '', availability_type: 'stock', duration_minutes: '', category: '', image_data_url: '' };
 const UNCATEGORIZED = 'Uncategorized';
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
 
 // Groups by category (a bulk import's own section headings, or whatever
 // staff typed manually) so a large catalogue reads as the sections it
@@ -233,7 +225,10 @@ export default function Catalogue() {
     const file = e.target.files[0];
     if (!file) return;
     setter((f) => ({ ...f, image_data_url: '' }));
-    const dataUrl = await readFileAsDataUrl(file);
+    // Compressed client-side (same fix as Settings.jsx's logo/cover photo)
+    // -- a raw phone photo here hit the exact same "too large" failure,
+    // just for a product photo instead of the business's own branding.
+    const dataUrl = await compressImageToDataUrl(file);
     setter((f) => ({ ...f, image_data_url: dataUrl }));
   }
 

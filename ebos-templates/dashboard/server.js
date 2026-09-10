@@ -126,6 +126,15 @@ app.get('*', (req, res) => {
 app.use((err, req, res, next) => {
   console.error('Unhandled route error:', err);
   if (res.headersSent) return next(err);
+  // Client-side compression (imageUpload.js) is the real fix for this --
+  // this is just defense in depth so a payload that somehow still gets
+  // through too large fails with a message that actually explains why,
+  // instead of the generic one below. Found live, 2026-09-10: a raw,
+  // uncompressed cover photo upload failed as an opaque 500, which looked
+  // exactly like the upload had silently done nothing at all.
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'That file is too large. Please try a smaller photo.' });
+  }
   res.status(500).json({ error: 'Something went wrong. Please try again.' });
 });
 

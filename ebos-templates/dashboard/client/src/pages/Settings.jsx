@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
+import { compressImageToDataUrl } from '../imageUpload.js';
 
 export default function Settings() {
   const { staff } = useStaff();
@@ -47,20 +48,27 @@ export default function Settings() {
     setBusiness((b) => ({ ...b, [key]: value }));
   }
 
-  function onLogoChange(e) {
+  async function onLogoChange(e) {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => set('logo_data_url', reader.result);
-    reader.readAsDataURL(file);
+    try {
+      set('logo_data_url', await compressImageToDataUrl(file));
+    } catch (err) {
+      setSaveError(err.message);
+    }
   }
 
-  function onCoverPhotoChange(e) {
+  async function onCoverPhotoChange(e) {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => set('cover_photo_data_url', reader.result);
-    reader.readAsDataURL(file);
+    try {
+      // maxDimension 1600 is already comfortably wider than the menu
+      // header ever renders at, and well under the size that made a raw
+      // upload here fail (~20MB) in the first place.
+      set('cover_photo_data_url', await compressImageToDataUrl(file));
+    } catch (err) {
+      setSaveError(err.message);
+    }
   }
 
   function setWa(key, value) {
