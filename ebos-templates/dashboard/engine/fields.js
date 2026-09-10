@@ -74,7 +74,7 @@ export async function getSharingMode() {
 // because nobody's gone through and split up 300 items yet. Assigning an
 // item to one branch is opt-in, from the Catalogue page.
 export async function resolveMenu(branchId) {
-  const base = `select id, name, description, price, category from product where availability = true and import_status is distinct from 'new'`;
+  const base = `select id, name, description, price, category, is_combo from product where availability = true and import_status is distinct from 'new'`;
   const sharingMode = branchId ? await getSharingMode() : 'merged';
   if (sharingMode === 'merged') {
     const { rows } = await pool.query(`${base} order by category nulls last, name`);

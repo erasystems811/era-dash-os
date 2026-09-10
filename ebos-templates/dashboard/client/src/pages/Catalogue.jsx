@@ -71,6 +71,14 @@ export default function Catalogue() {
   const [questions, setQuestions] = useState([]);
   const [newQuestion, setNewQuestion] = useState('');
   const [questionError, setQuestionError] = useState(null);
+  // A combo/special offer is created here, not "marked" onto an ordinary
+  // item -- Chidera 2026-09-10: "a special offer is a combo so it should
+  // be created not marked... with form style adding the items in the deal
+  // and how much and name of deal." Its own name, its own bundled price,
+  // and a real list of what's included, picked from the existing
+  // catalogue -- posted to POST /catalogue/combo (routes/api.js).
+  const [comboForm, setComboForm] = useState({ name: '', price: '', items: [{ productId: '', quantity: 1 }] });
+  const [comboError, setComboError] = useState(null);
 
   function load() {
     api.get('/catalogue').then(setItems);
@@ -100,6 +108,37 @@ export default function Catalogue() {
       load();
     } catch (err) {
       setError(err.message);
+    }
+  }
+
+  function setComboItemRow(idx, patch) {
+    setComboForm((f) => ({ ...f, items: f.items.map((row, i) => (i === idx ? { ...row, ...patch } : row)) }));
+  }
+  function addComboItemRow() {
+    setComboForm((f) => ({ ...f, items: [...f.items, { productId: '', quantity: 1 }] }));
+  }
+  function removeComboItemRow(idx) {
+    setComboForm((f) => ({ ...f, items: f.items.filter((_, i) => i !== idx) }));
+  }
+
+  async function addCombo(e) {
+    e.preventDefault();
+    setComboError(null);
+    const usableItems = comboForm.items.filter((row) => row.productId);
+    if (!usableItems.length) {
+      setComboError('Pick at least one item for the deal.');
+      return;
+    }
+    try {
+      await api.post('/catalogue/combo', {
+        name: comboForm.name,
+        price: comboForm.price,
+        items: usableItems.map((row) => ({ productId: row.productId, quantity: Number(row.quantity) || 1 })),
+      });
+      setComboForm({ name: '', price: '', items: [{ productId: '', quantity: 1 }] });
+      load();
+    } catch (err) {
+      setComboError(err.message);
     }
   }
 
@@ -523,18 +562,6 @@ export default function Catalogue() {
               <div className="field">
                 <label>Category</label>
                 <input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. Drinks" />
-                {/* A combo deal or special offer is just an item under this
-                    category -- the web menu already gives its own category
-                    its own tab, and the WhatsApp greeting offers a
-                    dedicated "Special offers" button whenever one exists
-                    (engine/flow.js's findSpecialsCategory). This is only
-                    here so staff don't have to remember the exact wording
-                    that makes that matching pick it up. */}
-                {form.category !== 'Special Offers' && (
-                  <button type="button" className="link-button" style={{ marginTop: 4, fontSize: 12 }} onClick={() => setForm({ ...form, category: 'Special Offers' })}>
-                    This is a special offer / combo deal
-                  </button>
-                )}
               </div>
             </div>
             <div className="form-row">
@@ -561,6 +588,57 @@ export default function Catalogue() {
               )}
             </div>
             <button type="submit">Add item</button>
+          </form>
+        </div>
+      )}
+
+      {editable && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Add special offer / combo</h3>
+          <p className="subtitle">A deal made of real menu items, its own name, its own bundled price.</p>
+          {comboError && <div className="error-banner">{comboError}</div>}
+          <form onSubmit={addCombo}>
+            <div className="form-row">
+              <div className="field">
+                <label>Deal name</label>
+                <input value={comboForm.name} onChange={(e) => setComboForm({ ...comboForm, name: e.target.value })} placeholder="e.g. Family Feast" required />
+              </div>
+              <div className="field">
+                <label>Deal price</label>
+                <input type="number" step="0.01" min="0" value={comboForm.price} onChange={(e) => setComboForm({ ...comboForm, price: e.target.value })} required />
+              </div>
+            </div>
+            <label style={{ display: 'block', marginBottom: 6, fontSize: 13, fontWeight: 600 }}>Items in this deal</label>
+            {comboForm.items.map((row, idx) => (
+              <div className="form-row" key={idx} style={{ alignItems: 'center' }}>
+                <div className="field" style={{ flex: 2 }}>
+                  <select value={row.productId} onChange={(e) => setComboItemRow(idx, { productId: e.target.value })} required>
+                    <option value="">Select an item...</option>
+                    {(items || [])
+                      .filter((p) => !p.is_combo)
+                      .map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div className="field" style={{ maxWidth: 90 }}>
+                  <input type="number" min="1" value={row.quantity} onChange={(e) => setComboItemRow(idx, { quantity: e.target.value })} placeholder="Qty" />
+                </div>
+                {comboForm.items.length > 1 && (
+                  <button type="button" className="secondary" onClick={() => removeComboItemRow(idx)}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            ))}
+            <button type="button" className="link-button" style={{ marginBottom: 12 }} onClick={addComboItemRow}>
+              + Add another item
+            </button>
+            <div>
+              <button type="submit">Create special offer</button>
+            </div>
           </form>
         </div>
       )}

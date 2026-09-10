@@ -782,7 +782,13 @@ router.get('/bookings', async (req, res) => {
 // --- Catalogue --------------------------------------------------------
 
 router.get('/catalogue', async (req, res) => {
-  const { rows } = await pool.query('select * from product order by created_at desc');
+  const { rows } = await pool.query(
+    `select p.*,
+       (select coalesce(json_agg(json_build_object('componentProductId', pci.component_product_id, 'name', cp.name, 'quantity', pci.quantity)), '[]')
+        from product_combo_item pci join product cp on cp.id = pci.component_product_id where pci.product_id = p.id) as combo_items
+     from product p
+     order by p.created_at desc`
+  );
   res.json(rows);
 });
 
@@ -919,6 +925,49 @@ router.post('/catalogue/import/:id/reject', requireStaffApi, async (req, res) =>
   res.json(updated[0]);
 });
 
+// A combo/special offer -- its own name, its own bundled price, a real
+// list of what's inside -- created here as its own thing, not a flag
+// "marked" onto an ordinary item. Chidera 2026-09-10: "a special offer is
+// a combo so it should be created not marked... with form style adding
+// the items in the deal and how much and name of deal." Defined before
+// /catalogue/:id below for the same reason bulk-import is -- Express would
+// otherwise try to match "combo" as an :id and fail the uuid cast.
+router.post('/catalogue/combo', requireStaffApi, async (req, res) => {
+  const f = req.body;
+  const items = Array.isArray(f.items) ? f.items : [];
+  if (!f.name || !f.price) return res.status(400).json({ error: 'Name and price are required.' });
+  if (!items.length) return res.status(400).json({ error: 'A combo needs at least one item in it.' });
+
+  const productIds = items.map((i) => i.productId);
+  const { rows: realProducts } = await pool.query('select id, name, is_combo from product where id = any($1::uuid[])', [productIds]);
+  const byId = new Map(realProducts.map((p) => [p.id, p]));
+  for (const item of items) {
+    const p = byId.get(item.productId);
+    if (!p) return res.status(400).json({ error: 'One of the items in this deal no longer exists on the menu.' });
+    if (p.is_combo) return res.status(400).json({ error: "A combo can only include real menu items, not another combo." });
+  }
+
+  // Stored straight into description -- every existing customer-facing
+  // read (menuForBranch, resolveMenu, receipts, the upsell offer) already
+  // shows description with no change needed, rather than every one of
+  // them growing its own product_combo_item join just for this.
+  const description = `Includes: ${items.map((item) => `${item.quantity || 1}x ${byId.get(item.productId).name}`).join(', ')}`;
+
+  const { rows: productRows } = await pool.query(
+    `insert into product (name, description, price, category, is_combo) values ($1, $2, $3, 'Special Offers', true) returning *`,
+    [f.name, description, f.price]
+  );
+  const combo = productRows[0];
+  for (const item of items) {
+    await pool.query('insert into product_combo_item (product_id, component_product_id, quantity) values ($1, $2, $3)', [combo.id, item.productId, item.quantity || 1]);
+  }
+  syncBestEffort();
+  res.status(201).json({
+    ...combo,
+    combo_items: items.map((item) => ({ componentProductId: item.productId, name: byId.get(item.productId).name, quantity: item.quantity || 1 })),
+  });
+});
+
 router.post('/catalogue/:id', requireStaffApi, async (req, res) => {
   const f = req.body;
   const { rows } = await pool.query(
@@ -936,7 +985,16 @@ router.post('/catalogue/:id/toggle', requireStaffApi, async (req, res) => {
 });
 
 router.delete('/catalogue/:id', requireStaffApi, async (req, res) => {
-  await pool.query('delete from product where id = $1', [req.params.id]);
+  try {
+    await pool.query('delete from product where id = $1', [req.params.id]);
+  } catch (err) {
+    // component_product_id on product_combo_item has no ON DELETE CASCADE
+    // on purpose (see schema.sql) -- deleting an item that's still inside
+    // a combo should fail loudly, not silently leave that combo claiming
+    // to include something that no longer exists.
+    if (err.code === '23503') return res.status(409).json({ error: 'This item is part of a special offer/combo -- remove it from that deal first, or delete the deal instead.' });
+    throw err;
+  }
   deleteBestEffort(req.params.id);
   res.json({ ok: true });
 });

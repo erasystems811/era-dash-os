@@ -338,8 +338,34 @@ create table if not exists product (
   -- when sharing_mode = 'independent' -- see engine's menu resolver
   -- (resolveMenu), the one place this table is queried from a feature.
   branch_id uuid references branch(id),
+  -- A combo/special offer (its own name, its own bundled price) is a real
+  -- product like any other -- orders, receipts, the upsell/menu-page
+  -- machinery all already work on `product` and don't need to know it's a
+  -- bundle underneath. This boolean is the one deterministic signal for
+  -- "does this business have a real special offer right now" (engine/
+  -- flow.js's findSpecialsCategory) -- Chidera 2026-09-10: "a special
+  -- offer is a combo so it should be created not marked... with form
+  -- style adding the items in the deal and how much and name of deal."
+  -- What's actually IN the combo lives in product_combo_item below.
+  is_combo boolean not null default false,
   created_at timestamptz not null default now()
 );
+
+-- What a combo (product.is_combo = true) actually contains -- purely
+-- informational (shown on the menu page's item description, e.g. "2x
+-- Jollof Rice, 1x Chicken"), not exploded into separate order_item rows
+-- when ordered: a combo is ordered and charged as the one product it is,
+-- same as anything else. component_product_id has no ON DELETE CASCADE on
+-- purpose -- deleting a real menu item out from under a combo that still
+-- references it should fail loudly (23503), not silently corrupt what the
+-- combo claims to include.
+create table if not exists product_combo_item (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid not null references product(id) on delete cascade,
+  component_product_id uuid not null references product(id),
+  quantity integer not null default 1
+);
+create index if not exists product_combo_item_product_idx on product_combo_item (product_id);
 
 -- The business's own menu photo(s), forwarded to customers as-is instead of
 -- a text list -- once a catalogue is a few hundred items, "We have: X, Y,

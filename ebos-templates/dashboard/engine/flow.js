@@ -657,24 +657,19 @@ async function answerFromKnowledgeBase(message) {
 // be corrected by the real (grounded) reply a moment later.
 const GREETING_SYSTEM = `You open a WhatsApp conversation for a business, replying to a customer's first message. Match what they actually said -- if they said "good evening", greet them back for the evening; if they used no greeting at all, don't force one. Warm and professional customer service, not a casual friend: no slang, keep emoji minimal or none. Use commas or periods for pauses, never a dash of any kind (no em dash, en dash, or hyphen used as punctuation). End by inviting them to share what they'd like to order. Do not list examples of what you can help with or describe your own capabilities -- a staff member doesn't announce their job description, just ask plainly. One or two short sentences, plain text, no markdown.\n\nIf the message also asks a real question (menu, prices, hours, anything factual) alongside the greeting, do NOT answer it here -- you have no real data to answer from, and guessing is never acceptable. Just greet and invite them to order; the real question gets answered separately, for real, right after.`;
 
-// Special offers/combo deals are just an ordinary category, same as
-// "Drinks" or "Mains" -- Catalogue.jsx already groups by whatever's typed
-// in, and the web menu already tabs by it too, so nothing about storage
-// or display needed inventing. What's new is noticing one exists at all
-// (so the greeting knows to offer it) and finding it by MEANING rather
-// than an exact string, since one business might type "Special Offers",
-// another "Combo Deals" -- same keyword-matching idiom as UPSELL_GROUPS.
-// Chidera 2026-09-10: "restaurants have combo deals or special offers,
-// they should be able to write it in catalogue in a different section."
-const SPECIALS_KEYWORDS = ['special', 'offer', 'combo', 'deal'];
-function isSpecialsCategory(category) {
-  if (!category) return false;
-  const lower = category.toLowerCase();
-  return SPECIALS_KEYWORDS.some((k) => lower.includes(k));
-}
+// A combo/special offer is a real product (product.is_combo) created
+// through its own form (routes/api.js's POST /catalogue/combo) -- Chidera
+// 2026-09-10: "a special offer is a combo so it should be created not
+// marked... with form style adding the items in the deal and how much and
+// name of deal." is_combo is the one deterministic signal this checks;
+// every combo the form creates is always filed under this exact category,
+// which is what lets the general "See menu" link's category tabs and the
+// web menu's ?cat= filtering (both keyed on the string, not the flag) find
+// it without their own is_combo-aware logic.
+const SPECIALS_CATEGORY = 'Special Offers';
 async function findSpecialsCategory(branchId) {
   const menu = await resolveMenu(branchId);
-  return menu.find((p) => isSpecialsCategory(p.category))?.category || null;
+  return menu.some((p) => p.is_combo) ? SPECIALS_CATEGORY : null;
 }
 
 // A "Place an order" button on the very first greeting -- Chidera's call,
