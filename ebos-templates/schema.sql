@@ -750,8 +750,14 @@ create table if not exists message (
   -- instead of inferring "already answered" from timestamps, which had a
   -- real race window a message could fall through and get silently dropped.
   processed_at timestamptz,
-  -- Only set for an outbound Instagram send (Meta's message_id from the
-  -- send response). Instagram mirrors every business-sent message back
+  -- Set for an outbound Instagram send (Meta's message_id from the send
+  -- response) AND, since 2026-09-02, an outbound WhatsApp send (Meta's
+  -- wamid) -- the WhatsApp case exists so webhook-whatsapp.js's status
+  -- handler can correlate an async delivery failure back to the row that
+  -- produced it (see 0024_message_delivery_status.sql for why that
+  -- matters: a plain-text send outside the 24h window can be accepted
+  -- synchronously and only fail afterward, via that webhook). Instagram's
+  -- own use predates this: it mirrors every business-sent message back
   -- through the webhook as an echo (is_echo: true) with no way to tell
   -- "the bot's own API send" apart from "a human reply typed in the
   -- Instagram app" -- unlike WhatsApp, which has a wholly separate
@@ -762,6 +768,15 @@ create table if not exists message (
   -- that drives recordAppReplyInstagram the same way smb_message_echoes
   -- drives recordAppReply for WhatsApp.
   platform_message_id text,
+  -- Only meaningful when platform_message_id is set. Null until a status
+  -- webhook actually reports something -- most sends never get one at all
+  -- in practice (Meta doesn't guarantee delivery/read receipts), so null
+  -- means "unknown", not "failed". 'retried' means Meta reported this
+  -- specific send failed and the business_outreach template retry (see
+  -- flow.js's retryFailedSendAsTemplate) already went out for it -- kept
+  -- distinct from 'failed' so the UI can tell "gave up" from "fixed itself
+  -- automatically" at a glance.
+  delivery_status text check (delivery_status in ('sent', 'delivered', 'read', 'failed', 'retried')),
   created_at timestamptz not null default now()
 );
 create index if not exists message_platform_message_id_idx on message (platform_message_id) where platform_message_id is not null;

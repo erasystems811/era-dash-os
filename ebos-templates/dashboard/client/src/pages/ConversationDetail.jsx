@@ -93,25 +93,31 @@ export default function ConversationDetail() {
 
       <div className="card">
         <div className="thread">
-          {messages.map((m) => (
-            <div key={m.id} className={`bubble ${m.sender === 'customer' ? 'customer' : m.sender === 'bot' ? 'bot' : 'staff'}`}>
-              {m.body}
-              <div className="meta">
-                {m.sender} &middot; {new Date(m.created_at).toLocaleString()}
-                {m.delivery_status === 'failed' && (
-                  <span className="badge" style={{ marginLeft: 6, background: '#f8d7da', color: '#842029' }}>
-                    Didn't deliver
-                  </span>
-                )}
-                {m.delivery_status === 'retried' && (
-                  <span className="badge" style={{ marginLeft: 6 }} title="This failed to deliver, then went out again automatically">
-                    Resent
-                  </span>
-                )}
+          {/* A message that failed and got auto-retried (engine/flow.js's
+              retryFailedSendAsTemplate) never actually reached the customer
+              -- showing it as its own bubble read as "sent twice" even
+              though only the retry (delivery_status 'retried', kept below)
+              really went out. Found live, 2026-09-03: Chidera saw "hello"
+              twice in a row here and asked why -- the customer's phone
+              never had two, only this thread did. The retry bubble's own
+              "Resent" badge is the only visible trace now, not a second
+              bubble with identical text. */}
+          {messages
+            .filter((m) => m.delivery_status !== 'failed')
+            .map((m) => (
+              <div key={m.id} className={`bubble ${m.sender === 'customer' ? 'customer' : m.sender === 'bot' ? 'bot' : 'staff'}`}>
+                {m.body}
+                <div className="meta">
+                  {m.sender} &middot; {new Date(m.created_at).toLocaleString()}
+                  {m.delivery_status === 'retried' && (
+                    <span className="badge" style={{ marginLeft: 6 }} title="This didn't deliver the first time, so it was automatically sent again">
+                      Resent
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-          {!messages.length && <div className="empty-state">No messages yet.</div>}
+            ))}
+          {!messages.filter((m) => m.delivery_status !== 'failed').length && <div className="empty-state">No messages yet.</div>}
           <div ref={bottomRef} />
         </div>
       </div>
