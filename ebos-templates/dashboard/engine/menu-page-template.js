@@ -194,7 +194,7 @@ function render() {
       : '<div class="shot"><span>' + p.name.toUpperCase() + '</span></div>';
     const qty = basket[p.id] || 0;
     const control = !p.availability
-      ? '<span class="gone">finished for today</span>'
+      ? '<span class="gone">Out of stock</span>'
       : qty > 0
         ? '<div class="qty"><button class="qm" data-id="' + p.id + '">\\u2212</button><span class="qn">' + qty + '</span><button class="qp" data-id="' + p.id + '">+</button></div>'
         : '<button class="add" data-id="' + p.id + '">Add</button>';
