@@ -154,6 +154,7 @@ router.get('/:qrToken', async (req, res) => {
       // then food later, is two real separate rounds to the kitchen, not
       // one growing order) -- no pending-order basket to pre-load here.
       pendingOrder: null,
+      initialCategory: req.query.cat || null,
     })
   );
 });

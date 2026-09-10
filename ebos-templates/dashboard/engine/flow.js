@@ -657,6 +657,26 @@ async function answerFromKnowledgeBase(message) {
 // be corrected by the real (grounded) reply a moment later.
 const GREETING_SYSTEM = `You open a WhatsApp conversation for a business, replying to a customer's first message. Match what they actually said -- if they said "good evening", greet them back for the evening; if they used no greeting at all, don't force one. Warm and professional customer service, not a casual friend: no slang, keep emoji minimal or none. Use commas or periods for pauses, never a dash of any kind (no em dash, en dash, or hyphen used as punctuation). End by inviting them to share what they'd like to order. Do not list examples of what you can help with or describe your own capabilities -- a staff member doesn't announce their job description, just ask plainly. One or two short sentences, plain text, no markdown.\n\nIf the message also asks a real question (menu, prices, hours, anything factual) alongside the greeting, do NOT answer it here -- you have no real data to answer from, and guessing is never acceptable. Just greet and invite them to order; the real question gets answered separately, for real, right after.`;
 
+// Special offers/combo deals are just an ordinary category, same as
+// "Drinks" or "Mains" -- Catalogue.jsx already groups by whatever's typed
+// in, and the web menu already tabs by it too, so nothing about storage
+// or display needed inventing. What's new is noticing one exists at all
+// (so the greeting knows to offer it) and finding it by MEANING rather
+// than an exact string, since one business might type "Special Offers",
+// another "Combo Deals" -- same keyword-matching idiom as UPSELL_GROUPS.
+// Chidera 2026-09-10: "restaurants have combo deals or special offers,
+// they should be able to write it in catalogue in a different section."
+const SPECIALS_KEYWORDS = ['special', 'offer', 'combo', 'deal'];
+function isSpecialsCategory(category) {
+  if (!category) return false;
+  const lower = category.toLowerCase();
+  return SPECIALS_KEYWORDS.some((k) => lower.includes(k));
+}
+async function findSpecialsCategory(branchId) {
+  const menu = await resolveMenu(branchId);
+  return menu.find((p) => isSpecialsCategory(p.category))?.category || null;
+}
+
 // A "Place an order" button on the very first greeting -- Chidera's call,
 // 2026-09-10: a customer who taps this skips straight to the real menu
 // list (see the button_reply handling in webhook-whatsapp.js), the same
@@ -669,6 +689,25 @@ async function handleGreeting(customer, text) {
     await reply(customer, message, 'greeting');
     return;
   }
+  // Two buttons only when there's a real second thing to offer -- a
+  // business with nothing in a specials-ish category gets exactly the
+  // same single "View menu" button as before, not an empty second option.
+  // Chidera 2026-09-10: "that first message... will have two buttons, the
+  // see menu and special offers[,] but see menu should still have a
+  // special offer category" -- the general menu link always shows every
+  // category including this one; the second button just jumps straight to
+  // it for someone who came here specifically for the deal.
+  const specialsCategory = await findSpecialsCategory(customer.branch_id);
+  if (specialsCategory) {
+    const credentials = await getWhatsAppCredentials(customer.branch_id);
+    const buttons = [
+      { id: 'menu_see', title: 'See menu' },
+      { id: 'menu_specials', title: 'Special offers' },
+    ];
+    await sendWhatsAppButtons(recipientFor(customer), message, buttons, credentials);
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: message, trigger: 'greeting' });
+    return;
+  }
   // Straight to the real web menu -- Chidera's call, 2026-09-10: "no need
   // for place an order just put view menu button straight". One tap
   // (View menu) instead of two (Place an order, then a second message
@@ -676,6 +715,26 @@ async function handleGreeting(customer, text) {
   // set by falling back to plain text on its own.
   const shown = await sendWebMenuLink(customer, message);
   if (!shown) await reply(customer, message, 'greeting');
+}
+
+// The two greeting buttons above, tapped -- each just opens the same web
+// menu page, "Special offers" pre-scrolled to that category via ?cat=
+// (menu-page-template.js reads it as the starting tab instead of always
+// defaulting to the first one) rather than a separate page or a second
+// concept to keep in sync with the real catalogue.
+export async function handleMenuChoiceTap({ phoneNumber, channelId, buttonId, channel = 'whatsapp', branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+  const label = buttonId === 'menu_specials' ? 'Special offers' : 'See menu';
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${label}]`, processed: true });
+
+  if (buttonId === 'menu_specials') {
+    const specialsCategory = await findSpecialsCategory(customer.branch_id);
+    const shown = await sendWebMenuLink(customer, "Here's today's specials.", 'See specials', specialsCategory);
+    if (!shown) await reply(customer, "Here's today's specials.", 'menu_shown');
+    return;
+  }
+  const shown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.");
+  if (!shown) await reply(customer, 'What would you like to order?', 'items_menu_shown');
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,
@@ -2510,17 +2569,21 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
     return;
   }
 
-  // 'dinein_menu' and 'dinein_specials' both open the same live menu page
-  // for now -- there's no separate "specials" concept modeled in the
-  // catalogue yet (no flag on product), so rather than invent one
-  // silently, both just point at the real, current, always-accurate menu.
+  // 'dinein_specials' opens the same live menu page, pre-scrolled to the
+  // specials category (?cat=, same mechanism as the general greeting's
+  // "Special offers" button) when the catalogue actually has one -- no
+  // longer identical to 'dinein_menu' now that specials are a real,
+  // findable category (findSpecialsCategory) rather than an unmodeled
+  // concept.
   if (!process.env.PUBLIC_URL) {
     await reply(customer, 'Sorry, the menu link is not set up right now -- please ask a waiter.', 'dinein_menu_unavailable');
     return;
   }
-  const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}`;
+  const specialsCategory = buttonId === 'dinein_specials' ? await findSpecialsCategory(customer.branch_id) : null;
+  const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}${specialsCategory ? `?cat=${encodeURIComponent(specialsCategory)}` : ''}`;
+  const bodyText = buttonId === 'dinein_specials' ? `Here's today's specials for Table ${session.table_label}.` : `Here's our menu for Table ${session.table_label}.`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), `Here's our menu for Table ${session.table_label}.`, 'View menu', url, credentials);
+  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonId === 'dinein_specials' ? 'See specials' : 'View menu', url, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
 }
 
@@ -2787,10 +2850,10 @@ async function ensureMenuToken(customer) {
   return token;
 }
 
-async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu') {
+async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null) {
   if (!process.env.PUBLIC_URL) return false;
   const token = await ensureMenuToken(customer);
-  const url = `${process.env.PUBLIC_URL}/m/${token}`;
+  const url = `${process.env.PUBLIC_URL}/m/${token}${category ? `?cat=${encodeURIComponent(category)}` : ''}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, url, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'menu_shown', processed: true });

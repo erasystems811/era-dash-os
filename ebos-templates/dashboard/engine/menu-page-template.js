@@ -39,7 +39,7 @@
 // request to defer and would have downloaded as part of this same HTML
 // regardless of the attribute. So the page paints instantly AND stays
 // light no matter how many photos a business has.
-export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPhoto, waNumber, products, pendingOrder }) {
+export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPhoto, waNumber, products, pendingOrder, initialCategory }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
   const lightProducts = products.map((p) => ({
     id: p.id,
@@ -125,6 +125,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPho
 </div>
 <script>
 const PRODUCTS = ${JSON.stringify(lightProducts)};
+const INITIAL_CATEGORY = ${JSON.stringify(initialCategory || null)};
 const PENDING_ORDER = ${JSON.stringify(pendingOrder)};
 const REVIEW_PATH = ${JSON.stringify(reviewPath)};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
@@ -145,7 +146,13 @@ if (PENDING_ORDER && PENDING_ORDER.items) {
   // they remove as well?"
   PENDING_ORDER.items.forEach(function (i) { basket[i.productId] = i.quantity; });
 }
-let cur = (PRODUCTS[0] && (PRODUCTS[0].category || 'Menu')) || 'Menu';
+// Opens straight on the requested category (the "Special offers" button
+// links here with ?cat=) when the catalogue actually has it right now --
+// falls back to the first category exactly as before otherwise, so a
+// stale or mistyped link never lands on a blank tab.
+let cur = (INITIAL_CATEGORY && PRODUCTS.some(function (p) { return (p.category || 'Menu') === INITIAL_CATEGORY; }))
+  ? INITIAL_CATEGORY
+  : ((PRODUCTS[0] && (PRODUCTS[0].category || 'Menu')) || 'Menu');
 
 function naira(n) { return 'NGN ' + Number(n).toLocaleString(); }
 

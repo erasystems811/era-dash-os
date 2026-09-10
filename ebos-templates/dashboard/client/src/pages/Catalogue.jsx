@@ -523,6 +523,18 @@ export default function Catalogue() {
               <div className="field">
                 <label>Category</label>
                 <input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. Drinks" />
+                {/* A combo deal or special offer is just an item under this
+                    category -- the web menu already gives its own category
+                    its own tab, and the WhatsApp greeting offers a
+                    dedicated "Special offers" button whenever one exists
+                    (engine/flow.js's findSpecialsCategory). This is only
+                    here so staff don't have to remember the exact wording
+                    that makes that matching pick it up. */}
+                {form.category !== 'Special Offers' && (
+                  <button type="button" className="link-button" style={{ marginTop: 4, fontSize: 12 }} onClick={() => setForm({ ...form, category: 'Special Offers' })}>
+                    This is a special offer / combo deal
+                  </button>
+                )}
               </div>
             </div>
             <div className="form-row">

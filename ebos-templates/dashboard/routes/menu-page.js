@@ -90,6 +90,7 @@ router.get('/:token', async (req, res) => {
       waNumber,
       products,
       pendingOrder,
+      initialCategory: req.query.cat || null,
     })
   );
 });
