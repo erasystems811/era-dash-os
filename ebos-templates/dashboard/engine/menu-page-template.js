@@ -6,10 +6,14 @@
 // Chidera 2026-09-10) -- Fraunces/Inter, warm paper background, pill
 // buttons -- not the plainer first pass this replaced.
 //
-// hasCoverPhoto: whether business.cover_photo_data_url (Settings >
-// Branding) is set -- false falls back to the plain dark header, same as
-// before this existed. Just a boolean, not the photo itself -- see
-// /photo/cover below for why.
+// coverPhotoVersion: an md5 of business.cover_photo_data_url (Settings >
+// Branding), or null/undefined when none is set (falls back to the plain
+// dark header, same as before this existed). Appended to /photo/cover as
+// ?v= -- Chidera 2026-09-11: "when i changed cover photo why didnt it
+// reflect?" /photo/cover was the same URL forever, so a browser (or
+// WhatsApp's own longer-lived media cache) kept the OLD photo it had
+// already cached there; a new photo now means a genuinely different URL,
+// which can't collide with a stale cache entry for the old one.
 // waNumber: the business's own WhatsApp number (digits only, no leading
 // zero/plus) -- after a successful order this page redirects to
 // https://wa.me/<waNumber>, which WhatsApp's in-app browser intercepts and
@@ -39,7 +43,7 @@
 // request to defer and would have downloaded as part of this same HTML
 // regardless of the attribute. So the page paints instantly AND stays
 // light no matter how many photos a business has.
-export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPhoto, waNumber, products, pendingOrder, initialCategory }) {
+export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
   const lightProducts = products.map((p) => ({
     id: p.id,
@@ -52,9 +56,11 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPho
   }));
   // /photo/cover, not the raw data: URI -- same reasoning as a product's
   // own photo (routes/product-photo.js): a real, separate image request
-  // instead of a blob embedded straight into this page's HTML.
-  const headerStyle = hasCoverPhoto
-    ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover');background-size:cover;background-position:center`
+  // instead of a blob embedded straight into this page's HTML. ?v= busts
+  // any cache holding an older photo under this same path (see
+  // coverPhotoVersion's own comment above).
+  const headerStyle = coverPhotoVersion
+    ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : 'position:relative';
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -119,7 +125,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPho
   .sheetEmpty{padding:24px 0;text-align:center;color:var(--mid);font-size:13px}
 </style></head>
 <body>
-<div class="mtop${hasCoverPhoto ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
+<div class="mtop${coverPhotoVersion ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
   <div id="sec" class="sec"></div>

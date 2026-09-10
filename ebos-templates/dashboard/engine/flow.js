@@ -2871,8 +2871,14 @@ async function ensureMenuToken(customer) {
 // attached to a photo or image... just make it happen."
 async function businessCoverPhotoUrl() {
   if (!process.env.PUBLIC_URL) return null;
-  const { rows } = await pool.query('select cover_photo_data_url is not null as has_cover from business limit 1');
-  return rows[0]?.has_cover ? `${process.env.PUBLIC_URL}/photo/cover` : null;
+  // ?v= -- Chidera 2026-09-11: "when i changed cover photo why didnt it
+  // reflect?" WhatsApp caches a header image by its URL (sometimes for a
+  // while), so a re-uploaded photo needs a genuinely different URL to
+  // ever actually show, not just new bytes behind the same one. Computed
+  // in Postgres (md5) so the real data: URI never has to load into Node
+  // just for this.
+  const { rows } = await pool.query('select md5(cover_photo_data_url) as v from business limit 1');
+  return rows[0]?.v ? `${process.env.PUBLIC_URL}/photo/cover?v=${rows[0].v}` : null;
 }
 
 async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null, headerImageUrl = null) {
