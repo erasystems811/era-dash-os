@@ -1187,6 +1187,17 @@ router.post('/staff', requireEditorApi, async (req, res) => {
   if (f.role === 'staff') {
     return res.status(400).json({ error: 'Staff sign in with a name and PIN -- use "Add staff" below, not this form.' });
   }
+  // A branch-locked manager can create staff for their own branch (the PIN
+  // form below), but never another manager or owner account -- that's the
+  // general manager's (or owner's) call, not a single branch's own.
+  // Chidera's own words, 2026-09-03: "branch manager cant create a new
+  // manager or owner but general manager when there are multiple branches
+  // can create branch managers." req.branchId is null exactly for an
+  // owner or an unlocked ("general") manager, so that's the same signal
+  // every other branch-lock check in this file already uses.
+  if (req.branchId) {
+    return res.status(403).json({ error: 'Only the general manager or owner can create a manager or owner account.' });
+  }
   const passwordHash = await hashPassword(f.password);
   // A branch-locked manager can only ever create staff inside their own
   // branch -- req.branchId (their own, from scopeToBranch) wins over

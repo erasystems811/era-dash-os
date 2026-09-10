@@ -11,6 +11,15 @@ export default function StaffPage() {
   const { scope } = useScope();
   const editable = canEdit(staff);
   const isOwner = staff?.role === 'owner';
+  // A branch-locked manager can still add their own branch's PIN staff
+  // (editable alone governs that form below), but only the owner or an
+  // unlocked ("general") manager can create another manager or owner
+  // account -- Chidera's own words, 2026-09-03: "branch manager cant
+  // create a new manager or owner but general manager... can create
+  // branch managers." Same signal as the server's own check
+  // (routes/api.js's POST /staff): branch_id null means owner or general
+  // manager, not "not locked to a branch" for its own sake.
+  const canManageOwnersAndManagers = editable && !staff?.branch_id;
   const [list, setList] = useState(null);
   const [branches, setBranches] = useState([]);
   const [form, setForm] = useState(EMPTY);
@@ -189,7 +198,7 @@ export default function StaffPage() {
         </table>
       </div>
 
-      {editable && (
+      {canManageOwnersAndManagers && (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Add manager or owner</h3>
           <p className="subtitle">A real login with their own email and password -- for whoever runs a branch or the whole business.</p>
