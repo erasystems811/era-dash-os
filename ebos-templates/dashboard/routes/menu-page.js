@@ -35,10 +35,18 @@ router.get('/:token/menu.json', async (req, res) => {
 async function pendingOrderPayload(customerId) {
   const order = await getOpenOrder(customerId);
   if (!order) return null;
-  const { rows: items } = await pool.query('select product_id, quantity from order_item where order_id = $1', [order.id]);
+  // p.name too -- Chidera 2026-09-10: "when you say they have 5 items
+  // pending but they can't see the 5 orders". A count alone meant seeing
+  // WHAT those items actually were required clicking through every
+  // category looking for a stepper that wasn't at zero; the page can now
+  // just list them by name.
+  const { rows: items } = await pool.query(
+    `select oi.product_id, oi.quantity, p.name from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+    [order.id]
+  );
   if (!items.length) return null;
   return {
-    items: items.map((i) => ({ productId: i.product_id, quantity: i.quantity })),
+    items: items.map((i) => ({ productId: i.product_id, quantity: i.quantity, name: i.name })),
     total: Number(order.total) || 0,
   };
 }

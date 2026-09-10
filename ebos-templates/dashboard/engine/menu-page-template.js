@@ -49,8 +49,8 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoU
     hasPhoto: Boolean(p.image_data_url),
   }));
   const headerStyle = coverPhotoUrl
-    ? ` style="background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('${coverPhotoUrl.replace(/'/g, '%27')}');background-size:cover;background-position:center"`
-    : '';
+    ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('${coverPhotoUrl.replace(/'/g, '%27')}');background-size:cover;background-position:center`
+    : 'position:relative';
   return `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>${escapeHtml(businessName)}</title>
@@ -94,9 +94,12 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoU
   .bask .go{margin-left:auto;background:var(--wa);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:13px;padding:9px 16px;border-radius:999px;touch-action:manipulation}
   .pending{margin:12px 14px 0;padding:10px 12px;background:#FBF3E7;border:1px solid #EAD9B8;border-radius:10px;font-size:12.5px;color:var(--ink);line-height:1.4}
   .pending b{font-weight:600}
+  .pending ul{margin:6px 0 2px;padding-left:18px}
+  .pending li{margin-bottom:2px}
+  .back{position:absolute;top:14px;left:12px;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.14);color:#fff;border:0;display:grid;place-items:center;font-size:18px;line-height:1;touch-action:manipulation;z-index:4}
 </style></head>
 <body>
-<div class="mtop${coverPhotoUrl ? ' photo' : ''}"${headerStyle}><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
+<div class="mtop${coverPhotoUrl ? ' photo' : ''}" style="${headerStyle}">${waDigits ? '<button class="back" id="back" aria-label="Back to chat">←</button>' : ''}<div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
   <div id="pending" class="pending" hidden></div>
@@ -109,6 +112,13 @@ const PRODUCTS = ${JSON.stringify(lightProducts)};
 const PENDING_ORDER = ${JSON.stringify(pendingOrder)};
 const REVIEW_PATH = ${JSON.stringify(reviewPath)};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
+// Native browser chrome (the in-app browser's own close/back icons) isn't
+// something a page can touch or relabel -- this is EBOS's own back
+// affordance, always taking a guest to the exact same place the native
+// close button would leave them: the chat. Chidera 2026-09-10: "instead
+// of that done button that closes the site can it be a back... instead?"
+var backBtn = document.getElementById('back');
+if (backBtn) backBtn.onclick = function () { window.location.href = 'https://wa.me/' + WA_DIGITS; };
 let basket = {};
 if (PENDING_ORDER && PENDING_ORDER.items) {
   // A guest reopening this link may already have an order sitting with us
@@ -192,7 +202,12 @@ document.getElementById('go').onclick = async () => {
 if (PENDING_ORDER && PENDING_ORDER.items && PENDING_ORDER.items.length) {
   const pendingEl = document.getElementById('pending');
   const count = PENDING_ORDER.items.reduce(function (s, i) { return s + i.quantity; }, 0);
-  pendingEl.innerHTML = 'You already have <b>' + count + ' item' + (count > 1 ? 's' : '') + '</b> pending (' + naira(PENDING_ORDER.total) + ') &mdash; shown below. Adjust or add more, then tap Review order.';
+  // Naming them here, not just a count -- Chidera 2026-09-10: "when you
+  // say they have 5 items pending but they can't see the 5 orders". The
+  // steppers below still reflect it too, but those are scattered across
+  // whichever categories those items happen to be in.
+  const list = PENDING_ORDER.items.map(function (i) { return '<li>' + i.quantity + '\\u00d7 ' + i.name + '</li>'; }).join('');
+  pendingEl.innerHTML = '<b>' + count + ' item' + (count > 1 ? 's' : '') + ' pending</b> (' + naira(PENDING_ORDER.total) + '):<ul>' + list + '</ul>Adjust or add more below, then tap Review order.';
   pendingEl.hidden = false;
 }
 renderCats();
