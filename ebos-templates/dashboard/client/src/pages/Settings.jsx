@@ -17,6 +17,7 @@ export default function Settings() {
   const [waProfile, setWaProfile] = useState(null);
   const [waSaved, setWaSaved] = useState(false);
   const [waError, setWaError] = useState(null);
+  const [uploadingField, setUploadingField] = useState(null);
 
   useEffect(() => {
     api.get('/business').then(setBusiness);
@@ -48,27 +49,44 @@ export default function Settings() {
     setBusiness((b) => ({ ...b, [key]: value }));
   }
 
+  // Saves immediately, not just into local state waiting on the page's
+  // own Save button -- Chidera 2026-09-10, after the cover photo still
+  // wasn't saving even once uploads could go through: "is the back end
+  // really connected to the chat?" Two real ways the old
+  // set(...)-then-wait-for-Save version could lose the photo entirely: a
+  // click on Save that lands while compression is still in flight (the
+  // photo genuinely isn't in `business` yet to submit), or just never
+  // clicking Save at all after picking the file, since nothing said that
+  // step was still required. Posting straight away removes both.
+  async function uploadBusinessImage(field, file) {
+    setSaved(false);
+    setSaveError(null);
+    setUploadingField(field);
+    try {
+      const compressed = await compressImageToDataUrl(file);
+      const updated = await api.post('/business', { ...business, [field]: compressed });
+      setBusiness(updated);
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err.message);
+    } finally {
+      setUploadingField(null);
+    }
+  }
+
   async function onLogoChange(e) {
     const file = e.target.files[0];
     if (!file) return;
-    try {
-      set('logo_data_url', await compressImageToDataUrl(file));
-    } catch (err) {
-      setSaveError(err.message);
-    }
+    await uploadBusinessImage('logo_data_url', file);
   }
 
   async function onCoverPhotoChange(e) {
     const file = e.target.files[0];
     if (!file) return;
-    try {
-      // maxDimension 1600 is already comfortably wider than the menu
-      // header ever renders at, and well under the size that made a raw
-      // upload here fail (~20MB) in the first place.
-      set('cover_photo_data_url', await compressImageToDataUrl(file));
-    } catch (err) {
-      setSaveError(err.message);
-    }
+    // maxDimension 1600 is already comfortably wider than the menu header
+    // ever renders at, and well under the size that made a raw upload
+    // here fail (~20MB) in the first place.
+    await uploadBusinessImage('cover_photo_data_url', file);
   }
 
   function setWa(key, value) {
@@ -182,7 +200,8 @@ export default function Settings() {
             <div className="field">
               <label>Logo</label>
               {business.logo_data_url && <img src={business.logo_data_url} alt="Logo" style={{ maxHeight: 40, display: 'block', marginBottom: 8 }} />}
-              {editable && <input type="file" accept="image/*" onChange={onLogoChange} />}
+              {editable && <input type="file" accept="image/*" onChange={onLogoChange} disabled={uploadingField === 'logo_data_url'} />}
+              {uploadingField === 'logo_data_url' && <p className="hint">Uploading...</p>}
             </div>
             <div className="field">
               <label>Brand colour</label>
@@ -192,11 +211,12 @@ export default function Settings() {
           <div className="form-row">
             <div className="field">
               <label>Web menu cover photo</label>
-              <p className="hint">The headline photo across the top of the WhatsApp web menu customers see.</p>
+              <p className="hint">Shown as the photo attached to the WhatsApp greeting, and across the top of the web menu. Saves as soon as you pick a file -- no separate Save needed.</p>
               {business.cover_photo_data_url && (
                 <img src={business.cover_photo_data_url} alt="Cover" style={{ width: '100%', maxWidth: 320, height: 120, objectFit: 'cover', borderRadius: 8, display: 'block', marginBottom: 8 }} />
               )}
-              {editable && <input type="file" accept="image/*" onChange={onCoverPhotoChange} />}
+              {editable && <input type="file" accept="image/*" onChange={onCoverPhotoChange} disabled={uploadingField === 'cover_photo_data_url'} />}
+              {uploadingField === 'cover_photo_data_url' && <p className="hint">Uploading...</p>}
             </div>
           </div>
           <h3>Payment</h3>

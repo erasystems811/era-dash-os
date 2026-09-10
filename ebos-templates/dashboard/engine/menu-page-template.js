@@ -61,7 +61,16 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPho
 <title>${escapeHtml(businessName)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- A normal stylesheet <link> blocks the very first paint until Google
+     Fonts responds -- on a slow connection that's exactly the blank white
+     flash Chidera 2026-09-10 flagged ("i have that 1 seconds first blank
+     white load"). media="print" makes the browser fetch it in the
+     background instead of blocking on it; the onload swap applies it the
+     moment it's ready. Content already paints instantly on the system
+     font either way (every element below has a real fallback stack), so
+     nothing is ever left invisible waiting on this. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap"></noscript>
 <style>
   :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--hot:#C5452B;--wa:#0F7A5A}
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}

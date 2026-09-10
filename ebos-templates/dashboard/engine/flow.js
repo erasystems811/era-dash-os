@@ -671,15 +671,15 @@ async function findSpecialsCategory(branchId) {
 // needed to work out they wanted to order. WhatsApp only -- Instagram/voice
 // have no reply-button equivalent, so they keep the plain-text greeting.
 //
-// One tap, not two -- Chidera 2026-09-10, after the two-reply-button
-// version (tap "See menu" -> bot replies -> tap AGAIN to actually open
-// it): "i want straight to the see menu button no two step, see menue
-// shows menu web instantly and special offers go straight to the special
-// offers tab of the menu." Meta's cta_url message type (the only one that
-// opens a link on a single tap) allows exactly one button per message, so
-// two direct-opening buttons means two separate messages sent back to
-// back, not one message with two buttons -- each still opens on the very
-// first tap, which is the part that actually matters here.
+// One tap, one message -- Chidera 2026-09-10: "i want straight to the see
+// menu button no two step" (fixed by switching to a direct-open cta_url
+// button), then "menu and todays specials should not be 2 differnt
+// texts" (a second "Special offers" message, sent right after the first,
+// still read as two disconnected texts even though each opened on one
+// tap). Just the one "See menu" message now -- Special Offers is already
+// its own tab inside that same page the moment it's opened (menu-page-
+// template.js tabs by category regardless), so nothing about discovering
+// a deal is actually lost, only the second WhatsApp message.
 async function handleGreeting(customer, text) {
   const message = await askText(GREETING_SYSTEM, text);
   if (customer.channel !== 'whatsapp') {
@@ -688,17 +688,7 @@ async function handleGreeting(customer, text) {
   }
   const headerImageUrl = await businessCoverPhotoUrl();
   const shown = await sendWebMenuLink(customer, message, 'See menu', null, headerImageUrl);
-  if (!shown) {
-    await reply(customer, message, 'greeting');
-    return;
-  }
-  // A second, separate message only when there's a real second thing to
-  // offer -- a business with nothing in a specials-ish category gets
-  // exactly the one "See menu" message, not an empty second button.
-  const specialsCategory = await findSpecialsCategory(customer.branch_id);
-  if (specialsCategory) {
-    await sendWebMenuLink(customer, "Today's specials:", 'Special offers', specialsCategory);
-  }
+  if (!shown) await reply(customer, message, 'greeting');
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,
