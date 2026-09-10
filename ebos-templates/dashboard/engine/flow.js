@@ -2220,7 +2220,11 @@ export async function completePayment(orderId) {
 // manual nudge) still picks it up in the next batch.
 // Exported so sandbox/test-conversation.mjs can wait the real amount
 // instead of a hardcoded guess that could silently drift out of sync.
-export const DEBOUNCE_MS = 6_000;
+// 15s -> 6s -> 2s, each Chidera's own call for a faster reply. At 2s, two
+// messages sent more than 2 seconds apart will genuinely get answered
+// separately rather than combined -- worth knowing if replies start
+// feeling split up, but that's the direct tradeoff of "fast", not a bug.
+export const DEBOUNCE_MS = 2_000;
 const pendingTimers = new Map();
 
 // A single one-shot typing indicator at the start of a debounce cycle used
