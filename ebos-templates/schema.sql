@@ -439,6 +439,14 @@ create table if not exists "order" (
   -- address (see engine/delivery-zones.js -- unresolved always goes to a
   -- human, never a guess).
   delivery_zone_id uuid references delivery_zone(id),
+  -- The two steps before delivery_zone_id is actually set: a zone found by
+  -- matching the address (or a later clarification reply) but not yet
+  -- confirmed by the customer, and "we already asked what area this is,
+  -- waiting on their answer" -- same null/non-null gate idiom confirmed_at
+  -- uses for the order-confirmation yes/no step. See engine/flow.js's
+  -- handleCollectFulfilment.
+  delivery_zone_candidate_id uuid references delivery_zone(id),
+  delivery_area_prompted_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
