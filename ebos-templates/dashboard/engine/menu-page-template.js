@@ -98,7 +98,6 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPho
   .bask{flex:0 0 auto;background:var(--ink);color:#fff;padding:13px 15px;display:flex;align-items:center;gap:10px;font-size:13.5px}
   .bask .go{margin-left:auto;background:var(--wa);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:13px;padding:9px 16px;border-radius:999px;touch-action:manipulation}
   .bask #bc{touch-action:manipulation;text-decoration:underline;text-decoration-color:rgba(255,255,255,.35);text-underline-offset:3px}
-  .back{display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,.16);color:#fff;border:0;border-radius:999px;padding:5px 12px 5px 9px;font-family:inherit;font-size:12px;font-weight:600;margin-bottom:6px;touch-action:manipulation}
   .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:8}
   .sheet{position:fixed;left:0;right:0;bottom:0;background:#fff;border-radius:16px 16px 0 0;max-height:70vh;overflow-y:auto;z-index:9;padding:16px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -8px 24px rgba(0,0,0,.18)}
   .sheetHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
@@ -111,7 +110,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, hasCoverPho
   .sheetEmpty{padding:24px 0;text-align:center;color:var(--mid);font-size:13px}
 </style></head>
 <body>
-<div class="mtop${hasCoverPhoto ? ' photo' : ''}" style="${headerStyle}">${waDigits ? '<button class="back" id="back">← Back to chat</button>' : ''}<div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
+<div class="mtop${hasCoverPhoto ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
   <div id="sec" class="sec"></div>
@@ -129,13 +128,6 @@ const INITIAL_CATEGORY = ${JSON.stringify(initialCategory || null)};
 const PENDING_ORDER = ${JSON.stringify(pendingOrder)};
 const REVIEW_PATH = ${JSON.stringify(reviewPath)};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
-// Native browser chrome (the in-app browser's own close/back icons) isn't
-// something a page can touch or relabel -- this is EBOS's own back
-// affordance, always taking a guest to the exact same place the native
-// close button would leave them: the chat. Chidera 2026-09-10: "instead
-// of that done button that closes the site can it be a back... instead?"
-var backBtn = document.getElementById('back');
-if (backBtn) backBtn.onclick = function () { window.location.href = 'https://wa.me/' + WA_DIGITS; };
 let basket = {};
 if (PENDING_ORDER && PENDING_ORDER.items) {
   // A guest reopening this link may already have an order sitting with us
