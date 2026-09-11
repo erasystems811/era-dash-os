@@ -121,12 +121,16 @@ export default function DineIn() {
         </div>
         <style>{`
           .qr-sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
-          .qr-card { border: 1px solid #ccc; border-radius: 10px; padding: 16px; text-align: center; }
+          .qr-card { border: 1px solid var(--border-tint-strong); border-radius: var(--radius-md); padding: 16px; text-align: center; background: var(--surface); }
           .qr-card img { width: 100%; max-width: 220px; }
-          .qr-card-label { font-size: 22px; font-weight: 700; margin-top: 8px; }
+          .qr-card-label { font-family: var(--font-display); font-size: 22px; font-weight: 700; margin-top: 8px; }
           @media print {
             .no-print { display: none !important; }
             .qr-sheet { grid-template-columns: repeat(2, 1fr); }
+            /* Print output stays plain -- shadows/blur waste ink and some
+               printers render backdrop-filter as a solid block, so this is
+               a deliberate visual downgrade for paper only, not a bug. */
+            .qr-card { border-color: #ccc; background: #fff; box-shadow: none; }
           }
         `}</style>
       </div>

@@ -563,6 +563,28 @@ label {
   text-decoration: underline;
 }
 
+/* Same idea as .link-button, but for a plain <button className="link">
+   inline in running text (e.g. Orders' manual order form "remove" next to
+   a line item) -- without this it fell back to the default solid button
+   style (navy fill, shadow, padding), way too heavy for an inline action
+   sitting next to text. */
+.link {
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 0;
+}
+.link:hover {
+  background: none;
+  box-shadow: none;
+  color: #b91c1c;
+  text-decoration: underline;
+}
+
 /* PIN login (Tier 3 staff): name buttons sized for a touch device, not a
    typed dropdown -- see PinLogin.jsx. */
 .pin-name-list {
