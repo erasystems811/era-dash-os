@@ -129,7 +129,7 @@ export async function sweepOfferEscalation() {
     const { rows: orderRows } = await pool.query('select reference from "order" where id = $1', [offer.order_id]);
     const recipients = await handoverRecipients();
     const text = `No rider has accepted the delivery for order ${orderRows[0]?.reference || offer.order_id} (${offer.zone_name}) after ${(timeoutSeconds * 2) / 60} minutes. Please call a rider directly.`;
-    for (const to of recipients) {
+    for (const { phoneNumber: to } of recipients) {
       try {
         await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text, whatsappSend: sendWhatsApp });
       } catch (err) {

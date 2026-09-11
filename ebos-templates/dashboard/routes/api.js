@@ -20,6 +20,7 @@ import {
   isPinTier,
   requireFullAccessApi,
   logActivity,
+  consumeMagicLink,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
 import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest } from '../engine/flow.js';
@@ -102,6 +103,38 @@ router.post('/pin-login', async (req, res) => {
 router.post('/logout', (req, res) => {
   req.session = null;
   res.json({ ok: true });
+});
+
+// Tapped from a handover alert on WhatsApp (engine/flow.js's handover()) --
+// signs the staff member straight in and drops them on the conversation
+// that triggered the alert, no separate login, no leaving WhatsApp first.
+// Public (no requireStaffApi -- that gate is below this route) since the
+// whole point is bootstrapping a session that doesn't exist yet; the token
+// itself is the credential, single-use and short-lived (lib/auth.js).
+router.get('/auth/magic/:token', async (req, res) => {
+  const consumed = await consumeMagicLink(req.params.token);
+  if (!consumed) return res.status(410).send('This link has expired. Please log in normally.');
+  const { rows } = await pool.query(
+    `select s.id, s.name, s.role, s.status, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
+     from staff s left join branch b on b.id = s.branch_id where s.id = $1`,
+    [consumed.staff_id]
+  );
+  const staff = rows[0];
+  if (!staff || staff.status !== 'active') return res.status(403).send('This account is no longer active.');
+  req.session.staff = {
+    id: staff.id,
+    name: staff.name,
+    role: staff.role,
+    branch_id: staff.branch_id,
+    branch_name: staff.branch_name,
+    auth_type: staff.auth_type,
+    work_area: staff.work_area,
+  };
+  // Same reasoning as pin-login above -- a PIN account is kiosk-style, not
+  // someone's own phone, so it shouldn't stay signed in via a magic link
+  // any longer than a normal PIN login would.
+  if (staff.auth_type === 'pin') req.sessionOptions.maxAge = 8 * 60 * 60 * 1000;
+  res.redirect(consumed.redirect_path || '/');
 });
 
 router.get('/me', (req, res) => {

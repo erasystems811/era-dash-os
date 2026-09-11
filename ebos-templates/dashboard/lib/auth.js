@@ -1,4 +1,5 @@
 import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 import { pool } from './db.js';
 
 export async function findStaffByEmail(email) {
@@ -79,6 +80,48 @@ export async function verifyPin(staff, pin) {
 
 export function isPinTier(staff) {
   return staff?.auth_type === 'pin';
+}
+
+// A handover alert can sit unread for a while before anyone taps it (unlike
+// a password reset link, which should expire in minutes) -- 24h is generous
+// enough to cover an overnight handover without leaving the link usable
+// indefinitely.
+const MAGIC_LINK_TTL_MS = 24 * 60 * 60 * 1000;
+
+function hashMagicLinkToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// One-tap login for a staff handover alert sent over WhatsApp -- Chidera
+// 2026-09-11: "can handover numbers get to handle whatever it is internally
+// in whatsapp without leaving the app... they can access the dashboard
+// internally." The token itself is only ever in the URL texted to the
+// staff member; the DB keeps just its sha256 hash, so a DB leak alone can't
+// be turned into a working login the way a stored plaintext token could.
+// Single-use (consumeMagicLink below) is a soft backstop, not the real
+// security boundary -- tapping it once already plants a normal session
+// cookie (same shape /login gives, see routes/api.js), so every later tap
+// from that same device just rides that cookie and never touches the token
+// again.
+export async function createMagicLink(staffId, redirectPath) {
+  const token = crypto.randomBytes(32).toString('hex');
+  await pool.query(
+    `insert into staff_magic_link (staff_id, token_hash, redirect_path, expires_at) values ($1, $2, $3, $4)`,
+    [staffId, hashMagicLinkToken(token), redirectPath, new Date(Date.now() + MAGIC_LINK_TTL_MS)]
+  );
+  return token;
+}
+
+// Marks the token used in the same query that checks it's still valid, so
+// two near-simultaneous taps of the same link can't both succeed.
+export async function consumeMagicLink(token) {
+  const { rows } = await pool.query(
+    `update staff_magic_link set used_at = now()
+     where token_hash = $1 and used_at is null and expires_at > now()
+     returning staff_id, redirect_path`,
+    [hashMagicLinkToken(token)]
+  );
+  return rows[0] || null;
 }
 
 // Attaches req.staff from the session, or null. Does not block the request --

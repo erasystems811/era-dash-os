@@ -15,6 +15,7 @@ import { createInvoice } from './documents.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
+import { createMagicLink } from '../lib/auth.js';
 
 // The one place that decides "who is this customer and how do we reach
 // them" by channel -- WhatsApp uses their phone number, Instagram uses
@@ -468,11 +469,15 @@ async function transitionOrder(order, toState) {
 // dispatch.js's own escalation alert (an unaccepted delivery offer) -- same
 // "who to tell" list as a customer handover, without needing the full
 // customer-conversation handover() machinery around it.
+// staffId is null for the business.handover_number fallback -- that number
+// isn't tied to any real staff account, so the main handover() alert below
+// can't bind a magic-link session to it and falls back to a bare
+// (login-required) link for that one case.
 export async function handoverRecipients() {
-  const { rows: staffRows } = await pool.query(`select phone_number from staff where handover_alerts = true and phone_number is not null`);
-  if (staffRows.length) return staffRows.map((s) => s.phone_number);
+  const { rows: staffRows } = await pool.query(`select id, phone_number from staff where handover_alerts = true and phone_number is not null`);
+  if (staffRows.length) return staffRows.map((s) => ({ phoneNumber: s.phone_number, staffId: s.id }));
   const { rows: biz } = await pool.query('select handover_number from business limit 1');
-  return biz[0]?.handover_number ? [biz[0].handover_number] : [];
+  return biz[0]?.handover_number ? [{ phoneNumber: biz[0].handover_number, staffId: null }] : [];
 }
 
 // Shared between the error-recovery handover() call below and
@@ -538,7 +543,7 @@ async function handover(customer, reason, extra, ackText) {
     const voiceRecipients = await handoverRecipients();
     if (voiceRecipients.length) {
       const alert = `A caller needs a person: ${displayNameFor(customer)}.\nReason: ${reason}\nThey were told someone will call them back on this number.`;
-      for (const to of voiceRecipients) {
+      for (const { phoneNumber: to } of voiceRecipients) {
         await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text: alert, whatsappSend: sendWhatsApp });
       }
     }
@@ -570,17 +575,27 @@ async function handover(customer, reason, extra, ackText) {
     transcript
   );
   const extraLines = extra ? `\n${Object.values(extra).filter(Boolean).join('\n')}` : '';
-  // A straight link to this exact conversation, not just a text summary --
-  // whoever gets this alert can open the real thread and reply from there
-  // in one tap instead of hunting for this customer in the dashboard.
-  const link = process.env.PUBLIC_URL ? `\n${process.env.PUBLIC_URL}/conversations/${customer.id}` : '';
-  const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}${link}`;
   // Known gap: unlike every other reply in this file, this message can go
   // to a staff number that hasn't messaged the bot in the last 24 hours,
   // which WhatsApp requires a template for (bot-engine/wake-template.js) --
   // not wired yet, so a stale/never-messaged number can silently fail to
   // receive this alert until they message the bot number first.
-  for (const to of recipients) {
+  for (const { phoneNumber: to, staffId } of recipients) {
+    // A magic link, not a bare dashboard URL -- tapping it signs this exact
+    // staff member straight in (createMagicLink/consumeMagicLink, lib/
+    // auth.js) and lands them on this conversation, no separate login, no
+    // leaving WhatsApp first. Chidera 2026-09-11: "can handover numbers get
+    // to handle whatever it is internally in whatsapp without leaving the
+    // app... they can access the dashboard internally." Falls back to the
+    // old bare (login-required) link when this recipient has no staffId --
+    // the business.handover_number fallback isn't a real staff account, so
+    // there's no session to bind a token to.
+    const link = process.env.PUBLIC_URL
+      ? staffId
+        ? `\n${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/conversations/${customer.id}`)}`
+        : `\n${process.env.PUBLIC_URL}/conversations/${customer.id}`
+      : '';
+    const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}${link}`;
     await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text: alert, whatsappSend: sendWhatsApp });
   }
 }
@@ -2465,7 +2480,7 @@ function scheduleDebouncedProcessing(customer) {
             [customer.id]
           );
           const recipients = await handoverRecipients();
-          for (const to of recipients) {
+          for (const { phoneNumber: to } of recipients) {
             await botEngine.sendMessage({
               trigger: 'staff_handoff_intro',
               to,
