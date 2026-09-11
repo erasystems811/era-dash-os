@@ -63,7 +63,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoV
     ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : 'position:relative';
   return `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>${escapeHtml(businessName)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -78,10 +78,17 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoV
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap"></noscript>
 <style>
+  /* Paper, not white -- Chidera 2026-09-11: "i dont want to see any white
+     atall" (a bad connection means the customer's own browser is what
+     paints the gap before this page's content shows, e.g. WhatsApp's
+     in-app browser's own blank tab while the page is still loading -- no
+     amount of app-level loading state can cover that moment). The <html>
+     tag's own inline style above sets this before even THIS stylesheet
+     parses, so the very first paint is never plain white either. */
   :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--hot:#C5452B;--wa:#0F7A5A}
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-  html,body{height:100%;overflow:hidden;overscroll-behavior:none}
-  body{display:flex;flex-direction:column;height:100vh;height:100dvh;font-family:"Inter",system-ui,sans-serif;background:#fff;color:var(--ink);line-height:1.5}
+  html,body{height:100%;overflow:hidden;overscroll-behavior:none;background:#F6F1E8}
+  body{display:flex;flex-direction:column;height:100vh;height:100dvh;font-family:"Inter",system-ui,sans-serif;background:#F6F1E8;color:var(--ink);line-height:1.5}
   .mtop{flex:0 0 auto;background:var(--ink);color:var(--paper);padding:12px 16px 10px;min-height:52px}
   .mtop.photo{padding:38px 16px 12px;min-height:120px;display:flex;flex-direction:column;justify-content:flex-end}
   .mtop .nm{font-family:"Fraunces",serif;font-size:19px;font-weight:700;line-height:1}
@@ -257,9 +264,24 @@ document.getElementById('backdrop').onclick = closeSheet;
 document.getElementById('go').onclick = async () => {
   const items = Object.entries(basket).map(([productId, quantity]) => ({ productId, quantity }));
   if (!items.length) { document.getElementById('bc').textContent = 'Add something first'; return; }
-  const res = await fetch(REVIEW_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
-  const data = await res.json();
-  if (!res.ok) { alert(data.error || 'Something went wrong.'); return; }
+  const goBtn = document.getElementById('go');
+  const originalLabel = goBtn.textContent;
+  goBtn.textContent = 'Sending...';
+  // A dropped connection right at the tap (Chidera 2026-09-11, right after
+  // a "just white on bad network" complaint) used to fail this fetch with
+  // nothing shown at all -- no alert, button just sitting there looking
+  // unresponsive. Always ends in either the "Order sent!" screen below or a
+  // visible alert now, never silence.
+  let res, data;
+  try {
+    res = await fetch(REVIEW_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
+    data = await res.json();
+  } catch (err) {
+    goBtn.textContent = originalLabel;
+    alert('Could not reach the connection -- please check your network and try again.');
+    return;
+  }
+  if (!res.ok) { goBtn.textContent = originalLabel; alert(data.error || 'Something went wrong.'); return; }
   document.body.innerHTML = '<div style="padding:60px 20px;text-align:center;font-family:Inter,sans-serif;"><h2 style="font-family:Fraunces,serif;">Order sent!</h2><p style="color:#6E6156;margin-top:8px;">Taking you back to the chat\\u2026</p></div>';
   // Hands the guest straight back to the WhatsApp thread instead of
   // leaving them stranded on this page -- wa.me is what WhatsApp's own
