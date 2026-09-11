@@ -20,6 +20,11 @@ export default function DineIn() {
   const [error, setError] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(EMPTY);
+  // false = not printing, 'all' = every table, or a table id -- one table's
+  // QR code needs its own print (Chidera 2026-09-11: "each table is to have
+  // their own print qr sheet cause its one per table na" -- a single
+  // replaced/damaged card, or a table added after the initial batch, is a
+  // one-card reprint, not the whole sheet again).
   const [printMode, setPrintMode] = useState(false);
 
   function load() {
@@ -107,12 +112,16 @@ export default function DineIn() {
   if (!config || !tables) return null;
 
   if (printMode) {
+    const printTables = printMode === 'all' ? tables : tables.filter((t) => t.id === printMode);
+    const single = printMode !== 'all' && printTables.length === 1 ? printTables[0] : null;
     return (
       <div>
         <div className="page-header no-print">
           <div>
-            <h1>QR sheet</h1>
-            <p className="subtitle">One card per table -- print, cut, and set out on the tables.</p>
+            <h1>{single ? `Table ${single.label} QR code` : 'QR sheet'}</h1>
+            <p className="subtitle">
+              {single ? 'Print, cut, and set out on this table.' : 'One card per table -- print, cut, and set out on the tables.'}
+            </p>
           </div>
           <button className="secondary" onClick={() => setPrintMode(false)}>
             Back
@@ -120,7 +129,7 @@ export default function DineIn() {
           <button onClick={() => window.print()}>Print</button>
         </div>
         <div className="qr-sheet">
-          {tables.map((t) => (
+          {printTables.map((t) => (
             <div key={t.id} className="qr-card">
               {t.qr_data_url ? <img src={t.qr_data_url} alt="" /> : <p>No WhatsApp number set for this branch yet.</p>}
               <div className="qr-card-label">Table {t.label}</div>
@@ -149,7 +158,7 @@ export default function DineIn() {
           <p className="subtitle">Tables, QR codes, and how the room orders from their seat.</p>
         </div>
         {tables.length > 0 && (
-          <button className="secondary" onClick={() => setPrintMode(true)}>
+          <button className="secondary" onClick={() => setPrintMode('all')}>
             Print QR sheet
           </button>
         )}
@@ -254,7 +263,18 @@ export default function DineIn() {
                       </span>
                     )}
                   </td>
-                  <td>{t.qr_data_url ? <img src={t.qr_data_url} alt="" style={{ height: 44, width: 44 }} /> : <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>no number set</span>}</td>
+                  <td>
+                    {t.qr_data_url ? (
+                      <>
+                        <img src={t.qr_data_url} alt="" style={{ height: 44, width: 44, display: 'block', marginBottom: 4 }} />
+                        <button className="secondary" onClick={() => setPrintMode(t.id)}>
+                          Print
+                        </button>
+                      </>
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>no number set</span>
+                    )}
+                  </td>
                   {editable && (
                     <td style={{ display: 'flex', gap: 8 }}>
                       {t.has_open_session && (
