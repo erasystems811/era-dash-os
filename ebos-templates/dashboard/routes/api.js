@@ -21,6 +21,7 @@ import {
   requireFullAccessApi,
   logActivity,
   consumeMagicLink,
+  magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
 import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest } from '../engine/flow.js';
@@ -34,6 +35,7 @@ import { router as voiceRoutes } from './voice.js';
 import { router as dineinRoutes, closeTableSessionIfSettled } from './dinein.js';
 import { encrypt } from '../lib/crypto.js';
 import { maybeDispatchOwnRiders, manuallyRingForRider } from '../engine/delivery-dispatch.js';
+import { offerBus } from '../engine/offer-bus.js';
 
 export const router = express.Router();
 
@@ -113,22 +115,26 @@ router.post('/logout', (req, res) => {
 // itself is the credential, single-use and short-lived (lib/auth.js).
 router.get('/auth/magic/:token', async (req, res) => {
   const consumed = await consumeMagicLink(req.params.token);
-  // A dead-end text response stranded whoever tapped an already-used or
-  // expired link with no way forward -- redirect to /staff-login instead,
-  // which covers both account types from one screen (it has its own
-  // "Manager? Log in with email and password" link). We've lost which
-  // account this token belonged to at this point (consumeMagicLink's
-  // atomic check-and-mark only returns staff_id on success, by design --
-  // see lib/auth.js), so a single universal redirect target is the only
-  // option, not a per-account-type one.
-  if (!consumed) return res.redirect('/staff-login');
+  // A dead-end text response used to strand whoever tapped a genuinely
+  // expired link with no way forward -- redirect to the right login screen
+  // instead, /staff-login for a PIN account and /login (email+password)
+  // for everyone else, via lib/auth.js's magicLinkAuthTypeHint (a
+  // read-only, expiry-tolerant lookup -- purely a "which screen" hint, not
+  // itself a security check; consumeMagicLink above is what actually gates
+  // login). A token this route has genuinely never seen at all (garbage,
+  // not just expired) has no hint to give, so that one case falls back to
+  // /login.
+  if (!consumed) {
+    const hint = await magicLinkAuthTypeHint(req.params.token);
+    return res.redirect(hint === 'pin' ? '/staff-login' : '/login');
+  }
   const { rows } = await pool.query(
     `select s.id, s.name, s.role, s.status, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
      from staff s left join branch b on b.id = s.branch_id where s.id = $1`,
     [consumed.staff_id]
   );
   const staff = rows[0];
-  if (!staff || staff.status !== 'active') return res.redirect('/staff-login');
+  if (!staff || staff.status !== 'active') return res.redirect(staff?.auth_type === 'pin' ? '/staff-login' : '/login');
   req.session.staff = {
     id: staff.id,
     name: staff.name,
@@ -888,6 +894,26 @@ router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
     const { rows: orderRows } = await pool.query('select fulfilment_type from "order" where id = $1', [req.params.id]);
     if (orderRows[0]?.fulfilment_type === 'pickup') {
       await notifyReadyForPickup(req.params.id).catch((err) => console.error('notifyReadyForPickup failed:', err.message));
+    }
+  }
+  // Staff hitting "Mark in delivery" themselves (handing the order to a
+  // rider directly, arranging delivery outside the app) means a still-OPEN
+  // own_riders offer for it must stop being offered around -- Chidera's
+  // ask, 2026-09-11: "when an order is marked in delivery manually from
+  // the pipeline, it should stop showing as accept on riders phones as
+  // well." Cancelling it here (not leaving it to rot until the timeout
+  // sweep) also retracts it from any rider who already has it up on
+  // screen right now, over the same offerBus every new offer already
+  // broadcasts through -- routes/rider.js's /offers/stream forwards a
+  // `retracted: true` event, and the rider app clears it if it's the one
+  // currently showing.
+  if (status === 'in_transit') {
+    const { rows: cancelledOffers } = await pool.query(
+      `update delivery_offer set status = 'CANCELLED' where order_id = $1 and status = 'OPEN' returning id, branch_id`,
+      [req.params.id]
+    );
+    for (const offer of cancelledOffers) {
+      offerBus.emit('offer', { id: offer.id, branchId: offer.branch_id, retracted: true });
     }
   }
   await logActivity(req, 'order_status_changed', { entityType: 'order', entityId: req.params.id, detail: { status } });

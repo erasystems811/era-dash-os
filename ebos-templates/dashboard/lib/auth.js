@@ -134,11 +134,15 @@ function hashMagicLinkToken(token) {
 // internally." The token itself is only ever in the URL texted to the
 // staff member; the DB keeps just its sha256 hash, so a DB leak alone can't
 // be turned into a working login the way a stored plaintext token could.
-// Single-use (consumeMagicLink below) is a soft backstop, not the real
-// security boundary -- tapping it once already plants a normal session
-// cookie (same shape /login gives, see routes/api.js), so every later tap
-// from that same device just rides that cookie and never touches the token
-// again.
+// Reusable for its whole window, not single-use -- originally built
+// single-use on the assumption that the first tap's session cookie would
+// carry every later tap, but found live, 2026-09-11: "why does the
+// dashboard link only work once? if i open it and leave and come back it
+// doesnt work again?" -- WhatsApp's own in-app browser doesn't reliably
+// keep that cookie across separate open/close cycles, so leaning on it was
+// wrong. The token is still high-entropy (32 random bytes) and only ever
+// sent to the one intended phone number, so staying valid to repeat taps
+// within a bounded window is an acceptable tradeoff, not an open door.
 export async function createMagicLink(staffId, redirectPath) {
   const token = crypto.randomBytes(32).toString('hex');
   await pool.query(
@@ -148,16 +152,30 @@ export async function createMagicLink(staffId, redirectPath) {
   return token;
 }
 
-// Marks the token used in the same query that checks it's still valid, so
-// two near-simultaneous taps of the same link can't both succeed.
+// used_at is informational only now (first-tap timestamp) -- expires_at is
+// the only real gate, so a repeat tap of the same link keeps working right
+// up until it genuinely expires.
 export async function consumeMagicLink(token) {
   const { rows } = await pool.query(
-    `update staff_magic_link set used_at = now()
-     where token_hash = $1 and used_at is null and expires_at > now()
+    `update staff_magic_link set used_at = coalesce(used_at, now())
+     where token_hash = $1 and expires_at > now()
      returning staff_id, redirect_path`,
     [hashMagicLinkToken(token)]
   );
   return rows[0] || null;
+}
+
+// Best-effort hint for the failure page's redirect target ONLY -- not a
+// security check (consumeMagicLink above is what actually gates login).
+// Tolerant of a genuinely expired token, since even a stale link should
+// still point someone at the right KIND of login screen (PIN vs password)
+// instead of a bare error page that strands them.
+export async function magicLinkAuthTypeHint(token) {
+  const { rows } = await pool.query(
+    `select s.auth_type from staff_magic_link l join staff s on s.id = l.staff_id where l.token_hash = $1`,
+    [hashMagicLinkToken(token)]
+  );
+  return rows[0]?.auth_type || null;
 }
 
 // Attaches req.staff from the session, or null. Does not block the request --
