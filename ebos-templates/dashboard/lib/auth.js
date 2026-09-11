@@ -11,6 +11,22 @@ export async function findStaffByEmail(email) {
   return rows[0] || null;
 }
 
+// Matches WhatsApp's inbound message.from (digits only, no "+") against
+// staff.phone_number regardless of exactly how that column was typed in --
+// regexp_replace on both sides rather than trusting every staff row to
+// already be stored in the same raw format sendWhatsApp needs. Only active
+// accounts, same as every other login path.
+export async function findStaffByPhoneNumber(phoneNumber) {
+  const digits = String(phoneNumber || '').replace(/\D/g, '');
+  if (!digits) return null;
+  const { rows } = await pool.query(
+    `select id, name, role, status, branch_id, auth_type, work_area
+     from staff where regexp_replace(coalesce(phone_number, ''), '\\D', '', 'g') = $1 and status = 'active'`,
+    [digits]
+  );
+  return rows[0] || null;
+}
+
 export async function verifyPassword(staff, password) {
   if (staff.status !== 'active') return false;
   return bcrypt.compare(password, staff.password_hash);

@@ -15,7 +15,7 @@ import { createInvoice } from './documents.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
-import { createMagicLink } from '../lib/auth.js';
+import { createMagicLink, findStaffByPhoneNumber } from '../lib/auth.js';
 
 // The one place that decides "who is this customer and how do we reach
 // them" by channel -- WhatsApp uses their phone number, Instagram uses
@@ -478,6 +478,53 @@ export async function handoverRecipients() {
   if (staffRows.length) return staffRows.map((s) => ({ phoneNumber: s.phone_number, staffId: s.id }));
   const { rows: biz } = await pool.query('select handover_number from business limit 1');
   return biz[0]?.handover_number ? [{ phoneNumber: biz[0].handover_number, staffId: null }] : [];
+}
+
+// A second, WhatsApp-native way into the same dashboard the browser already
+// gives owner/manager/staff logins -- not a replacement for it. Chidera
+// 2026-09-11: "not whatsapp only o, itll live on site and whatsapp." Any
+// staff member can text the bot's own number one of these trigger words at
+// any time (not just when a handover alert fires) and get a one-tap magic
+// link straight into the dashboard, opened inside WhatsApp's own in-app
+// browser exactly like the handover alert's conversation link.
+// Checked in webhook-whatsapp.js BEFORE the normal customer pipeline, so a
+// staff member's own number never gets a `customers` row created for it or
+// gets mistaken for someone trying to place an order -- only exact matches
+// on both "this text is one of these words" and "this sender is a real,
+// active staff row" are intercepted; anything else from that same number
+// (an owner testing the ordering flow, say) falls straight through to
+// dispatch() completely unaffected, same as before this existed.
+const STAFF_DASHBOARD_TRIGGERS = ['dashboard', 'panel', 'control panel'];
+
+export async function handleStaffCommand({ phoneNumber, text }) {
+  if (!STAFF_DASHBOARD_TRIGGERS.includes((text || '').trim().toLowerCase())) return false;
+  const staff = await findStaffByPhoneNumber(phoneNumber);
+  if (!staff) return false;
+  // Nothing sensible to send without a real public URL to build the link
+  // from -- but this WAS a staff dashboard request, so still report
+  // "handled" rather than letting it fall through and get treated as a
+  // customer message. Same reasoning for the try/catch below: a failed
+  // send (a stale number, the 24h template-window gap noted on handover()'s
+  // own alert) must not throw out of here -- this runs inline in
+  // webhook-whatsapp.js's per-event loop, uncaught it would abort
+  // processing of every OTHER message in the same webhook batch, not just
+  // this one.
+  if (process.env.PUBLIC_URL) {
+    try {
+      const credentials = await getWhatsAppCredentials(staff.branch_id);
+      const token = await createMagicLink(staff.id, '/');
+      await sendWhatsAppCtaUrl(
+        phoneNumber,
+        `Hi ${staff.name.split(' ')[0]}, tap below to open your dashboard.`,
+        'Open Dashboard',
+        `${process.env.PUBLIC_URL}/api/auth/magic/${token}`,
+        credentials
+      );
+    } catch (err) {
+      console.error(`Failed to send dashboard link to staff ${staff.id}:`, err.message);
+    }
+  }
+  return true;
 }
 
 // Shared between the error-recovery handover() call below and

@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, retryFailedSendAsTemplate } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, retryFailedSendAsTemplate, handleStaffCommand } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -160,6 +160,10 @@ router.post('/', async (req, res) => {
             continue;
           }
           if (message.type !== 'text') continue; // audio/video not handled yet
+          // Checked before the normal customer pipeline -- see flow.js's
+          // handleStaffCommand for why this can never be mistaken for a
+          // customer message.
+          if (await handleStaffCommand({ phoneNumber: message.from, text: message.text.body })) continue;
           await handleInboundMessage({ phoneNumber: message.from, text: message.text.body, channel: 'whatsapp', messageId: message.id, branchId });
         }
       }
