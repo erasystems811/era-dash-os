@@ -27,7 +27,13 @@ import { backupClient, pruneOldBackups } from './lib/backup.mjs';
 const DEST_DIR = process.env.ERA_BACKUP_DIR || '/opt/era-control/backups';
 const KEEP_PER_CLIENT = Number(process.env.ERA_BACKUP_KEEP || 14);
 
-async function main() {
+// Exported (not just run as a script) so panel/server.js can call this
+// directly on its own setInterval -- same reasoning as check-bot-health.mjs's
+// own main export: the panel is already a permanent background service
+// (systemd, Restart=always), so scheduling from inside it is one less
+// moving part than a separate cron entry, and lets a panel button
+// ("Run backup now") call the exact same code path as the daily run.
+export async function main() {
   const registry = loadRegistry();
   const clients = registry.clients.filter((c) => !c.offboarded && !c.customDeploy);
   if (!clients.length) {

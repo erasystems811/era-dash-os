@@ -10,6 +10,7 @@ import { startJob, getJob, runScript } from './jobs.mjs';
 import { router as workstationRoutes } from './routes/workstation.js';
 import { router as workstationEsfRoutes } from './routes/workstation-esf.js';
 import { main as runBotHealthCheck } from '../scripts/check-bot-health.mjs';
+import { main as runBackupAllClients } from '../scripts/backup-all-clients.mjs';
 
 const MIGRATIONS_DIR = path.join(process.cwd(), '..', 'ebos-templates', 'migrations');
 // Read once at boot, not per-request -- this is a static doc, not data.
@@ -283,6 +284,18 @@ function businessesSection(ebosClients) {
     <legend>Fix-bot (WhatsApp-triggered investigation agent)</legend>
     <p class="muted">Texting "fix" (or replying to a Bot Monitoring alert) on Bali's WhatsApp number triggers this. If it seems stuck or unresponsive, restart it here -- no SSH, no asking Claude.</p>
     <button type="button" onclick="restartFixbot()">Restart fix-bot</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Control server code</legend>
+    <p class="muted">Pulls the latest era-dash-os code onto this server -- no SSH needed. New scripts (like the backup button below) or route fixes take effect the moment this finishes; the panel's own code needs an actual restart to pick up changes to itself.</p>
+    <button type="button" onclick="syncCode()">Sync latest code</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Database backups</legend>
+    <p class="muted">Every client's database is backed up automatically once a day (pg_dump, pulled down to this server -- see README.md's "Backups" section for the restore command). Run it right now instead of waiting for tonight's automatic pass.</p>
+    <button type="button" onclick="runBackupNow()">Run backup now</button>
   </fieldset>
 
   <fieldset>
@@ -658,6 +671,20 @@ async function pushUpdate(name, allEbos) {
 async function restartFixbot() {
   if (!confirm('Restart the fix-bot service? Any investigation currently in progress will be interrupted.')) return;
   const res = await fetch('/api/fixbot/restart', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  pollJob(data.jobId);
+}
+
+async function syncCode() {
+  const res = await fetch('/api/sync-code', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  pollJob(data.jobId);
+}
+
+async function runBackupNow() {
+  const res = await fetch('/api/backup-now', { method: 'POST' });
   const data = await res.json();
   if (!res.ok) { alert(data.error || 'Failed'); return; }
   pollJob(data.jobId);
@@ -1271,6 +1298,27 @@ app.post('/api/fixbot/restart', (req, res) => {
   res.json({ jobId });
 });
 
+// Pulls the latest era-dash-os code onto THIS server -- the answer to "how
+// do I get a new script/fix onto the control server" without SSH.
+// scripts/sync-code.mjs does a plain `git pull --ff-only`; a script under
+// scripts/ (like backup-all-clients.mjs below) picks up the new code the
+// very next time it's spawned, no restart needed. The panel's OWN code
+// (this file) only takes effect on its next restart -- a separate,
+// deliberate step, not implied by a sync.
+app.post('/api/sync-code', (req, res) => {
+  const jobId = startJob('sync-code.mjs', []);
+  res.json({ jobId });
+});
+
+// On-demand version of the daily backup run scheduled near the bottom of
+// this file -- same script, same job-runner mechanism as everything else
+// here, so you can actually watch a backup happen instead of waiting for
+// (or just trusting) tonight's automatic run.
+app.post('/api/backup-now', (req, res) => {
+  const jobId = startJob('backup-all-clients.mjs', []);
+  res.json({ jobId });
+});
+
 // Rolls the current template/dashboard code out to an already-live client --
 // scripts/push-update.mjs itself is what's safe here (reads the server's
 // own .env back and reuses every value, never regenerates secrets); this
@@ -1378,3 +1426,21 @@ if (process.env.FIXBOT_ALERTS_ENABLED === '0') {
     runBotHealthCheck().catch((err) => console.error('Bot health check failed:', err));
   }, BOT_HEALTH_CHECK_INTERVAL_MS);
 }, 60_000);
+
+// Same reasoning as Bot Monitoring above, and same guard (FIXBOT_ALERTS_ENABLED=0
+// opts a panel instance -- the standby copy -- out, so it doesn't independently
+// back up every client and send duplicate failure alerts alongside the
+// primary's own run). Daily, not hourly -- see README.md's "Backups" section
+// for the restore command and what this actually covers. A longer initial
+// delay than the bot-health check (10 minutes, not 1) since this isn't
+// urgent the moment the process boots and there's no reason to compete with
+// whatever else is still starting up.
+const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+if (process.env.FIXBOT_ALERTS_ENABLED !== '0') {
+  setTimeout(() => {
+    runBackupAllClients().catch((err) => console.error('Backup run failed:', err));
+    setInterval(() => {
+      runBackupAllClients().catch((err) => console.error('Backup run failed:', err));
+    }, BACKUP_INTERVAL_MS);
+  }, 10 * 60_000);
+}
