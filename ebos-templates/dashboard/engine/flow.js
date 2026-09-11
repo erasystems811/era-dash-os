@@ -1818,6 +1818,21 @@ async function handleWaitingOnPayment(customer, order, text) {
     return;
   }
 
+  // Proof already sent -- Chidera 2026-09-11: "why did bot tell me to pay
+  // again after i sent okay, when ive already send receipt of payment."
+  // engine_state stays 'confirm_payment' the whole time proof is under
+  // review (only handleInboundMedia's own insert moves payment_status to
+  // 'proof_submitted', see flow.js's payment-proof handler), so a plain ack
+  // ("okay", "alright") landing here before staff confirm it used to fall
+  // straight into the reminder below and re-quote the bank details -- reads
+  // as ignoring the receipt they just sent. Checked ahead of the reminder
+  // logic below, not folded into it, since this should say the same thing
+  // every single time, not just once.
+  if (order.payment_status === 'proof_submitted') {
+    await reply(customer, `Still confirming your payment, I'll let you know shortly.`, 'payment_wait_ack');
+    return;
+  }
+
   if (order.payment_reminder_sent_at) {
     await reply(customer, `Still waiting on your payment, I'll confirm as soon as it comes through.`, 'payment_wait_ack');
     return;
