@@ -331,6 +331,21 @@ async function loadOwnAssignment(req, res) {
   return rows[0];
 }
 
+// Polled by the rider app while it's sitting on the "enter their code"
+// screen (Chidera's ask, 2026-09-11: "if a rider is manually marked
+// complete let the code stuff stop pending") -- staff have their own
+// override for a stuck delivery (routes/delivery.js's /assignments/:id/
+// release: lost code, dead phone, handed to a neighbour), which closes it
+// out on the dashboard side, but the rider's own phone had no way to find
+// out and would just sit on the code-entry form forever, then get a
+// confusing "already delivered" error the moment they actually typed a
+// code in. This lets the app notice and move on by itself.
+router.get('/assignments/:id', requireRider, async (req, res) => {
+  const assignment = await loadOwnAssignment(req, res);
+  if (assignment === null) return;
+  res.json(assignment);
+});
+
 router.post('/assignments/:id/picked-up', requireRider, async (req, res) => {
   const { rows } = await pool.query(
     `update delivery_assignment set status = 'PICKED_UP', picked_up_at = now()
@@ -374,6 +389,14 @@ router.post('/assignments/:id/deliver', requireRider, async (req, res) => {
   const code = (req.body?.code || '').trim();
   const existing = await loadOwnAssignment(req, res);
   if (existing === null) return;
+  if (existing.status === 'DELIVERED') {
+    // Staff's own override (routes/delivery.js's /assignments/:id/release)
+    // already closed this out from the dashboard side -- a real race with
+    // the rider's own code-entry poll above, not an error worth alarming
+    // them over. `alreadyDelivered: true` lets the app show the normal
+    // Delivered screen instead of a confusing "mark arrived first".
+    return res.status(409).json({ error: 'This delivery was already completed.', alreadyDelivered: true });
+  }
   if (existing.status !== 'ARRIVED') {
     return res.status(409).json({ error: `Can't complete delivery from status "${existing.status}" -- mark arrived first.` });
   }

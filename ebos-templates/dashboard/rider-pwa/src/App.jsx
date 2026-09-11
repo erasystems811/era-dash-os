@@ -226,6 +226,29 @@ function ActiveDelivery({ assignment: initialAssignment, offer, dropoffAddress, 
   // live map both stay meaningfully current while a job is actually moving.
   useLocationReporting(delivered ? null : 15_000);
 
+  // Staff have their own override for a stuck delivery (lost code, dead
+  // phone, handed to a neighbour -- routes/delivery.js's /assignments/:id/
+  // release), which closes it out on the dashboard side. Without this,
+  // the rider's phone would just sit on the code-entry screen forever with
+  // no way to know, then get a confusing "already delivered" error the
+  // moment they actually typed a code in (Chidera's ask, 2026-09-11: "if a
+  // rider is manually marked complete let the code stuff stop pending").
+  // Only polls while actually on that screen, not the whole active delivery.
+  useEffect(() => {
+    if (assignment.status !== 'ARRIVED') return;
+    const id = setInterval(async () => {
+      try {
+        const latest = await api.get(`/assignments/${assignment.id}`);
+        if (latest.status === 'DELIVERED') setDelivered(true);
+      } catch {
+        // A transient network blip here just means the next poll tries
+        // again -- never worth surfacing as an error on top of a delivery
+        // the rider is still actively trying to close out themselves.
+      }
+    }, 10_000);
+    return () => clearInterval(id);
+  }, [assignment.status, assignment.id]);
+
   async function markPickedUp() {
     setError(null);
     setBusy(true);
@@ -258,7 +281,11 @@ function ActiveDelivery({ assignment: initialAssignment, offer, dropoffAddress, 
       await api.post(`/assignments/${assignment.id}/deliver`, { code: code.trim() });
       setDelivered(true);
     } catch (err) {
-      setError(err.message);
+      // Staff's own override already closed this out on the dashboard side
+      // -- a real race with the polling effect above, not a mistake on the
+      // rider's part, so this should never look like an error to them.
+      if (err.alreadyDelivered) setDelivered(true);
+      else setError(err.message);
     } finally {
       setBusy(false);
     }

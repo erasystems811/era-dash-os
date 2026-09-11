@@ -8,7 +8,11 @@ async function request(path, options = {}) {
     credentials: 'same-origin',
   });
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+  // Extra fields the server sends alongside `error` (e.g. alreadyDelivered)
+  // are attached onto the thrown Error itself, not just its message -- a
+  // caller needing to branch on WHY a request failed, not just show the
+  // text, would otherwise have no way to get at them.
+  if (!res.ok) throw Object.assign(new Error(data?.error || `Request failed (${res.status})`), data || {});
   return data;
 }
 
