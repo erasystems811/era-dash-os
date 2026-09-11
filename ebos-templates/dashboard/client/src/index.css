@@ -24,8 +24,49 @@
   --sidebar-bg: #1b2a4a;
   --sidebar-text: #8798b5;
   --sidebar-text-active: #ffffff;
+
+  /* ---- Surface "presence" system (2026-09-11 polish pass) ----
+     Same navy/gold identity as above -- this section changes texture and
+     depth, not color. Radius is a deliberate scale (not one flat value):
+     small for compact controls, larger for anything meant to read as a
+     floating card, same relationship real-money reference apps (Hostel
+     Sure/ERA Patient) use, just tuned to EBOS's own palette. */
   --radius: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* Borders tinted from the surface they belong to instead of one flat
+     gray everywhere -- a card's border reads as "this navy system's own
+     edge", not a generic UI-kit line. */
+  --border-tint: rgba(27, 42, 74, 0.10);
+  --border-tint-strong: rgba(27, 42, 74, 0.16);
+  --gold-border: rgba(184, 150, 79, 0.35);
+
+  /* Real layered shadows: a crisp near-zero-blur "lip" as the base layer,
+     a soft diffuse layer stacked on top for real elevation -- reads as a
+     physical edge under a card, not a generic drop-shadow glow. */
   --shadow: 0 1px 0 rgba(18, 22, 28, 0.04);
+  --shadow-2xs: 0px 1px 0px rgba(18, 22, 28, 0.03);
+  --shadow-sm: 0px 1px 0px rgba(18, 22, 28, 0.04), 0px 2px 6px -2px rgba(18, 22, 28, 0.06);
+  --shadow-md: 0px 1px 0px rgba(18, 22, 28, 0.04), 0px 6px 16px -4px rgba(18, 22, 28, 0.10);
+  --shadow-lg: 0px 1px 0px rgba(18, 22, 28, 0.05), 0px 14px 32px -8px rgba(18, 22, 28, 0.16);
+
+  /* Frosted-glass surface: translucent white over a blurred body gradient
+     (see body background below) so elevated cards read as sitting above
+     the page, not painted flat onto it. */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-bg-strong: rgba(255, 255, 255, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.6);
+  --glass-blur: 16px;
+
+  /* One shared interaction overlay -- every clickable surface tints by the
+     same amount on hover/press instead of each component inventing its
+     own hover color. Dark tint because these sit on light glass surfaces. */
+  --elevate-1: rgba(18, 22, 28, 0.04);
+  --elevate-2: rgba(18, 22, 28, 0.08);
+
   --font-body: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-display: 'Space Grotesk', var(--font-body);
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
@@ -59,9 +100,40 @@ svg {
 body {
   margin: 0;
   font-family: var(--font-body);
-  background: var(--bg);
+  /* A very soft tint gradient, not a flat fill -- this is what the glass
+     cards below actually blur. On a perfectly flat background,
+     backdrop-filter has nothing to show and "glassy" cards would look
+     identical to plain semi-transparent ones. */
+  background: radial-gradient(circle at 15% 0%, rgba(27, 42, 74, 0.05), transparent 45%),
+    radial-gradient(circle at 100% 20%, rgba(184, 150, 79, 0.06), transparent 40%), var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   font-size: 14px;
+}
+
+/* Shared interaction overlay (see --elevate-1/--elevate-2 above) -- a
+   ::after tint layered over any clickable surface so hover/press feedback
+   is one consistent mechanism app-wide, not a bespoke :hover{background}
+   per component. Apply alongside a component's own background/border. */
+.hover-elevate,
+.active-elevate {
+  position: relative;
+}
+.hover-elevate::after,
+.active-elevate::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: transparent;
+  pointer-events: none;
+  transition: background-color 0.15s ease;
+}
+.hover-elevate:hover::after {
+  background: var(--elevate-1);
+}
+.active-elevate:active::after {
+  background: var(--elevate-2);
 }
 
 h1,
@@ -218,10 +290,12 @@ a:hover {
 }
 
 .card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
   padding: 20px;
   margin-bottom: 20px;
 }
@@ -318,26 +392,36 @@ button,
   font-family: inherit;
   font-size: 13.5px;
   font-weight: 600;
-  border-radius: var(--radius);
-  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--gold-border);
   padding: 8px 14px;
   cursor: pointer;
   background: var(--accent);
   color: #fff;
+  box-shadow: var(--shadow-2xs);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
 }
 button:hover {
   background: var(--accent-hover);
+  box-shadow: var(--shadow-sm);
+}
+button:active {
+  transform: translateY(1px);
+  box-shadow: none;
 }
 button.secondary {
-  background: var(--surface);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
   color: var(--text);
-  border-color: var(--border);
+  border-color: var(--glass-border);
 }
 button.secondary:hover {
-  background: var(--bg);
+  background: var(--surface);
 }
 button.danger {
   background: var(--danger);
+  border-color: rgba(216, 69, 47, 0.35);
 }
 button.danger:hover {
   background: #b91c1c;
@@ -345,6 +429,8 @@ button.danger:hover {
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
 }
 
 input,
@@ -353,17 +439,19 @@ textarea {
   font-family: inherit;
   font-size: 13.5px;
   padding: 8px 10px;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   width: 100%;
   background: var(--surface);
   color: var(--text);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 input:focus,
 select:focus,
 textarea:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 label {
@@ -396,7 +484,7 @@ label {
   background: var(--danger-soft);
   color: var(--danger);
   padding: 10px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   margin-bottom: 16px;
   font-size: 13.5px;
 }
@@ -404,7 +492,7 @@ label {
   background: var(--success-soft);
   color: var(--success);
   padding: 10px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   margin-bottom: 16px;
   font-size: 13.5px;
 }
@@ -419,14 +507,18 @@ label {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--sidebar-bg);
+  background: radial-gradient(circle at 20% 20%, rgba(184, 150, 79, 0.28), transparent 45%),
+    radial-gradient(circle at 85% 80%, rgba(255, 255, 255, 0.08), transparent 40%), var(--sidebar-bg);
 }
 .login-card {
-  background: var(--surface);
-  border-radius: 14px;
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
   padding: 36px;
   width: 340px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-lg);
 }
 .login-card h1 {
   font-size: 18px;
@@ -514,11 +606,18 @@ label {
 }
 .stat-card {
   flex: 1;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
   padding: 16px 18px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
 }
 .stat-card .value {
   font-family: var(--font-mono);
@@ -538,7 +637,7 @@ label {
   gap: 1px;
   background: var(--border);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 .fig {
@@ -631,15 +730,17 @@ label {
 
 .docket {
   display: block;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 3px;
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
   position: relative;
   padding: 12px 13px 11px;
   cursor: pointer;
   text-decoration: none;
   color: inherit;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-sm);
   transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
 .docket::before {
@@ -649,11 +750,12 @@ label {
   right: 0;
   top: -4px;
   height: 4px;
-  background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 8px);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: repeating-linear-gradient(90deg, var(--border-tint-strong) 0 4px, transparent 4px 8px);
 }
 .docket:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(18, 22, 28, 0.09);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
 }
 .docket .row1 {
   display: flex;
