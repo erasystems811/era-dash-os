@@ -31,7 +31,7 @@ import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../en
 import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort, deleteBestEffort } from '../engine/whatsapp-catalog.js';
 import { router as deliveryRoutes } from './delivery.js';
 import { router as voiceRoutes } from './voice.js';
-import { router as dineinRoutes } from './dinein.js';
+import { router as dineinRoutes, closeTableSessionIfSettled } from './dinein.js';
 import { encrypt } from '../lib/crypto.js';
 import { maybeDispatchOwnRiders, manuallyRingForRider } from '../engine/delivery-dispatch.js';
 
@@ -113,14 +113,22 @@ router.post('/logout', (req, res) => {
 // itself is the credential, single-use and short-lived (lib/auth.js).
 router.get('/auth/magic/:token', async (req, res) => {
   const consumed = await consumeMagicLink(req.params.token);
-  if (!consumed) return res.status(410).send('This link has expired. Please log in normally.');
+  // A dead-end text response stranded whoever tapped an already-used or
+  // expired link with no way forward -- redirect to /staff-login instead,
+  // which covers both account types from one screen (it has its own
+  // "Manager? Log in with email and password" link). We've lost which
+  // account this token belonged to at this point (consumeMagicLink's
+  // atomic check-and-mark only returns staff_id on success, by design --
+  // see lib/auth.js), so a single universal redirect target is the only
+  // option, not a per-account-type one.
+  if (!consumed) return res.redirect('/staff-login');
   const { rows } = await pool.query(
     `select s.id, s.name, s.role, s.status, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
      from staff s left join branch b on b.id = s.branch_id where s.id = $1`,
     [consumed.staff_id]
   );
   const staff = rows[0];
-  if (!staff || staff.status !== 'active') return res.status(403).send('This account is no longer active.');
+  if (!staff || staff.status !== 'active') return res.redirect('/staff-login');
   req.session.staff = {
     id: staff.id,
     name: staff.name,
@@ -850,6 +858,19 @@ router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
     // Fire-and-forget: a feedback-send failure should never block staff
     // from actually closing the order out.
     sendFeedbackRequest(req.params.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
+    // Dine-in only (session_id is null for pickup/delivery orders) -- if
+    // this was the last outstanding order in its table_session, close the
+    // table automatically instead of making staff also tap "Close table"
+    // separately. Chidera 2026-09-11: "marking an in house order as paid
+    // should close the table automatically." Fire-and-forget, same
+    // reasoning as sendFeedbackRequest above -- this never blocks the
+    // order actually being marked paid.
+    pool
+      .query('select session_id from "order" where id = $1', [req.params.id])
+      .then(({ rows }) => {
+        if (rows[0]?.session_id) return closeTableSessionIfSettled(rows[0].session_id, { closedBy: 'auto', staffId: req.staff.id });
+      })
+      .catch((err) => console.error('closeTableSessionIfSettled failed:', err.message));
   }
   // One "Mark as ready" click on the Preparation stage, same button
   // regardless of fulfilment_type (Chidera's call) -- everything below

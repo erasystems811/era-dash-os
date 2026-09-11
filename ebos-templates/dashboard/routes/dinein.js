@@ -181,6 +181,34 @@ router.post('/orders/:id/served', async (req, res) => {
   res.json(rows[0]);
 });
 
+// Whether every order in a table_session is settled -- the single source
+// of truth for "can this table close", shared between the manual
+// Close-table button below and closeTableSessionIfSettled's automatic
+// trigger (routes/api.js's POST /orders/:id/status, fired when marking the
+// last outstanding order paid).
+async function sessionIsSettled(sessionId) {
+  const { rows } = await pool.query(
+    `select count(*) from "order" where session_id = $1 and status not in ('completed', 'cancelled')`,
+    [sessionId]
+  );
+  return Number(rows[0].count) === 0;
+}
+
+// Closes an open table_session if -- and only if -- every order in it is
+// settled; a no-op (returns null) otherwise. closedBy distinguishes who
+// actually closed it ('staff' for the manual button, 'auto' for the
+// automatic trigger) -- both valid per schema.sql's check constraint on
+// table_session.closed_by.
+export async function closeTableSessionIfSettled(sessionId, { closedBy, staffId = null } = {}) {
+  if (!(await sessionIsSettled(sessionId))) return null;
+  const { rows } = await pool.query(
+    `update table_session set closed_at = now(), closed_by = $1, closed_by_staff = $2
+     where id = $3 and closed_at is null returning *`,
+    [closedBy, staffId, sessionId]
+  );
+  return rows[0] || null;
+}
+
 // Stage 6 -- the dashboard fallback for closing a table (spec 6.2: build
 // this regardless of POS access, it's the only close path a client with no
 // POS has at all). Doesn't send feedback itself -- that already went out
@@ -190,25 +218,22 @@ router.post('/orders/:id/served', async (req, res) => {
 // table can't free up (a new party seated, a new session started on the
 // same physical table) until every round has actually been paid, not just
 // served. Chidera 2026-09-11: "until the waiter marked paid/fulfilled from
-// the second pipline then the table can reopen."
+// the second pipline then the table can reopen." In practice this manual
+// button is now the fallback -- marking the last order paid closes the
+// table on its own (see closeTableSessionIfSettled's call site), this
+// stays for a table someone needs to force-close (e.g. a walked-out,
+// never-paid order got cancelled instead of completed).
 router.post('/tables/:id/close', requireEditorApi, async (req, res) => {
   const { rows: session } = await pool.query(
     `select id from table_session where table_id = $1 and closed_at is null`,
     [req.params.id]
   );
   if (!session[0]) return res.status(404).json({ error: 'No open session for this table.' });
-  const { rows: unpaid } = await pool.query(
-    `select count(*) from "order" where session_id = $1 and status not in ('completed', 'cancelled')`,
-    [session[0].id]
-  );
-  if (Number(unpaid[0].count) > 0) {
+  const closed = await closeTableSessionIfSettled(session[0].id, { closedBy: 'staff', staffId: req.staff.id });
+  if (!closed) {
     return res.status(409).json({ error: 'This table still has an order awaiting payment -- mark it paid first.' });
   }
-  const { rows } = await pool.query(
-    `update table_session set closed_at = now(), closed_by = 'staff', closed_by_staff = $1 where id = $2 returning *`,
-    [req.staff.id, session[0].id]
-  );
-  res.json(rows[0]);
+  res.json(closed);
 });
 
 router.delete('/tables/:id', requireEditorApi, async (req, res) => {
