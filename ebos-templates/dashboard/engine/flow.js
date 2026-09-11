@@ -1130,7 +1130,7 @@ async function orderSoFarSummary(order) {
 // is reached -- including right after handlePendingUpsell adds a drink,
 // so a drink that itself has a product_question ("hot or cold?") still
 // gets asked, the same as if it had been the very first item ordered.
-async function finishItemsCollection(customer, order, prefix = '') {
+export async function finishItemsCollection(customer, order, prefix = '') {
   const nextQuestion = await askNextItemQuestion(order.id);
   if (nextQuestion) {
     await pool.query('update "order" set pending_question_order_item_id = $1, pending_question_id = $2 where id = $3', [

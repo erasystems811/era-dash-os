@@ -6,7 +6,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage } from '../engine/menu-page-template.js';
-import { sendConfirmButtons, getOpenOrder } from '../engine/flow.js';
+import { getOpenOrder, finishItemsCollection } from '../engine/flow.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
 
@@ -120,23 +120,29 @@ router.post('/:qrToken/review', async (req, res) => {
   }
   if (!resolved.length) return res.status(400).json({ error: "Sorry, nothing in your basket is available right now." });
 
-  // Still deciding on THIS round (hasn't said yes yet) -- replace its items
-  // with the full new basket instead of creating a second, duplicate order
-  // and abandoning the first. Found live, 2026-09-11, Chidera: "dine in
-  // didnt reserve my orders fo when i tapped change it" -- every re-submit
-  // from "No, change it" (handleOrderConfirmNoTap's own menu link) silently
-  // orphaned the original order and created a fresh one, which is what
-  // actually made it look like the order had vanished.
+  // Still deciding on THIS round (hasn't said yes yet, status stays 'new'
+  // the whole time it's being decided -- see finishItemsCollection's own
+  // effect on engine_state below) -- replace its items with the full new
+  // basket instead of creating a second, duplicate order and abandoning
+  // the first. Found live, 2026-09-11, Chidera: "dine in didnt reserve my
+  // orders fo when i tapped change it" -- every re-submit from "No, change
+  // it" (handleOrderConfirmNoTap's own menu link) silently orphaned the
+  // original order and created a fresh one, which is what actually made it
+  // look like the order had vanished.
   const existing = await getOpenOrder(customer.id);
   let order;
-  if (existing && existing.engine_state === 'confirm_order' && existing.table_id === table.id) {
+  if (existing && existing.status === 'new' && existing.table_id === table.id) {
     order = existing;
     await pool.query('delete from order_item where order_id = $1', [order.id]);
   } else {
     const ref = `ORD-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    // engine_state starts at 'collect_info', not 'confirm_order' --
+    // finishItemsCollection below needs to be the one walking it forward
+    // (item questions, upsell, THEN confirm_order), same starting point
+    // handleWebMenuOrder uses for the exact same reason.
     const { rows: orderRows } = await pool.query(
       `insert into "order" (customer_id, reference, branch_id, channel, table_id, session_id, fulfilment_type, payment_mode, engine_state, status)
-       values ($1, $2, $3, 'dinein', $4, $5, 'table', 'at_table', 'confirm_order', 'new') returning *`,
+       values ($1, $2, $3, 'dinein', $4, $5, 'table', 'at_table', 'collect_info', 'new') returning *`,
       [customer.id, ref, table.branch_id, table.id, session.id]
     );
     order = orderRows[0];
@@ -149,18 +155,24 @@ router.post('/:qrToken/review', async (req, res) => {
 
   // The read-back happens in the chat, not on this page (spec 5.1/5.2) --
   // this page's own job is done once the order + items exist; dispatch()
-  // picks the rest up the next time this customer's order is touched. A
-  // dine-in order's very first message IS this read-back, sent directly
-  // here rather than waiting for dispatch() (which only reacts to an
-  // inbound customer message, and there isn't one right now).
-  const lines = resolved.map((i) => `${i.quantity}x ${i.name}: NGN ${i.price}`).join('\n');
-  await sendConfirmButtons(customer, `To confirm your order for Table ${table.label}:\n${lines}\nTotal: NGN ${total}`, 'dinein_review');
+  // picks the rest up the next time this customer's order is touched.
+  // Reuses the exact same item-question/upsell/confirm pipeline the normal
+  // ordering flow already uses (handleWebMenuOrder's own tail) instead of
+  // building its own confirm message here -- Chidera 2026-09-11: "the in
+  // house should as well ask specific questions like peppered or not and
+  // upsell." A dine-in order's very first message IS whichever of those
+  // this produces, sent directly here rather than waiting for dispatch()
+  // (which only reacts to an inbound customer message, and there isn't one
+  // right now).
+  await finishItemsCollection(customer, order, '');
 
   res.json({ ok: true });
 });
 
-// Only while the current round is still being decided (engine_state still
-// 'confirm_order', hasn't said yes yet) -- once confirmed it moves straight
+// Only while the current round is still being decided (status stays 'new'
+// through item questions, upsell, and confirm_order -- see the /review
+// route above -- and only flips to 'preparation' once the at-table
+// auto-transition actually fires) -- once confirmed it moves straight
 // through to preparation (payment_mode = 'at_table'), and reopening the
 // menu after that really is a fresh round (a table ordering drinks, then
 // food later, is two real separate kitchen tickets, not one growing
@@ -172,7 +184,7 @@ router.post('/:qrToken/review', async (req, res) => {
 // scanning again before saying yes).
 async function pendingOrderPayload(customerId, tableId) {
   const order = await getOpenOrder(customerId);
-  if (!order || order.engine_state !== 'confirm_order' || order.table_id !== tableId) return null;
+  if (!order || order.status !== 'new' || order.table_id !== tableId) return null;
   const { rows: items } = await pool.query(
     `select oi.product_id, oi.quantity, p.name from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [order.id]

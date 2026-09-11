@@ -384,83 +384,61 @@ export default function Orders() {
       )}
 
       {activeTab === 'in_house' && showTabs && (
-        <>
-          <div className="card">
-            <h3 style={{ marginTop: 0 }}>Serving</h3>
-            <p className="subtitle" style={{ marginTop: 0 }}>
-              Placed, waiting on the kitchen/bar.
-            </p>
-            <table>
-              <thead>
-                <tr>
-                  <th>Table</th>
-                  <th>Order</th>
-                  <th>Total</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {(inHouseServing || []).map((o) => (
-                  <tr key={o.id} className="clickable" onClick={() => navigate(`/orders/${o.id}`)}>
-                    <td>Table {o.table_label}</td>
-                    <td style={{ color: 'var(--text-muted)' }}>{o.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}</td>
-                    <td>NGN {Number(o.total || 0).toLocaleString()}</td>
-                    <td>
-                      <button className="secondary" onClick={(e) => markInHouseServed(e, o.id)}>
-                        Served
-                      </button>
-                    </td>
-                  </tr>
+        <div className="board" style={{ display: 'flex', gap: 14, overflowX: 'auto', paddingBottom: 8 }}>
+          {[
+            {
+              key: 'serving',
+              label: 'Serving',
+              hint: 'waiting on the kitchen/bar',
+              orders: inHouseServing || [],
+              emptyText: 'Nothing pending right now.',
+              actionLabel: 'Served',
+              onAction: markInHouseServed,
+            },
+            {
+              key: 'awaiting-payment',
+              label: 'Awaiting payment',
+              hint: "served, table can't close until paid",
+              orders: inHouseAwaitingPayment || [],
+              emptyText: 'Nothing awaiting payment.',
+              actionLabel: 'Mark paid',
+              onAction: markInHousePaid,
+            },
+          ].map((col) => (
+            <div key={col.key} className="board-column" style={{ minWidth: 260, flex: '0 0 260px' }}>
+              <div className="lane-head">
+                <h2>{col.label}</h2>
+                <span className="count mono">{col.orders.length}</span>
+                <p className="hint">{col.hint}</p>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+                {col.orders.map((o) => (
+                  <Link key={o.id} to={`/orders/${o.id}`} className="docket">
+                    <div className="row1">
+                      <span className="no mono">Table {o.table_label}</span>
+                    </div>
+                    {o.items?.length > 0 && (
+                      <ul>
+                        {o.items.map((item, i) => (
+                          <li key={i}>
+                            <b>{item.quantity}</b> {item.name}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="foot">
+                      <span className="total mono">NGN {Number(o.total || 0).toLocaleString()}</span>
+                    </div>
+                    <button style={{ marginTop: 8, width: '100%' }} onClick={(e) => col.onAction(e, o.id)}>
+                      {col.actionLabel}
+                    </button>
+                  </Link>
                 ))}
-                {!(inHouseServing || []).length && (
-                  <tr>
-                    <td colSpan={4} className="empty-state">
-                      Nothing pending right now.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="card">
-            <h3 style={{ marginTop: 0 }}>Awaiting payment</h3>
-            <p className="subtitle" style={{ marginTop: 0 }}>
-              Served, not yet paid. A table can't close until this is empty.
-            </p>
-            <table>
-              <thead>
-                <tr>
-                  <th>Table</th>
-                  <th>Order</th>
-                  <th>Total</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {(inHouseAwaitingPayment || []).map((o) => (
-                  <tr key={o.id} className="clickable" onClick={() => navigate(`/orders/${o.id}`)}>
-                    <td>Table {o.table_label}</td>
-                    <td style={{ color: 'var(--text-muted)' }}>{o.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}</td>
-                    <td>NGN {Number(o.total || 0).toLocaleString()}</td>
-                    <td>
-                      <button className="secondary" onClick={(e) => markInHousePaid(e, o.id)}>
-                        Mark paid
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {!(inHouseAwaitingPayment || []).length && (
-                  <tr>
-                    <td colSpan={4} className="empty-state">
-                      Nothing awaiting payment.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </>
+                {!col.orders.length && <div className="empty">{col.emptyText}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
 
       {activeTab === 'online' && (

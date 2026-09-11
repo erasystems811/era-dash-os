@@ -18,6 +18,11 @@ import { api } from '../api.js';
 // order gets). Adding items to an already-served order sends it back to
 // pipeline one automatically (engine/flow.js's applyOrderModifications) --
 // "some people dont order just once they just keep ordering and adding."
+// Side-by-side columns, not stacked -- Chidera 2026-09-11: "serving and
+// awaiting payment should be in a horizontal arrangement not vertical,
+// maybe a pipeline" -- same board/board-column/docket layout as Orders.jsx's
+// own kanban, so this reads as one real pipeline, not two disconnected
+// lists.
 export default function InHouse() {
   const [serving, setServing] = useState(null);
   const [awaitingPayment, setAwaitingPayment] = useState(null);
@@ -50,41 +55,40 @@ export default function InHouse() {
 
   if (!serving || !awaitingPayment) return null;
 
-  function table({ orders, emptyText, actionLabel, onAction }) {
+  function column(key, label, hint, orders, emptyText, actionLabel, onAction) {
     return (
-      <table>
-        <thead>
-          <tr>
-            <th>Table</th>
-            <th>Order</th>
-            <th>Total</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
+      <div key={key} className="board-column" style={{ minWidth: 260, flex: '0 0 260px' }}>
+        <div className="lane-head">
+          <h2>{label}</h2>
+          <span className="count mono">{orders.length}</span>
+          <p className="hint">{hint}</p>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
           {orders.map((o) => (
-            <tr key={o.id} className="clickable" onClick={() => (window.location.href = `/orders/${o.id}`)}>
-              <td>
-                <Link to={`/orders/${o.id}`}>Table {o.table_label}</Link>
-              </td>
-              <td style={{ color: 'var(--text-muted)' }}>{o.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}</td>
-              <td>NGN {Number(o.total || 0).toLocaleString()}</td>
-              <td>
-                <button className="secondary" onClick={(e) => onAction(e, o.id)}>
-                  {actionLabel}
-                </button>
-              </td>
-            </tr>
+            <Link key={o.id} to={`/orders/${o.id}`} className="docket">
+              <div className="row1">
+                <span className="no mono">Table {o.table_label}</span>
+              </div>
+              {o.items?.length > 0 && (
+                <ul>
+                  {o.items.map((item, i) => (
+                    <li key={i}>
+                      <b>{item.quantity}</b> {item.name}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="foot">
+                <span className="total mono">NGN {Number(o.total || 0).toLocaleString()}</span>
+              </div>
+              <button style={{ marginTop: 8, width: '100%' }} onClick={(e) => onAction(e, o.id)}>
+                {actionLabel}
+              </button>
+            </Link>
           ))}
-          {!orders.length && (
-            <tr>
-              <td colSpan={4} className="empty-state">
-                {emptyText}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+          {!orders.length && <div className="empty">{emptyText}</div>}
+        </div>
+      </div>
     );
   }
 
@@ -97,20 +101,17 @@ export default function InHouse() {
         </div>
       </div>
 
-      <div className="card">
-        <h3 style={{ marginTop: 0 }}>Serving</h3>
-        <p className="subtitle" style={{ marginTop: 0 }}>
-          Placed, waiting on the kitchen/bar.
-        </p>
-        {table({ orders: serving, emptyText: 'Nothing pending right now.', actionLabel: 'Served', onAction: markServed })}
-      </div>
-
-      <div className="card">
-        <h3 style={{ marginTop: 0 }}>Awaiting payment</h3>
-        <p className="subtitle" style={{ marginTop: 0 }}>
-          Served, not yet paid. A table can't close until this is empty.
-        </p>
-        {table({ orders: awaitingPayment, emptyText: 'Nothing awaiting payment.', actionLabel: 'Mark paid', onAction: markPaid })}
+      <div className="board" style={{ display: 'flex', gap: 14, overflowX: 'auto', paddingBottom: 8 }}>
+        {column('serving', 'Serving', 'waiting on the kitchen/bar', serving, 'Nothing pending right now.', 'Served', markServed)}
+        {column(
+          'awaiting-payment',
+          'Awaiting payment',
+          "served, table can't close until paid",
+          awaitingPayment,
+          'Nothing awaiting payment.',
+          'Mark paid',
+          markPaid
+        )}
       </div>
     </div>
   );
