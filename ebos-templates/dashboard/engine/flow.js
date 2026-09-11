@@ -1881,6 +1881,57 @@ async function applyOrderModifications(order, mods, { allowRemovals }) {
   return { itemLines, total, addedValue };
 }
 
+// Adding items to an already-paid order gets its own, smaller invoice --
+// only what's newly owed, not the whole order total again (the rest is
+// already paid). Chidera 2026-09-11: "calculate only their new add on and
+// send them an invoice for top up, no need for hsndvover just take the
+// order normally" -- no escalation to a human here, staff instead see it
+// land in the order's own page (OrderDetail.jsx's Top-ups card), the same
+// way the payment-proof gallery replaces a handover ping for a repeat
+// proof image.
+async function sendTopupInvoice(customer, order, addedItems, addedValue) {
+  const snapshot = addedItems.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price }));
+  const { rows: topupRows } = await pool.query(
+    `insert into order_topup (order_id, items, amount) values ($1, $2, $3) returning id`,
+    [order.id, JSON.stringify(snapshot), addedValue]
+  );
+  const topupId = topupRows[0].id;
+  const itemLines = snapshot.map((i) => `${i.quantity}x ${i.name} -- NGN ${i.quantity * Number(i.price)}`).join('\n');
+
+  const invoicePath = `/documents/topup/${topupId}`;
+  let invoiceSent = false;
+  if (process.env.PUBLIC_URL) {
+    try {
+      const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
+      if (customer.channel === 'instagram') {
+        await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
+      } else {
+        await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `topup-${order.reference}.pdf`, `Top-up invoice for order ${order.reference}`);
+      }
+      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
+      invoiceSent = true;
+    } catch (err) {
+      console.error(`Failed to send top-up invoice PDF, falling back to a text link: ${err.message}`);
+    }
+  }
+  const invoiceUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${invoicePath}` : null;
+  const invoiceLine = invoiceSent
+    ? `Your top-up invoice is attached above.`
+    : invoiceUrl
+      ? `Here's your top-up invoice: ${invoiceUrl}`
+      : `Your top-up invoice is ready.`;
+
+  const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
+  const b = biz[0] || {};
+  const hasBankDetails = b.bank_name && b.bank_account_number && b.bank_account_name;
+  const payLine = hasBankDetails
+    ? `Please pay NGN ${addedValue} for the extra item(s).\n\nBank: ${b.bank_name}\nAccount number: ${b.bank_account_number}\nAccount name: ${b.bank_account_name}\n\nThen send proof of payment here.`
+    : `You owe an extra NGN ${addedValue} for this. Let me get someone to confirm payment details with you.`;
+
+  await reply(customer, `Got it, added on:\n${itemLines}\n\n${invoiceLine}\n\n${payLine}`);
+  if (!hasBankDetails) await handover(customer, 'Top-up order ready for payment but no payment method is configured for this business yet', null, false);
+}
+
 async function handleOrderModification(customer, order, mods) {
   const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
 
@@ -1901,8 +1952,7 @@ async function handleOrderModification(customer, order, mods) {
   const summary = itemLines.join('\n');
 
   if (paid) {
-    await reply(customer, `Got it, added that on. Your order:\n${summary}\nNew total: NGN ${total} (NGN ${addedValue} more than what's already paid). Our team will confirm the extra payment with you.`);
-    await handover(customer, 'Customer added items to an already-paid order, extra payment needs confirming', null, false);
+    await sendTopupInvoice(customer, order, mods.adds, addedValue);
     return;
   }
 
@@ -3334,8 +3384,19 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
 
   const order = await getOpenOrder(customer.id);
   const awaitingPayment = order && order.engine_state === 'confirm_payment' && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted';
+  // A top-up (sendTopupInvoice, for items added after the original payment)
+  // leaves the order itself alone (engine_state/payment_status don't change
+  // for it), so its own "still waiting on a proof image" state lives on
+  // order_topup instead -- this is what lets a proof image sent after the
+  // order's already paid and moving through fulfilment still be recognised
+  // as belonging to the top-up rather than falling into "no order awaiting
+  // payment" below.
+  const { rows: pendingTopupRows } = order
+    ? await pool.query(`select id, amount from order_topup where order_id = $1 and payment_status = 'pending' order by created_at desc limit 1`, [order.id])
+    : { rows: [] };
+  const pendingTopup = pendingTopupRows[0];
 
-  if (!awaitingPayment) {
+  if (!awaitingPayment && !pendingTopup) {
     await reply(customer, `Got your ${kind}, let me get someone to take a look.`, 'media_received');
     await handover(customer, `Customer sent a ${kind} with no order currently awaiting payment`, null, false);
     return;
@@ -3343,20 +3404,37 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
 
   try {
     const dataUrl = channel === 'instagram' ? await downloadInstagramMedia(mediaId) : await downloadWhatsAppMedia(mediaId);
+    // Every proof image is kept, not overwritten -- Chidera 2026-09-11:
+    // "let the place in the dashboard that shows receipt be able to store
+    // multiple receipts image" (a top-up needs its own proof without
+    // losing the original one).
+    await pool.query(`insert into order_payment_proof (order_id, data_url) values ($1, $2)`, [order.id, dataUrl]);
+
+    if (pendingTopup) {
+      // No handover here either, same "take it normally" reasoning as
+      // sendTopupInvoice -- staff see it via the order's own Top-ups card
+      // (OrderDetail.jsx) and the payment-proof gallery, not a ping.
+      await pool.query(`update order_topup set payment_status = 'proof_submitted' where id = $1`, [pendingTopup.id]);
+      await reply(customer, `Noted, I will confirm the top-up payment and get back to you shortly.`, 'payment_proof_received');
+      return;
+    }
+
     // 'confirmation' means exactly this moment -- proof is in, pending a
     // real person's sign-off (Chidera's own words: "customer has sent
     // proof of payment and is pending confirmation") -- not "already
     // confirmed." completePayment() is what moves it past this, straight
     // to 'preparation', the instant a person (or Paystack's own webhook)
     // actually confirms it.
-    await pool.query(`update "order" set payment_proof_url = $1, payment_status = 'proof_submitted', status = 'confirmation' where id = $2`, [dataUrl, order.id]);
+    await pool.query(`update "order" set payment_status = 'proof_submitted', status = 'confirmation' where id = $1`, [order.id]);
     await reply(customer, `Noted, I will confirm the payment and get back to you shortly.`, 'payment_proof_received');
     // Staff confirming payment needs both documents in front of them at
     // once -- the invoice (what was ordered/owed) and the receipt they just
     // sent (proof it was paid) -- not a bare "check the dashboard" alert.
-    const { rows: docs } = await pool.query(`select url from generated_document where order_id = $1 and type = 'invoice' order by created_at desc limit 1`, [order.id]);
-    const invoicePath = docs[0]?.url;
-    const invoiceUrl = invoicePath && process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${invoicePath}` : null;
+    // Built directly now, not read back from generated_document -- Chidera
+    // 2026-09-11: "can the place of documents stop storing invoice and only
+    // store receipts" (createInvoice no longer inserts a row for this to
+    // read; the URL itself still renders the same either way).
+    const invoiceUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/documents/invoice/${order.id}` : null;
     await handover(
       customer,
       `Customer submitted payment proof, needs manual confirmation`,

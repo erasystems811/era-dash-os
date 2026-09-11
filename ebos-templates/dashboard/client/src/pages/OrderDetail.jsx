@@ -19,7 +19,7 @@ export default function OrderDetail() {
   const [overrideError, setOverrideError] = useState(null);
 
   if (!data) return null;
-  const { order, items, customer, documents, delivery, deliveryAssignment } = data;
+  const { order, items, customer, documents, topups = [], paymentProofs = [], delivery, deliveryAssignment } = data;
 
   async function releaseDelivery(e) {
     e.preventDefault();
@@ -48,6 +48,11 @@ export default function OrderDetail() {
 
   async function confirmPayment() {
     await api.post(`/orders/${id}/confirm-payment`);
+    load();
+  }
+
+  async function confirmTopup(topupId) {
+    await api.post(`/orders/${id}/topups/${topupId}/confirm`);
     load();
   }
 
@@ -104,19 +109,43 @@ export default function OrderDetail() {
         <p style={{ textAlign: 'right', fontWeight: 700, marginTop: 4 }}>Total: NGN {Number(order.total).toLocaleString()}</p>
       </div>
 
-      {(order.payment_proof_url || (canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted')) && (
+      {(paymentProofs.length > 0 || (canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted')) && (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Payment</h3>
-          {order.payment_proof_url ? (
-            <a href={order.payment_proof_url} target="_blank" rel="noreferrer">
-              <img src={order.payment_proof_url} alt="Payment proof" style={{ maxWidth: 260, borderRadius: 8, display: 'block', marginBottom: 12 }} />
-            </a>
+          {paymentProofs.length > 0 ? (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
+              {paymentProofs.map((p) => (
+                <a key={p.id} href={p.data_url} target="_blank" rel="noreferrer">
+                  <img src={p.data_url} alt="Payment proof" style={{ maxWidth: 200, borderRadius: 8, display: 'block' }} />
+                </a>
+              ))}
+            </div>
           ) : (
             <p className="hint">No proof of payment submitted yet.</p>
           )}
           {canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted' && (
             <button onClick={confirmPayment}>Confirm payment received</button>
           )}
+        </div>
+      )}
+
+      {topups.length > 0 && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Top-ups</h3>
+          {topups.map((t) => (
+            <div
+              key={t.id}
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--border)' }}
+            >
+              <div>
+                {t.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}
+                <div className="hint">
+                  NGN {Number(t.amount).toLocaleString()} &middot; <span className={`badge ${t.payment_status}`}>{t.payment_status}</span>
+                </div>
+              </div>
+              {canEdit(staff) && t.payment_status !== 'confirmed' && <button onClick={() => confirmTopup(t.id)}>Mark received</button>}
+            </div>
+          ))}
         </div>
       )}
 

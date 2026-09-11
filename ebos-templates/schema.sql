@@ -892,6 +892,33 @@ create index if not exists message_customer_idx on message (customer_id, created
 create index if not exists generated_document_order_idx on generated_document (order_id);
 create index if not exists generated_document_booking_idx on generated_document (booking_id);
 
+-- Adding items to an order that's already been paid for needs its own
+-- smaller "top-up" invoice -- just the extra owed, not the whole order
+-- total again (engine/flow.js's sendTopupInvoice). Chidera 2026-09-11:
+-- "calculate only their new add on and send them an invoice for top up."
+create table if not exists order_topup (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references "order"(id) on delete cascade,
+  items jsonb not null,
+  amount numeric(12,2) not null,
+  payment_status text not null default 'pending' check (payment_status in ('pending', 'proof_submitted', 'confirmed')),
+  created_at timestamptz not null default now()
+);
+create index if not exists order_topup_order_idx on order_topup (order_id);
+
+-- Every payment-proof image a customer sends, kept -- not overwritten the
+-- way order.payment_proof_url used to be. A top-up after the original
+-- payment needs its own proof without losing the first one. Chidera
+-- 2026-09-11: "let the place in the dashboard that shows receipt be able
+-- to store multiple receipts image."
+create table if not exists order_payment_proof (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references "order"(id) on delete cascade,
+  data_url text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists order_payment_proof_order_idx on order_payment_proof (order_id);
+
 -- Records every "major action" a staff member takes (order status changes,
 -- marking an order ready, confirming payment, sending a message, taking a
 -- conversation from the bot or giving it back) so a branch manager and the

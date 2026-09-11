@@ -19,6 +19,33 @@ async function loadOrderForDocument(orderId) {
   return { order, items, customer: customerRows[0] || {}, business: bizRows[0] || {} };
 }
 
+// A top-up invoice (engine/flow.js's sendTopupInvoice, for items added to an
+// already-paid order) reuses the exact same documentPage() template -- just
+// with the order_topup row's own snapshot items/amount in place of the
+// order's full items/total, and its own reference so it never reads as a
+// duplicate of the original invoice.
+async function loadTopupForDocument(topupId) {
+  const { rows: topupRows } = await pool.query('select * from order_topup where id = $1', [topupId]);
+  const topup = topupRows[0];
+  if (!topup) return null;
+  const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [topup.order_id]);
+  const order = orderRows[0];
+  if (!order) return null;
+  const { rows: customerRows } = await pool.query('select name, phone_number, address from customers where id = $1', [order.customer_id]);
+  const { rows: bizRows } = await pool.query(
+    'select name, address, phone_number, bank_name, bank_account_number, bank_account_name, logo_data_url, brand_color from business limit 1'
+  );
+  const topupOrder = {
+    ...order,
+    reference: `${order.reference}-TOPUP`,
+    total: topup.amount,
+    delivery_fee: 0,
+    payment_link_url: null,
+    payment_status: topup.payment_status === 'confirmed' ? 'confirmed' : 'pending',
+  };
+  return { order: topupOrder, items: topup.items, customer: customerRows[0] || {}, business: bizRows[0] || {} };
+}
+
 // Picks readable text over an arbitrary brand colour instead of assuming
 // it's always dark -- a business that picks a pale brand colour would
 // otherwise get white-on-white header text.
@@ -152,17 +179,42 @@ router.get('/receipt/:orderId', async (req, res) => {
   res.send(documentPage({ title: 'Receipt', ...data }));
 });
 
-// payment_proof_url is stored as a data: URI (same reasoning as
-// logo_data_url -- no file storage needed for what's realistically always a
-// small image or PDF), which is useless pasted directly into a WhatsApp
-// text message (often tens of thousands of characters, and not a URL
-// WhatsApp will render as a link anyway). This re-serves it as a real,
-// short, clickable URL, decoding the data: URI back into actual bytes with
-// the right Content-Type -- the same trick the invoice/receipt pages
-// already rely on for logos.
+router.get('/topup/:topupId', async (req, res) => {
+  const data = await loadTopupForDocument(req.params.topupId);
+  if (!data) return res.status(404).send('Not found.');
+  res.send(documentPage({ title: 'Top-up invoice', ...data }));
+});
+
+router.get('/topup/:topupId/pdf', async (req, res) => {
+  const data = await loadTopupForDocument(req.params.topupId);
+  if (!data) return res.status(404).send('Not found.');
+  const pdf = await renderPdf(documentPage({ title: 'Top-up invoice', ...data }));
+  res.set('Content-Type', 'application/pdf');
+  res.set('Content-Disposition', `inline; filename="topup-${data.order.reference}.pdf"`);
+  res.send(pdf);
+});
+
+// order_payment_proof holds every proof image a customer has ever sent for
+// this order (engine/flow.js's handleInboundMedia -- a top-up needs its own
+// proof without losing the original one), most recent first. Falls back to
+// the old single order.payment_proof_url column only when there's no row
+// yet in the new table -- an order already mid-flow the moment this shipped
+// shouldn't lose its already-submitted proof. Data URIs are useless pasted
+// directly into a WhatsApp text message (often tens of thousands of
+// characters, and not a URL WhatsApp will render as a link anyway); this
+// re-serves the latest one as a real, short, clickable URL, decoding it
+// back into actual bytes with the right Content-Type -- the same trick the
+// invoice/receipt pages already rely on for logos.
 router.get('/payment-proof/:orderId', async (req, res) => {
-  const { rows } = await pool.query('select payment_proof_url from "order" where id = $1', [req.params.orderId]);
-  const dataUrl = rows[0]?.payment_proof_url;
+  const { rows } = await pool.query(
+    'select data_url from order_payment_proof where order_id = $1 order by created_at desc limit 1',
+    [req.params.orderId]
+  );
+  let dataUrl = rows[0]?.data_url;
+  if (!dataUrl) {
+    const { rows: orderRows } = await pool.query('select payment_proof_url from "order" where id = $1', [req.params.orderId]);
+    dataUrl = orderRows[0]?.payment_proof_url;
+  }
   if (!dataUrl) return res.status(404).send('Not found.');
   const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
   if (!match) return res.status(404).send('Not found.');

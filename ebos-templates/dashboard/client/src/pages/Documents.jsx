@@ -14,8 +14,8 @@ export default function Documents() {
     <div>
       <div className="page-header">
         <div>
-          <h1>Generated documents</h1>
-          <p className="subtitle">Every invoice and receipt the bot has generated.</p>
+          <h1>Receipts</h1>
+          <p className="subtitle">Every receipt the bot has generated.</p>
         </div>
       </div>
       <div className="card">

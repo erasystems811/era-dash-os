@@ -702,6 +702,20 @@ router.get('/orders/:id', async (req, res) => {
   );
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
   const { rows: documents } = await pool.query('select * from generated_document where order_id = $1 order by created_at', [order.id]);
+  const { rows: topups } = await pool.query('select * from order_topup where order_id = $1 order by created_at', [order.id]);
+  // Most-recent-first, same reasoning as OrderDetail.jsx's gallery -- the
+  // newest proof (e.g. for a top-up just sent) is what staff need to see
+  // first. Falls back to the old single order.payment_proof_url column only
+  // when there's no row here yet -- an order already mid-flow the moment
+  // this table shipped shouldn't lose an already-submitted proof.
+  const { rows: paymentProofRows } = await pool.query(
+    'select id, data_url, created_at from order_payment_proof where order_id = $1 order by created_at desc',
+    [order.id]
+  );
+  const paymentProofs =
+    paymentProofRows.length || !order.payment_proof_url
+      ? paymentProofRows
+      : [{ id: 'legacy', data_url: order.payment_proof_url, created_at: order.created_at }];
   const { rows: delivery } = await pool.query('select * from delivery where order_id = $1', [order.id]);
   // Own_riders only -- the id staff need to call the /release override on
   // (routes/delivery.js), since `delivery` above is just the summary row
@@ -710,7 +724,16 @@ router.get('/orders/:id', async (req, res) => {
     `select id, status from delivery_assignment where order_id = $1 order by created_at desc limit 1`,
     [order.id]
   );
-  res.json({ order, items, customer: customerRows[0] || null, documents, delivery: delivery[0] || null, deliveryAssignment: assignment[0] || null });
+  res.json({
+    order,
+    items,
+    customer: customerRows[0] || null,
+    documents,
+    topups,
+    paymentProofs,
+    delivery: delivery[0] || null,
+    deliveryAssignment: assignment[0] || null,
+  });
 });
 
 // Staff-triggered, not automatic -- "I'll let you know when to pick up" (the
@@ -800,6 +823,22 @@ router.post('/orders/:id/confirm-payment', requireStaffApi, async (req, res) => 
   } catch (err) {
     res.status(502).json({ error: `Payment marked confirmed, but finishing the order failed: ${err.message}` });
   }
+});
+
+// A top-up (engine/flow.js's sendTopupInvoice, for items added to an
+// already-paid order) is its own small, separate payment -- confirming it
+// only marks that one order_topup row, deliberately not the wider
+// confirm-payment/completePayment() flow above, which is for the order's
+// original payment and would be a no-op (or worse, re-run delivery/receipt
+// side effects) on an order that's already past that point.
+router.post('/orders/:id/topups/:topupId/confirm', requireStaffApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `update order_topup set payment_status = 'confirmed' where id = $1 and order_id = $2 returning *`,
+    [req.params.topupId, req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
+  await logActivity(req, 'order_topup_confirmed', { entityType: 'order', entityId: req.params.id, detail: { topupId: req.params.topupId, amount: rows[0].amount } });
+  res.json({ ok: true });
 });
 
 // --- Bookings (Section 7.2-7.4 business types, listed the same way) -------
@@ -1457,8 +1496,13 @@ router.get('/activity-log', requireFullAccessApi, async (req, res) => {
 
 // --- Generated documents -----------------------------------------------
 
+// Receipts only -- Chidera 2026-09-11: "can the place of documents stop
+// storing invoice and only store receipts." engine/documents.js's
+// createInvoice no longer inserts a row here at all, so this filter is
+// really just for any invoice-type rows already sitting in the table from
+// before this shipped.
 router.get('/documents', async (req, res) => {
-  const { rows } = await pool.query('select * from generated_document order by created_at desc limit 200');
+  const { rows } = await pool.query(`select * from generated_document where type = 'receipt' order by created_at desc limit 200`);
   res.json(rows);
 });
 

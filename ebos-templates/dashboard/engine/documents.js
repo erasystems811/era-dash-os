@@ -4,10 +4,13 @@
 // row asks for. Keeps this file to just recording that a document exists.
 import { pool } from '../lib/db.js';
 
+// Invoices are no longer recorded in generated_document -- Chidera
+// 2026-09-11: "can the place of documents stop storing invoice and only
+// store receipts." The URL below still renders correctly with no row here
+// (routes/documents.js's /invoice/:orderId builds the page straight from
+// order/order_item/business, never reads generated_document).
 export async function createInvoice(order) {
-  const url = `/documents/invoice/${order.id}`;
-  await pool.query(`insert into generated_document (type, order_id, url) values ('invoice', $1, $2)`, [order.id, url]);
-  return url;
+  return `/documents/invoice/${order.id}`;
 }
 
 export async function createReceipt(order) {
