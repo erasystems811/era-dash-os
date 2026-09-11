@@ -15,7 +15,7 @@ import { createInvoice } from './documents.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
-import { createMagicLink, findStaffByPhoneNumber } from '../lib/auth.js';
+import { createMagicLink, findStaffByPhoneNumber, toWhatsAppDigits } from '../lib/auth.js';
 
 // The one place that decides "who is this customer and how do we reach
 // them" by channel -- WhatsApp uses their phone number, Instagram uses
@@ -473,11 +473,15 @@ async function transitionOrder(order, toState) {
 // isn't tied to any real staff account, so the main handover() alert below
 // can't bind a magic-link session to it and falls back to a bare
 // (login-required) link for that one case.
+// phoneNumber is run through toWhatsAppDigits before being returned --
+// both staff.phone_number and business.handover_number are human-typed
+// fields, commonly entered in local Nigerian format, which Meta's send API
+// rejects outright (see toWhatsAppDigits' own comment, lib/auth.js).
 export async function handoverRecipients() {
   const { rows: staffRows } = await pool.query(`select id, phone_number from staff where handover_alerts = true and phone_number is not null`);
-  if (staffRows.length) return staffRows.map((s) => ({ phoneNumber: s.phone_number, staffId: s.id }));
+  if (staffRows.length) return staffRows.map((s) => ({ phoneNumber: toWhatsAppDigits(s.phone_number), staffId: s.id }));
   const { rows: biz } = await pool.query('select handover_number from business limit 1');
-  return biz[0]?.handover_number ? [{ phoneNumber: biz[0].handover_number, staffId: null }] : [];
+  return biz[0]?.handover_number ? [{ phoneNumber: toWhatsAppDigits(biz[0].handover_number), staffId: null }] : [];
 }
 
 // A second, WhatsApp-native way into the same dashboard the browser already

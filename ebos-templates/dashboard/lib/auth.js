@@ -11,20 +11,40 @@ export async function findStaffByEmail(email) {
   return rows[0] || null;
 }
 
-// Matches WhatsApp's inbound message.from (digits only, no "+") against
-// staff.phone_number regardless of exactly how that column was typed in --
-// regexp_replace on both sides rather than trusting every staff row to
-// already be stored in the same raw format sendWhatsApp needs. Only active
-// accounts, same as every other login path.
+// A Nigerian number is routinely typed in LOCAL format (0903...) into the
+// Staff form and everywhere else a business types in a phone number, but
+// WhatsApp's own wire format (both message.from on an inbound webhook, and
+// what Meta's send API actually accepts as a recipient) is always
+// international digits with no leading 0 and no "+" (234903...). Found
+// live, 2026-09-11: a real manager's number stored as "09032637607"
+// matched no inbound sender AND was rejected outright by Meta as an
+// outbound recipient ("(#131009) The phone number is malformed") --
+// meaning handover alerts to any staff member entered in local format have
+// likely been silently failing to send this whole time, not just the new
+// WhatsApp dashboard command below. One normalizer, used both to match an
+// inbound sender and right before every outbound send that uses a stored
+// staff/business number, rather than trusting whatever format someone
+// typed in. Hardcoded to Nigeria (234) -- every business on this platform
+// today is Nigerian; a number that's neither 0-prefixed-local nor already
+// 234-prefixed is left alone rather than guessed at.
+export function toWhatsAppDigits(rawNumber, defaultCountryCode = '234') {
+  const digits = String(rawNumber || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('0')) return defaultCountryCode + digits.slice(1);
+  return digits;
+}
+
+// Small per-business table, so normalizing in JS and scanning it beats a
+// fragile "strip a leading 0 inside SQL" expression for the same match.
+// Only active accounts, same as every other login path.
 export async function findStaffByPhoneNumber(phoneNumber) {
-  const digits = String(phoneNumber || '').replace(/\D/g, '');
-  if (!digits) return null;
+  const target = toWhatsAppDigits(phoneNumber);
+  if (!target) return null;
   const { rows } = await pool.query(
-    `select id, name, role, status, branch_id, auth_type, work_area
-     from staff where regexp_replace(coalesce(phone_number, ''), '\\D', '', 'g') = $1 and status = 'active'`,
-    [digits]
+    `select id, name, role, status, branch_id, auth_type, work_area, phone_number
+     from staff where status = 'active' and phone_number is not null and phone_number != ''`
   );
-  return rows[0] || null;
+  return rows.find((s) => toWhatsAppDigits(s.phone_number) === target) || null;
 }
 
 export async function verifyPassword(staff, password) {
