@@ -484,6 +484,30 @@ export async function handoverRecipients() {
   return biz[0]?.handover_number ? [{ phoneNumber: toWhatsAppDigits(biz[0].handover_number), staffId: null }] : [];
 }
 
+// Every staff alert below (a handover, a voice callback, a delivery
+// escalation) shares the same real failure mode sendStaffReply's own
+// synchronous fallback already handles for CUSTOMER messages: WhatsApp
+// refuses a plain send to a number outside its 24h session window (error
+// 131047). Chidera 2026-09-11: "the handover needs template incase."
+// Retries with the exact same text via the same approved business_outreach
+// template, so the staff member still gets the real alert content, not a
+// generic placeholder. Deliberately does NOT also add the async retry path
+// retryFailedSendAsTemplate covers for customer messages (a DELAYED
+// failure Meta reports after first accepting the send) -- that path
+// correlates by looking up a `message` row's platform_message_id, and a
+// staff phone number is never logged as one (staff aren't `customers`
+// rows); covering the synchronous case, the common one, is the
+// proportionate fix for what was actually asked.
+export async function sendStaffAlert(to, text) {
+  try {
+    await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text, whatsappSend: sendWhatsApp });
+  } catch (err) {
+    if (!/131047/.test(err.message)) throw err;
+    const components = [{ type: 'body', parameters: [{ type: 'text', text }] }];
+    await sendWhatsAppTemplate(to, 'business_outreach', 'en_US', components);
+  }
+}
+
 // A second, WhatsApp-native way into the same dashboard the browser already
 // gives owner/manager/staff logins -- not a replacement for it. Chidera
 // 2026-09-11: "not whatsapp only o, itll live on site and whatsapp." Any
@@ -595,7 +619,7 @@ async function handover(customer, reason, extra, ackText) {
     if (voiceRecipients.length) {
       const alert = `A caller needs a person: ${displayNameFor(customer)}.\nReason: ${reason}\nThey were told someone will call them back on this number.`;
       for (const { phoneNumber: to } of voiceRecipients) {
-        await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text: alert, whatsappSend: sendWhatsApp });
+        await sendStaffAlert(to, alert);
       }
     }
     return;
@@ -626,11 +650,6 @@ async function handover(customer, reason, extra, ackText) {
     transcript
   );
   const extraLines = extra ? `\n${Object.values(extra).filter(Boolean).join('\n')}` : '';
-  // Known gap: unlike every other reply in this file, this message can go
-  // to a staff number that hasn't messaged the bot in the last 24 hours,
-  // which WhatsApp requires a template for (bot-engine/wake-template.js) --
-  // not wired yet, so a stale/never-messaged number can silently fail to
-  // receive this alert until they message the bot number first.
   for (const { phoneNumber: to, staffId } of recipients) {
     // A magic link, not a bare dashboard URL -- tapping it signs this exact
     // staff member straight in (createMagicLink/consumeMagicLink, lib/
@@ -647,7 +666,7 @@ async function handover(customer, reason, extra, ackText) {
         : `\n${process.env.PUBLIC_URL}/conversations/${customer.id}`
       : '';
     const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}${link}`;
-    await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text: alert, whatsappSend: sendWhatsApp });
+    await sendStaffAlert(to, alert);
   }
 }
 
@@ -2532,12 +2551,7 @@ function scheduleDebouncedProcessing(customer) {
           );
           const recipients = await handoverRecipients();
           for (const { phoneNumber: to } of recipients) {
-            await botEngine.sendMessage({
-              trigger: 'staff_handoff_intro',
-              to,
-              text: `${displayNameFor(customer)} sent another message while still erroring: ${lastMsg[0]?.body || '(no text)'}`,
-              whatsappSend: sendWhatsApp,
-            });
+            await sendStaffAlert(to, `${displayNameFor(customer)} sent another message while still erroring: ${lastMsg[0]?.body || '(no text)'}`);
           }
         } else {
           // First failure -- one plain message, not two -- this used to

@@ -4,9 +4,7 @@
 // -- an offer nobody accepts becomes visible to a human, not a mystery.
 import { randomBytes } from 'node:crypto';
 import { pool } from '../lib/db.js';
-import * as botEngine from '../bot-engine/index.js';
-import { sendWhatsApp } from './whatsapp-send.js';
-import { handoverRecipients, notifyDeliverySearching } from './flow.js';
+import { handoverRecipients, notifyDeliverySearching, sendStaffAlert } from './flow.js';
 import { getDeliveryConfig } from './delivery-zones.js';
 import { resolveSource } from './delivery.js';
 import { offerBus } from './offer-bus.js';
@@ -131,7 +129,7 @@ export async function sweepOfferEscalation() {
     const text = `No rider has accepted the delivery for order ${orderRows[0]?.reference || offer.order_id} (${offer.zone_name}) after ${(timeoutSeconds * 2) / 60} minutes. Please call a rider directly.`;
     for (const { phoneNumber: to } of recipients) {
       try {
-        await botEngine.sendMessage({ trigger: 'staff_handoff_intro', to, text, whatsappSend: sendWhatsApp });
+        await sendStaffAlert(to, text);
       } catch (err) {
         console.error(`Failed to alert ${to} about unaccepted delivery offer ${offer.id}:`, err);
       }
