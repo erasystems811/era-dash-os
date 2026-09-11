@@ -1,4 +1,10 @@
 :root {
+  /* Back to white/light -- Chidera's call, 2026-09-11: keep the EBOS
+     white look, don't go dark. The ERA Patient comparison isn't about
+     light vs dark -- it's that the first light pass here used shadows
+     far too weak to register (rgba ~0.04-0.16) to actually separate a
+     card from the page. Same colors as always; shadow strength below is
+     the real fix. */
   --bg: #edf0f4;
   --surface: #ffffff;
   --border: #dce1e8;
@@ -7,6 +13,10 @@
   --accent: #1b2a4a;
   --accent-hover: #132038;
   --accent-soft: rgba(27, 42, 74, 0.09);
+  /* White text on the navy accent, same as it's always been -- this token
+     just means every accent-filled element (buttons, pin pad, lane-head
+     count) reads it from one place instead of hardcoding #fff each time. */
+  --accent-foreground: #ffffff;
   --danger: #d8452f;
   --danger-soft: rgba(216, 69, 47, 0.11);
   --success: #2e7d5b;
@@ -37,28 +47,30 @@
   --radius-lg: 16px;
   --radius-xl: 20px;
 
-  /* Borders tinted from the surface they belong to instead of one flat
-     gray everywhere -- a card's border reads as "this navy system's own
-     edge", not a generic UI-kit line. */
+  /* Borders tinted navy instead of one flat gray everywhere -- a card's
+     border reads as "this navy system's own edge", not a generic UI-kit
+     line. */
   --border-tint: rgba(27, 42, 74, 0.10);
-  --border-tint-strong: rgba(27, 42, 74, 0.16);
-  --gold-border: rgba(184, 150, 79, 0.35);
+  --border-tint-strong: rgba(27, 42, 74, 0.18);
+  --gold-border: rgba(184, 150, 79, 0.45);
 
-  /* Real layered shadows: a crisp near-zero-blur "lip" as the base layer,
-     a soft diffuse layer stacked on top for real elevation -- reads as a
-     physical edge under a card, not a generic drop-shadow glow. */
-  --shadow: 0 1px 0 rgba(18, 22, 28, 0.04);
-  --shadow-2xs: 0px 1px 0px rgba(18, 22, 28, 0.03);
-  --shadow-sm: 0px 1px 0px rgba(18, 22, 28, 0.04), 0px 2px 6px -2px rgba(18, 22, 28, 0.06);
-  --shadow-md: 0px 1px 0px rgba(18, 22, 28, 0.04), 0px 6px 16px -4px rgba(18, 22, 28, 0.10);
-  --shadow-lg: 0px 1px 0px rgba(18, 22, 28, 0.05), 0px 14px 32px -8px rgba(18, 22, 28, 0.16);
+  /* Real layered shadows -- a crisp near-zero-blur "lip" as the base
+     layer, a real diffuse layer stacked on top. The first pass here used
+     ~0.04-0.16 alpha, which is too faint to read as elevation on a light
+     background -- pushed noticeably darker/bigger so cards actually
+     separate from the page instead of just gaining rounder corners. */
+  --shadow: 0 1px 0 rgba(18, 22, 28, 0.06);
+  --shadow-2xs: 0px 1px 0px rgba(18, 22, 28, 0.05);
+  --shadow-sm: 0px 1px 0px rgba(18, 22, 28, 0.06), 0px 3px 10px -2px rgba(18, 22, 28, 0.12);
+  --shadow-md: 0px 1px 0px rgba(18, 22, 28, 0.07), 0px 10px 24px -6px rgba(18, 22, 28, 0.18);
+  --shadow-lg: 0px 1px 0px rgba(18, 22, 28, 0.08), 0px 22px 44px -10px rgba(18, 22, 28, 0.26);
 
   /* Frosted-glass surface: translucent white over a blurred body gradient
      (see body background below) so elevated cards read as sitting above
      the page, not painted flat onto it. */
-  --glass-bg: rgba(255, 255, 255, 0.72);
-  --glass-bg-strong: rgba(255, 255, 255, 0.85);
-  --glass-border: rgba(255, 255, 255, 0.6);
+  --glass-bg: rgba(255, 255, 255, 0.78);
+  --glass-bg-strong: rgba(255, 255, 255, 0.9);
+  --glass-border: rgba(255, 255, 255, 0.7);
   --glass-blur: 16px;
 
   /* One shared interaction overlay -- every clickable surface tints by the
@@ -67,8 +79,13 @@
   --elevate-1: rgba(18, 22, 28, 0.04);
   --elevate-2: rgba(18, 22, 28, 0.08);
 
-  --font-body: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-display: 'Space Grotesk', var(--font-body);
+  /* Switched from Space Grotesk + IBM Plex Sans to Inter everywhere,
+     headlines included -- Chidera's call, 2026-09-11, confirmed against a
+     side-by-side: Inter read closer to the premium-SaaS feel being chased
+     here, and it's the same single-font choice ERA Patient/Hostel Sure
+     both actually make (see UI/UX design standard). */
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: var(--font-body);
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
 }
 
@@ -104,8 +121,8 @@ body {
      cards below actually blur. On a perfectly flat background,
      backdrop-filter has nothing to show and "glassy" cards would look
      identical to plain semi-transparent ones. */
-  background: radial-gradient(circle at 15% 0%, rgba(27, 42, 74, 0.05), transparent 45%),
-    radial-gradient(circle at 100% 20%, rgba(184, 150, 79, 0.06), transparent 40%), var(--bg);
+  background: radial-gradient(circle at 15% 0%, rgba(212, 175, 106, 0.10), transparent 45%),
+    radial-gradient(circle at 100% 30%, rgba(255, 255, 255, 0.04), transparent 40%), var(--bg);
   background-attachment: fixed;
   color: var(--text);
   font-size: 14px;
@@ -397,7 +414,7 @@ button,
   padding: 8px 14px;
   cursor: pointer;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-foreground);
   box-shadow: var(--shadow-2xs);
   transition: background-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
 }
@@ -563,7 +580,7 @@ label {
 }
 .pin-name-list button:hover {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-foreground);
 }
 .pin-dots {
   display: flex;
@@ -596,7 +613,7 @@ label {
 }
 .pin-pad button:hover {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-foreground);
 }
 
 .stat-row {
@@ -717,7 +734,7 @@ label {
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
-  color: #fff;
+  color: var(--accent-foreground);
   background: var(--accent);
   border-radius: 999px;
   padding: 1px 8px;
