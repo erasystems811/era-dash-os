@@ -69,15 +69,22 @@ router.get('/tables', async (req, res) => {
 
 router.post('/tables', requireEditorApi, async (req, res) => {
   const f = req.body;
-  if (!f.branch_id || !f.label) return res.status(400).json({ error: 'branch_id and label are required.' });
+  // Trimmed before it ever reaches the database -- a stray leading/trailing
+  // space here (an easy typo in the "Table label" input) breaks the QR scan
+  // match downstream (handleDineinScan compares the label against a label
+  // extracted with \s+, which collapses that stray space away, so it never
+  // matches the stored value again). Found live, 2026-09-11, Chidera: "it
+  // sint recognizinf the table, keps asking me what table am i on."
+  const label = f.label?.trim();
+  if (!f.branch_id || !label) return res.status(400).json({ error: 'branch_id and label are required.' });
   try {
     const { rows } = await pool.query(
       'insert into restaurant_table (branch_id, label, qr_token, seats) values ($1, $2, $3, $4) returning *',
-      [f.branch_id, f.label, randomBytes(16).toString('hex'), f.seats || null]
+      [f.branch_id, label, randomBytes(16).toString('hex'), f.seats || null]
     );
     res.json(rows[0]);
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: `Table "${f.label}" already exists for this branch -- a scan needs a label to mean exactly one table.` });
+    if (err.code === '23505') return res.status(409).json({ error: `Table "${label}" already exists for this branch -- a scan needs a label to mean exactly one table.` });
     throw err;
   }
 });
@@ -87,7 +94,7 @@ router.post('/tables/:id', requireEditorApi, async (req, res) => {
   try {
     const { rows } = await pool.query(
       'update restaurant_table set label = $1, seats = $2, status = $3 where id = $4 returning *',
-      [f.label, f.seats || null, f.status || 'active', req.params.id]
+      [f.label?.trim(), f.seats || null, f.status || 'active', req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Table not found.' });
     res.json(rows[0]);
@@ -159,15 +166,6 @@ router.post('/feedback/:id/action', requireEditorApi, async (req, res) => {
   const { rows } = await pool.query(
     `update feedback set status = 'actioned', actioned_by = $1 where id = $2 returning *`,
     [req.staff.id, req.params.id]
-  );
-  if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
-  res.json(rows[0]);
-});
-
-router.post('/waiter-calls/:id/resolve', async (req, res) => {
-  const { rows } = await pool.query(
-    `update waiter_call set status = 'resolved', resolved_by = $1, resolved_at = now() where id = $2 returning *`,
-    [req.staff?.id || null, req.params.id]
   );
   if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
   res.json(rows[0]);

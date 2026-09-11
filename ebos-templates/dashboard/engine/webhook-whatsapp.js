@@ -137,7 +137,7 @@ router.post('/', async (req, res) => {
             const buttonTitle = message.interactive.button_reply.title;
             if (buttonId === 'start_order') {
               await handleStartOrderTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
-            } else if (['dinein_menu', 'dinein_waiter', 'dinein_specials', 'dinein_feedback_good', 'dinein_feedback_alright', 'dinein_feedback_bad'].includes(buttonId)) {
+            } else if (['dinein_menu', 'dinein_specials', 'dinein_feedback_good', 'dinein_feedback_alright', 'dinein_feedback_bad'].includes(buttonId)) {
               await handleDineinButtonTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
             } else if (buttonId === 'order_confirm_yes') {
               // flow.js's sendConfirmButtons -- put through the exact same

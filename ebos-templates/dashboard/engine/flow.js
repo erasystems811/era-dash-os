@@ -2658,7 +2658,6 @@ async function sendDineinWelcome(customer, table) {
   const body = `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
   const buttons = [
     { id: 'dinein_menu', title: 'See the menu' },
-    { id: 'dinein_waiter', title: 'Call a waiter' },
     { id: 'dinein_specials', title: "Today's specials" },
   ];
   // Same cover-photo mechanism the normal chat greeting already uses
@@ -2695,8 +2694,14 @@ async function handleDineinScan(customer, text) {
     label = text.trim();
   }
 
+  // trim(label) -- routes/dinein.js's POST /tables now trims on save, but
+  // this stays defensive against any table saved before that fix (found
+  // live, 2026-09-11: "it sint recognizinf the table" -- two of era-demo's
+  // own tables had a stray leading space in their stored label, which
+  // \s+ above strips out of the scanned text but never out of the stored
+  // value, so an exact match against the untrimmed label failed forever).
   const { rows: tableRows } = await pool.query(
-    `select * from restaurant_table where branch_id = $1 and lower(label) = lower($2) and status = 'active'`,
+    `select * from restaurant_table where branch_id = $1 and lower(trim(label)) = lower($2) and status = 'active'`,
     [customer.branch_id, label]
   );
   const table = tableRows[0];
@@ -2750,12 +2755,6 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
   const session = await currentDineinSession(customer);
   if (!session) {
     await reply(customer, 'Please scan your table\'s QR code to get started.', 'dinein_no_session');
-    return;
-  }
-
-  if (buttonId === 'dinein_waiter') {
-    await pool.query('insert into waiter_call (session_id, table_id) values ($1, $2)', [session.id, session.table_id]);
-    await reply(customer, "Someone's on the way!", 'dinein_waiter_called');
     return;
   }
 

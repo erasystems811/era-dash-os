@@ -169,12 +169,6 @@ function NeedsAttention() {
     load();
   }
 
-  async function resolveWaiterCall(id, e) {
-    e.stopPropagation();
-    await api.post(`/dinein/waiter-calls/${id}/resolve`);
-    load();
-  }
-
   if (!rows) return null;
 
   return (
@@ -193,11 +187,7 @@ function NeedsAttention() {
         <tbody>
           {rows.map((r) => {
             const isDelivery = r.kind === 'delivery';
-            const isWaiterCall = r.kind === 'waiter_call';
-            // A waiter call has no customer conversation to open at all --
-            // just a table that needs a person, so this row isn't a link
-            // anywhere, unlike every other kind here.
-            const href = isDelivery ? `/orders/${r.order_id}` : isWaiterCall ? null : `/conversations/${r.id}`;
+            const href = isDelivery ? `/orders/${r.order_id}` : `/conversations/${r.id}`;
             return (
               <tr key={`${r.kind}-${r.id}`} className={href ? 'clickable' : ''} onClick={href ? () => (window.location.href = href) : undefined}>
                 <td>
@@ -210,8 +200,6 @@ function NeedsAttention() {
                 <td>
                   {isDelivery ? (
                     <span className="badge new">delivery</span>
-                  ) : isWaiterCall ? (
-                    <span className="badge new">dine-in</span>
                   ) : (
                     <span className={`badge ${r.channel}`}>{r.channel}</span>
                   )}
@@ -230,11 +218,6 @@ function NeedsAttention() {
                     )}
                     {r.kind === 'callback' && (
                       <button className="secondary" onClick={(e) => resolveCallback(r.callback_task_id, e)}>
-                        Mark resolved
-                      </button>
-                    )}
-                    {isWaiterCall && (
-                      <button className="secondary" onClick={(e) => resolveWaiterCall(r.id, e)}>
                         Mark resolved
                       </button>
                     )}
