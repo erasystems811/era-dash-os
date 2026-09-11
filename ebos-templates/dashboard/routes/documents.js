@@ -60,8 +60,16 @@ function readableTextColor(hex) {
   return luminance > 0.6 ? '#111827' : '#ffffff';
 }
 
+// Same warm paper/Fraunces/Inter app-shell as the web menu, tracking, and
+// feedback-form pages -- Chidera 2026-09-11: "can invoice be an internal
+// web page too?" Font loading here is deliberately a normal, BLOCKING
+// stylesheet <link> (not the async media="print" trick those other pages
+// use) -- this same markup is also what Gotenberg screenshots straight to
+// PDF (renderPdf below), which never waits around for a font to swap in
+// after first paint the way a live browser tab would; a page that starts
+// synchronous never sends a customer a PDF missing its own brand fonts.
 function documentPage({ title, business, customer, order, items }) {
-  const brand = business.brand_color || '#111827';
+  const brand = business.brand_color || '#1C1815';
   const onBrand = readableTextColor(brand);
   const rows = items
     .map(
@@ -77,25 +85,32 @@ function documentPage({ title, business, customer, order, items }) {
       : '';
 
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>${esc(title)} ${esc(order.reference)}</title>
+<html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} ${esc(order.reference)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap">
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 680px; margin: 2.5rem auto; padding: 0 1rem; color: #111827; }
+  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB}
+  *{box-sizing:border-box}
+  html,body{background:var(--paper)}
+  body { font-family: "Inter", system-ui, sans-serif; max-width: 640px; margin: 2.5rem auto; padding: 0 1rem 3rem; color: var(--ink); }
   .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
-  .logo { max-height: 48px; max-width: 200px; margin-bottom: 6px; }
-  .biz-name { font-weight: 700; font-size: 16px; }
-  .doc-title { font-size: 26px; font-weight: 800; text-align: right; letter-spacing: 0.02em; }
-  .doc-meta { text-align: right; font-size: 12.5px; color: #6b7280; margin-top: 4px; }
-  .bill-to { background: #f3f4f6; border-radius: 8px; padding: 14px 16px; margin: 18px 0; }
-  .bill-to .label { font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: 0.04em; }
-  table { border-collapse: collapse; width: 100%; margin: 18px 0; }
-  th { background: ${brand}; color: ${onBrand}; text-align: left; padding: 9px 12px; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.03em; }
-  td { padding: 10px 12px; border-bottom: 1px solid #e5e7eb; font-size: 14px; }
-  .total-row { text-align: right; font-size: 16px; font-weight: 800; margin: 14px 0 26px; }
-  .boxes { display: flex; gap: 16px; }
-  .box { flex: 1; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; }
-  .box .label { font-size: 11px; font-weight: 700; color: #6b7280; letter-spacing: 0.04em; margin-bottom: 8px; }
-  .pay-btn { display: inline-block; margin-top: 10px; background: ${brand}; color: ${onBrand}; text-decoration: none; padding: 9px 16px; border-radius: 8px; font-weight: 700; font-size: 13.5px; }
-  .footer { text-align: center; color: #9ca3af; font-size: 12px; margin-top: 32px; }
+  .logo { max-height: 48px; max-width: 200px; margin-bottom: 6px; border-radius: 6px; }
+  .biz-name { font-family: "Fraunces", serif; font-weight: 700; font-size: 17px; }
+  .doc-title { font-family: "Fraunces", serif; font-size: 24px; font-weight: 700; text-align: right; letter-spacing: 0.01em; }
+  .doc-meta { text-align: right; font-size: 12.5px; color: var(--mid); margin-top: 4px; }
+  .bill-to { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 18px 0; }
+  .bill-to .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; }
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; background: #fff; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); }
+  th { background: ${brand}; color: ${onBrand}; text-align: left; padding: 10px 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
+  tr:last-child td { border-bottom: 0; }
+  .total-row { text-align: right; font-size: 17px; font-weight: 700; margin: 14px 4px 26px; }
+  .boxes { display: flex; gap: 16px; flex-wrap: wrap; }
+  .box { flex: 1; min-width: 200px; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .box .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; margin-bottom: 8px; }
+  .pay-btn { display: inline-block; margin-top: 10px; background: ${brand}; color: ${onBrand}; text-decoration: none; padding: 9px 16px; border-radius: 999px; font-weight: 600; font-size: 13.5px; }
+  .footer { text-align: center; color: var(--mid); font-size: 12px; margin-top: 32px; }
 </style></head>
 <body>
   <div class="header">
