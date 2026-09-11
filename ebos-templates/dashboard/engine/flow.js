@@ -11,7 +11,7 @@ import { askJson, askText } from './claude.js';
 import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
-import { createInvoice, createReceipt } from './documents.js';
+import { createInvoice } from './documents.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
@@ -1425,14 +1425,13 @@ async function handleCollectFulfilment(customer, order, text) {
   // the real state machine (confirm_payment -> payment_acceptance ->
   // fulfilment are the only legal next steps from confirm_order, see
   // bot_state's seed data), just with no message or wait at any of them --
-  // same status/receipt handling completePayment gives every other order,
-  // minus the delivery/pickup-specific messaging that makes no sense for
-  // someone already sitting at the table.
+  // same status handling completePayment gives every other order, minus
+  // the delivery/pickup-specific messaging that makes no sense for someone
+  // already sitting at the table.
   if (order.payment_mode === 'at_table') {
     await transitionOrder(order, 'confirm_payment');
     await transitionOrder(order, 'payment_acceptance');
     await pool.query(`update "order" set status = 'preparation' where id = $1`, [order.id]);
-    await createReceipt(order);
     await transitionOrder(order, 'fulfilment');
     await reply(customer, 'Your order has been placed. Thank you!', 'dinein_order_placed');
     return;
@@ -2329,7 +2328,6 @@ export async function completePayment(orderId) {
   // something the bot decides -- payment succeeding is not the same fact
   // as food being ready.
   await pool.query(`update "order" set status = 'preparation' where id = $1`, [order.id]);
-  await createReceipt(order);
   await transitionOrder(order, 'fulfilment');
 
   if (order.fulfilment_type === 'delivery') {

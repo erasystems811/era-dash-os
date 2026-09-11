@@ -173,12 +173,6 @@ router.get('/invoice/:orderId/pdf', async (req, res) => {
   res.send(pdf);
 });
 
-router.get('/receipt/:orderId', async (req, res) => {
-  const data = await loadOrderForDocument(req.params.orderId);
-  if (!data) return res.status(404).send('Not found.');
-  res.send(documentPage({ title: 'Receipt', ...data }));
-});
-
 router.get('/topup/:topupId', async (req, res) => {
   const data = await loadTopupForDocument(req.params.topupId);
   if (!data) return res.status(404).send('Not found.');

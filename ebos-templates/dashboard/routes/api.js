@@ -701,7 +701,6 @@ router.get('/orders/:id', async (req, res) => {
     [order.id]
   );
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
-  const { rows: documents } = await pool.query('select * from generated_document where order_id = $1 order by created_at', [order.id]);
   const { rows: topups } = await pool.query('select * from order_topup where order_id = $1 order by created_at', [order.id]);
   // Most-recent-first, same reasoning as OrderDetail.jsx's gallery -- the
   // newest proof (e.g. for a top-up just sent) is what staff need to see
@@ -728,7 +727,6 @@ router.get('/orders/:id', async (req, res) => {
     order,
     items,
     customer: customerRows[0] || null,
-    documents,
     topups,
     paymentProofs,
     delivery: delivery[0] || null,
@@ -1496,13 +1494,21 @@ router.get('/activity-log', requireFullAccessApi, async (req, res) => {
 
 // --- Generated documents -----------------------------------------------
 
-// Receipts only -- Chidera 2026-09-11: "can the place of documents stop
-// storing invoice and only store receipts." engine/documents.js's
-// createInvoice no longer inserts a row here at all, so this filter is
-// really just for any invoice-type rows already sitting in the table from
-// before this shipped.
+// "Receipt" means the real payment-proof photo a customer sent, not a
+// system-generated document -- Chidera 2026-09-11: "receipts on dashboard
+// are the actual payment proofs that the customers send that they confirm
+// not ai generated pdf." generated_document (and engine/documents.js's
+// createReceipt, which used to populate it) is gone entirely now -- see
+// that commit's message for why it existed and why nothing reads it
+// anymore.
 router.get('/documents', async (req, res) => {
-  const { rows } = await pool.query(`select * from generated_document where type = 'receipt' order by created_at desc limit 200`);
+  const { rows } = await pool.query(
+    `select p.id, p.data_url, p.created_at, o.id as order_id, o.reference, c.name as customer_name, c.phone_number as customer_phone
+     from order_payment_proof p
+     join "order" o on o.id = p.order_id
+     join customers c on c.id = o.customer_id
+     order by p.created_at desc limit 200`
+  );
   res.json(rows);
 });
 

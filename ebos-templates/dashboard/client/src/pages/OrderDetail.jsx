@@ -19,7 +19,7 @@ export default function OrderDetail() {
   const [overrideError, setOverrideError] = useState(null);
 
   if (!data) return null;
-  const { order, items, customer, documents, topups = [], paymentProofs = [], delivery, deliveryAssignment } = data;
+  const { order, items, customer, topups = [], paymentProofs = [], delivery, deliveryAssignment } = data;
 
   async function releaseDelivery(e) {
     e.preventDefault();
@@ -181,17 +181,6 @@ export default function OrderDetail() {
               </form>
             </div>
           )}
-        </div>
-      )}
-
-      {documents.length > 0 && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>Documents</h3>
-          {documents.map((d) => (
-            <a key={d.id} href={d.url} target="_blank" rel="noreferrer" style={{ marginRight: 12 }}>
-              {d.type}
-            </a>
-          ))}
         </div>
       )}
 
