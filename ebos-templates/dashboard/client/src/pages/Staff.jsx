@@ -4,7 +4,7 @@ import { useStaff, canEdit } from '../StaffContext.jsx';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
 
 const EMPTY = { name: '', phone_number: '', email: '', password: '', role: 'manager', branch_id: '' };
-const EMPTY_PIN = { name: '', pin: '' };
+const EMPTY_PIN = { name: '', pin: '', work_area: '' };
 
 export default function StaffPage() {
   const { staff } = useStaff();
@@ -26,10 +26,16 @@ export default function StaffPage() {
   const [pinForm, setPinForm] = useState(EMPTY_PIN);
   const [error, setError] = useState(null);
   const [pinError, setPinError] = useState(null);
+  // Work area (Online/In House) only means anything once dine-in is on --
+  // Chidera 2026-09-11: "theyll be 2 types of staff for people with dine
+  // in toggle on." Genuinely inert (the field doesn't even render) while
+  // it's off, same rule Layout.jsx's own add-on nav items follow.
+  const [dineinEnabled, setDineinEnabled] = useState(false);
 
   function load() {
     api.get('/staff').then(setList);
     api.get('/branches').then(setBranches);
+    api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
   }
   useEffect(load, []);
 
@@ -133,6 +139,7 @@ export default function StaffPage() {
               <th>Phone</th>
               <th>Role</th>
               {showBranches && <th>Branch</th>}
+              {dineinEnabled && <th>Work area</th>}
               <th>Status</th>
               <th>Handover alerts</th>
               {editable && <th></th>}
@@ -160,6 +167,9 @@ export default function StaffPage() {
                       p.branch_name || 'All branches'
                     )}
                   </td>
+                )}
+                {dineinEnabled && (
+                  <td>{p.work_area === 'online' ? 'Online' : p.work_area === 'in_house' ? 'In House' : 'All'}</td>
                 )}
                 <td>
                   <span className={`badge ${p.status}`}>{p.status}</span>
@@ -258,6 +268,12 @@ export default function StaffPage() {
             No email needed -- they sign in on the shared dashboard device with their name and this 4-digit PIN. They only ever see
             Orders, Catalogue, Conversations, Knowledge base, and Documents.
           </p>
+          {dineinEnabled && (
+            <p className="subtitle">
+              With dine-in on, you can lock a PIN account to just Online orders or just In House -- leave it "All" for the usual
+              full view.
+            </p>
+          )}
           {pinError && <div className="error-banner">{pinError}</div>}
           <form onSubmit={addPin}>
             <div className="form-row">
@@ -276,6 +292,16 @@ export default function StaffPage() {
                   required
                 />
               </div>
+              {dineinEnabled && (
+                <div className="field" style={{ maxWidth: 180 }}>
+                  <label>Work area</label>
+                  <select value={pinForm.work_area} onChange={(e) => setPinForm({ ...pinForm, work_area: e.target.value })}>
+                    <option value="">All (default)</option>
+                    <option value="online">Online only</option>
+                    <option value="in_house">In House only</option>
+                  </select>
+                </div>
+              )}
             </div>
             <button type="submit">Add staff</button>
           </form>

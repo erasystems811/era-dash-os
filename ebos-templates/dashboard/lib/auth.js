@@ -3,7 +3,7 @@ import { pool } from './db.js';
 
 export async function findStaffByEmail(email) {
   const { rows } = await pool.query(
-    `select s.id, s.name, s.email, s.password_hash, s.role, s.status, s.branch_id, s.auth_type, b.name as branch_name
+    `select s.id, s.name, s.email, s.password_hash, s.role, s.status, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
      from staff s left join branch b on b.id = s.branch_id where s.email = $1`,
     [email.trim().toLowerCase()]
   );
@@ -26,7 +26,7 @@ export function hashPassword(password) {
 // attacker is stuck guessing against exactly one person.
 export async function findPinStaffById(branchId, staffId) {
   const { rows } = await pool.query(
-    `select id, name, role, status, branch_id, auth_type, pin_hash,
+    `select id, name, role, status, branch_id, auth_type, pin_hash, work_area,
             pin_failed_attempts, pin_locked_until
      from staff where id = $1 and branch_id = $2 and auth_type = 'pin'`,
     [staffId, branchId]
@@ -129,6 +129,17 @@ export function requireFullAccessApi(req, res, next) {
 // branch specifically" with one mechanism.
 export function scopeToBranch(req, res, next) {
   req.branchId = req.staff?.branch_id || req.query.branch_id || null;
+  next();
+}
+
+// Same idiom as scopeToBranch, one request-scoped value every route after
+// this filters by -- null (owner/manager, or any staff account from before
+// work_area existed) means unrestricted, exactly today's behavior. Set at
+// login time (staff.work_area), never overridable by a query param the way
+// branch can be for an owner -- there's no legitimate reason for a scoped
+// staff session to ever act outside its own work area.
+export function scopeToWorkArea(req, res, next) {
+  req.workArea = req.staff?.work_area || null;
   next();
 }
 

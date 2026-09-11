@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
 import AllBranches from './AllBranches.jsx';
-import { useStaff, canEdit } from '../StaffContext.jsx';
+import { useStaff, canEdit, isPinTier, workAreaOf } from '../StaffContext.jsx';
 import { nextStageFor, ORDER_COLUMNS as COLUMNS, isRecentlyCompleted } from '../orderStages.js';
 
 // Purely a visual affordance -- a long unattended wait means something
@@ -220,10 +220,41 @@ export default function Orders() {
   const [today, setToday] = useState(null);
   const [showNewOrder, setShowNewOrder] = useState(false);
 
+  // Online/In House split -- owner/manager only (Chidera 2026-09-11: "this
+  // 2 tab thing should only be on manger or owner side, not for staffs
+  // now"). A work_area-scoped staff account never sees this switcher at
+  // all: 'online' lands here too but with a server-already-filtered
+  // `orders` (lib/auth.js's scopeToWorkArea), and 'in_house' never reaches
+  // this page in the first place (App.jsx redirects it to /in-house).
+  const [dineinEnabled, setDineinEnabled] = useState(false);
+  const [activeTab, setActiveTab] = useState('online');
+  const [inHouseOrders, setInHouseOrders] = useState(null);
+  const showTabs = dineinEnabled && !isPinTier(staff);
+
+  function loadInHouse() {
+    // Swallowed on failure, not surfaced -- an 'online'-scoped staff
+    // session is server-blocked from this (lib/auth.js's scopeToWorkArea
+    // gate on /dinein), and showTabs already keeps them from ever seeing
+    // anything that would depend on it.
+    api
+      .get('/dinein/orders/pending')
+      .then(setInHouseOrders)
+      .catch(() => setInHouseOrders([]));
+  }
+
   function load() {
     const q = scopeQuery(scope);
     api.get(`/orders${q}`).then(setOrders);
     api.get(`/orders/stats/today${q}`).then(setToday);
+    api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
+    loadInHouse();
+  }
+
+  async function markInHouseFulfilled(e, orderId) {
+    e.preventDefault();
+    e.stopPropagation();
+    await api.post(`/orders/${orderId}/status`, { status: 'completed' });
+    loadInHouse();
   }
 
   // e.preventDefault/stopPropagation on every one of these -- each docket
@@ -286,7 +317,17 @@ export default function Orders() {
 
   if (!orders) return null;
 
-  const cancelled = orders.filter((o) => o.status === 'cancelled').length;
+  // channel !== 'dinein' is the one real split between the two worlds --
+  // everything else (branch, status, payment) already applies equally to
+  // both. Used for the kanban itself and every stat card above it, so an
+  // owner's Online tab genuinely never shows a dine-in order mixed in.
+  const onlineOrders = orders.filter((o) => o.channel !== 'dinein');
+  const cancelled = onlineOrders.filter((o) => o.status === 'cancelled').length;
+  // 'confirmation' is the same "needs a look" state ORDER_COLUMNS already
+  // hints at -- an unread-style count, not every order, same reasoning as
+  // In House's own badge below (a queue depth, not a total).
+  const onlineNeedsAttention = onlineOrders.filter((o) => o.status === 'confirmation').length;
+  const inHouseCount = (inHouseOrders || []).length;
 
   return (
     <div>
@@ -295,9 +336,73 @@ export default function Orders() {
           <h1>Orders</h1>
           <p className="subtitle">Every order that has come in through the bot or the dashboard.</p>
         </div>
-        {canEdit(staff) && !showNewOrder && <button onClick={() => setShowNewOrder(true)}>Create delivery order</button>}
+        {activeTab === 'online' && canEdit(staff) && !showNewOrder && (
+          <button onClick={() => setShowNewOrder(true)}>Create delivery order</button>
+        )}
       </div>
 
+      {showTabs && (
+        <div className="tab-row" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          <button className={activeTab === 'online' ? '' : 'secondary'} onClick={() => setActiveTab('online')}>
+            Online
+            {onlineNeedsAttention > 0 && (
+              <span className="badge new" style={{ marginLeft: 8 }}>
+                {onlineNeedsAttention}
+              </span>
+            )}
+          </button>
+          <button className={activeTab === 'in_house' ? '' : 'secondary'} onClick={() => setActiveTab('in_house')}>
+            In House
+            {inHouseCount > 0 && (
+              <span className="badge new" style={{ marginLeft: 8 }}>
+                {inHouseCount}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
+
+      {activeTab === 'in_house' && showTabs && (
+        <div className="card">
+          <p className="subtitle" style={{ marginTop: 0 }}>
+            Dine-in orders placed and waiting on the kitchen/bar. Oldest first.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Table</th>
+                <th>Order</th>
+                <th>Total</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {(inHouseOrders || []).map((o) => (
+                <tr key={o.id} className="clickable" onClick={() => navigate(`/orders/${o.id}`)}>
+                  <td>Table {o.table_label}</td>
+                  <td style={{ color: 'var(--text-muted)' }}>{o.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}</td>
+                  <td>NGN {Number(o.total || 0).toLocaleString()}</td>
+                  <td>
+                    <button className="secondary" onClick={(e) => markInHouseFulfilled(e, o.id)}>
+                      Mark fulfilled
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!(inHouseOrders || []).length && (
+                <tr>
+                  <td colSpan={4} className="empty-state">
+                    Nothing pending right now.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {activeTab === 'online' && (
+        <>
       {showNewOrder && (
         <NewOrderForm
           onCreated={(order) => {
@@ -310,11 +415,13 @@ export default function Orders() {
 
       <div className="stat-row">
         <div className="stat-card">
-          <div className="value">{orders.length}</div>
+          <div className="value">{onlineOrders.length}</div>
           <div className="label">Total orders</div>
         </div>
         <div className="stat-card">
-          <div className="value">{orders.filter((o) => o.payment_status !== 'accepted' && o.payment_status !== 'confirmed').length}</div>
+          <div className="value">
+            {onlineOrders.filter((o) => o.payment_status !== 'accepted' && o.payment_status !== 'confirmed').length}
+          </div>
           <div className="label">Awaiting payment</div>
         </div>
         <div className="stat-card">
@@ -353,7 +460,7 @@ export default function Orders() {
 
       <div className="board" style={{ display: 'flex', gap: 14, overflowX: 'auto', paddingBottom: 8 }}>
         {COLUMNS.map((col) => {
-          const colOrders = orders.filter((o) => o.status === col.key && (col.key !== 'completed' || isRecentlyCompleted(o)));
+          const colOrders = onlineOrders.filter((o) => o.status === col.key && (col.key !== 'completed' || isRecentlyCompleted(o)));
           return (
             <div key={col.key} className="board-column" style={{ minWidth: 220, flex: '0 0 220px' }}>
               <div className="lane-head">
@@ -414,6 +521,8 @@ export default function Orders() {
           );
         })}
       </div>
+        </>
+      )}
     </div>
   );
 }

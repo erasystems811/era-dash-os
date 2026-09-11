@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { useStaff, isPinTier } from '../StaffContext.jsx';
+import { useStaff, isPinTier, workAreaOf } from '../StaffContext.jsx';
 import { useScope } from '../ScopeContext.jsx';
 import { api } from '../api.js';
 
@@ -34,6 +34,20 @@ const PIN_NAV = [
   { to: '/catalogue', label: 'Catalogue' },
   { to: '/knowledge-base', label: 'Knowledge base' },
   { to: '/documents', label: 'Documents' },
+];
+
+// work_area splits PIN staff further, once a business has dine-in on --
+// Chidera 2026-09-11: "theyll be 2 types of staff... the in house and
+// online staff... i can just give them their part to manage." 'online'
+// stays PIN_NAV's Orders board (server-side filtered to non-dine-in
+// orders, lib/auth.js's scopeToWorkArea) and never sees Dine-in.
+// 'in_house' is deliberately the SMALLEST nav in the app -- just their
+// pending-orders queue and the table/QR management they'd actually need on
+// the floor, nothing a counter/delivery-focused tab would ever mean to
+// them.
+const IN_HOUSE_NAV = [
+  { to: '/in-house', label: 'Orders', end: true },
+  { to: '/dinein', label: 'Dine-in' },
 ];
 
 export default function Layout() {
@@ -74,7 +88,15 @@ export default function Layout() {
   // in the nav; requireEditorApi on their write routes already governs
   // who can actually change anything once there.
   const baseNav = locked ? BASE_NAV.filter((item) => item.to !== '/branches') : BASE_NAV;
-  const NAV = isPinTier(staff) ? PIN_NAV : addOnItems.length ? [...baseNav.slice(0, 2), ...addOnItems, ...baseNav.slice(2)] : baseNav;
+  const workArea = workAreaOf(staff);
+  const NAV =
+    workArea === 'in_house'
+      ? IN_HOUSE_NAV
+      : isPinTier(staff)
+        ? PIN_NAV
+        : addOnItems.length
+          ? [...baseNav.slice(0, 2), ...addOnItems, ...baseNav.slice(2)]
+          : baseNav;
 
   useEffect(() => {
     api.get('/business').then((b) => setBusinessName(b?.name || ''));

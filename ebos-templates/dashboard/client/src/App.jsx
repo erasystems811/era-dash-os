@@ -1,6 +1,6 @@
 import React from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
-import { StaffProvider, useStaff, isPinTier } from './StaffContext.jsx';
+import { StaffProvider, useStaff, isPinTier, workAreaOf } from './StaffContext.jsx';
 import { ScopeProvider } from './ScopeContext.jsx';
 import Layout from './components/Layout.jsx';
 import Login from './pages/Login.jsx';
@@ -20,6 +20,7 @@ import Settings from './pages/Settings.jsx';
 import Delivery from './pages/Delivery.jsx';
 import Voice from './pages/Voice.jsx';
 import DineIn from './pages/DineIn.jsx';
+import InHouse from './pages/InHouse.jsx';
 
 // Every path a PIN-tier (Tier 3) session is allowed to land on -- matches
 // Layout.jsx's PIN_NAV exactly. Not just a nav-hiding trick: this actually
@@ -28,12 +29,28 @@ import DineIn from './pages/DineIn.jsx';
 // server-side either way.
 const PIN_ALLOWED_PREFIXES = ['/', '/orders', '/catalogue', '/conversations', '/knowledge-base', '/documents'];
 
+// work_area === 'in_house' gets an even smaller, entirely separate set --
+// matches Layout.jsx's IN_HOUSE_NAV. Deliberately excludes '/' (the main
+// Orders board is the online-only kanban now) -- their home is /in-house.
+// Chidera 2026-09-11: "i need a era-demo.erasystems.com.ng/in-house link
+// that opend the management for the in house guest, so staffs arent
+// confused."
+const IN_HOUSE_ALLOWED_PREFIXES = ['/in-house', '/orders', '/dinein'];
+
 function Protected({ children }) {
   const { staff } = useStaff();
   const location = useLocation();
   if (staff === undefined) return null; // still loading /api/me
   if (staff === null) return <Navigate to="/login" replace />;
-  if (isPinTier(staff) && !PIN_ALLOWED_PREFIXES.some((p) => location.pathname === p || location.pathname.startsWith(p + '/'))) {
+  const workArea = workAreaOf(staff);
+  if (workArea === 'in_house') {
+    if (!IN_HOUSE_ALLOWED_PREFIXES.some((p) => location.pathname === p || location.pathname.startsWith(p + '/'))) {
+      return <Navigate to="/in-house" replace />;
+    }
+  } else if (
+    isPinTier(staff) &&
+    !PIN_ALLOWED_PREFIXES.some((p) => location.pathname === p || location.pathname.startsWith(p + '/'))
+  ) {
     return <Navigate to="/" replace />;
   }
   return children;
@@ -62,6 +79,7 @@ export default function App() {
           <Route path="/delivery" element={<Delivery />} />
           <Route path="/voice" element={<Voice />} />
           <Route path="/dinein" element={<DineIn />} />
+          <Route path="/in-house" element={<InHouse />} />
           <Route path="/conversations" element={<Conversations />} />
           <Route path="/conversations/:id" element={<ConversationDetail />} />
           <Route path="/knowledge-base" element={<KnowledgeBase />} />

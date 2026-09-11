@@ -12,6 +12,7 @@ import {
   requireEraAdmin,
   canEdit,
   scopeToBranch,
+  scopeToWorkArea,
   findPinStaffForBranch,
   findPinStaffById,
   verifyPin,
@@ -43,7 +44,15 @@ router.post('/login', async (req, res) => {
   if (!staff || !(await verifyPassword(staff, password || ''))) {
     return res.status(401).json({ error: 'Incorrect email or password.' });
   }
-  req.session.staff = { id: staff.id, name: staff.name, role: staff.role, branch_id: staff.branch_id, branch_name: staff.branch_name, auth_type: staff.auth_type };
+  req.session.staff = {
+    id: staff.id,
+    name: staff.name,
+    role: staff.role,
+    branch_id: staff.branch_id,
+    branch_name: staff.branch_name,
+    auth_type: staff.auth_type,
+    work_area: staff.work_area,
+  };
   res.json({ staff: req.session.staff });
 });
 
@@ -80,6 +89,7 @@ router.post('/pin-login', async (req, res) => {
     branch_id: staff.branch_id,
     branch_name: rows[0]?.name || null,
     auth_type: 'pin',
+    work_area: staff.work_area,
   };
   // A shorter session than the 30-day default every password login gets
   // (server.js's cookie-session mount) -- a PIN login is meant for a
@@ -404,13 +414,27 @@ router.post('/dinein-config', requireEraAdmin, async (req, res) => {
 
 router.use(requireStaffApi);
 router.use(scopeToBranch);
+router.use(scopeToWorkArea);
 
 router.use('/delivery', deliveryRoutes);
 router.use('/voice', voiceRoutes);
 // Was never mounted at all -- DineIn.jsx's tables/feedback/orders-pending
 // calls have been 404ing since dine-in Stage 1. Found live, 2026-09-10,
 // while adding the in-house-guests orders queue to this same router.
-router.use('/dinein', dineinRoutes);
+// work_area === 'online' is blocked here, not just hidden from their nav --
+// Chidera 2026-09-11's "2 types of staff" split means an online-scoped PIN
+// account has no legitimate reason to ever reach dine-in data, same
+// defense-in-depth reasoning as requireFullAccessApi's own comment.
+// 'in_house' and null (unrestricted -- owner/manager, or any staff from
+// before work_area existed) both pass through unchanged.
+router.use(
+  '/dinein',
+  (req, res, next) => {
+    if (req.workArea === 'online') return res.status(403).json({ error: 'Not available to this account.' });
+    next();
+  },
+  dineinRoutes
+);
 
 // payout_mode/provider/provider_keys are the restaurant's own to set, once
 // mode is on -- same level of trust as them already self-managing
@@ -522,6 +546,9 @@ router.get('/orders', async (req, res) => {
   // section 4) -- unlike customers/menu, there's no mode-dependent case
   // here, so this is a plain filter, not a resolver call. null (no branch
   // lock, no ?branch_id= requested) means "see everything", same as today.
+  // Same null-means-unrestricted idiom for work_area -- 'online' excludes
+  // dine-in orders, 'in_house' is only dine-in orders, matching the exact
+  // two worlds Chidera's staff split creates (2026-09-11).
   const { rows } = await pool.query(
     `select o.*, c.name as customer_name, c.phone_number as customer_phone, c.channel as customer_channel,
             d.rider_name as rider_name,
@@ -529,9 +556,10 @@ router.get('/orders', async (req, res) => {
              from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
      from "order" o join customers c on c.id = o.customer_id
      left join delivery d on d.order_id = o.id
-     where $1::uuid is null or o.branch_id = $1
+     where ($1::uuid is null or o.branch_id = $1)
+       and ($2::text is null or ($2 = 'online' and o.channel != 'dinein') or ($2 = 'in_house' and o.channel = 'dinein'))
      order by o.created_at desc limit 200`,
-    [req.branchId]
+    [req.branchId, req.workArea]
   );
   res.json(rows);
 });
@@ -650,8 +678,9 @@ router.get('/orders/stats/today', async (req, res) => {
     // same-day summary card, not meant as an accounting close.
     pool.query(
       `select count(*) as orders, coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as collected
-       from "order" where created_at >= date_trunc('day', now()) and ($1::uuid is null or branch_id = $1)`,
-      [req.branchId]
+       from "order" where created_at >= date_trunc('day', now()) and ($1::uuid is null or branch_id = $1)
+         and ($2::text is null or ($2 = 'online' and channel != 'dinein') or ($2 = 'in_house' and channel = 'dinein'))`,
+      [req.branchId, req.workArea]
     ),
     // "Answered in": for every bot/staff reply sent today, how long since
     // that same customer's most recent prior inbound message -- i.e. how
@@ -1329,7 +1358,7 @@ router.post('/bot-states/:key/transitions', requireEraAdmin, async (req, res) =>
 
 router.get('/staff', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query(
-    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.created_at, s.branch_id, s.auth_type, b.name as branch_name
+    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.created_at, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
      from staff s left join branch b on b.id = s.branch_id
      where $1::uuid is null or s.branch_id = $1
      order by s.created_at`,
@@ -1434,17 +1463,18 @@ router.post('/staff/:id/handover-alerts', requireEditorApi, async (req, res) => 
 // only ever makes sense for role = 'owner'.
 router.post('/staff/pin', requireEditorApi, async (req, res) => {
   if (!req.branchId) return res.status(400).json({ error: 'Pick a branch first -- a PIN account always belongs to exactly one branch.' });
-  const { name, pin } = req.body;
+  const { name, pin, work_area } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required.' });
   if (!/^\d{4}$/.test(pin || '')) return res.status(400).json({ error: 'PIN must be exactly 4 digits.' });
+  if (work_area && !['online', 'in_house'].includes(work_area)) return res.status(400).json({ error: 'Invalid work area.' });
   const pinHash = await hashPin(pin);
   const { rows } = await pool.query(
-    `insert into staff (name, role, branch_id, auth_type, pin_hash, created_by_staff_id)
-     values ($1, 'staff', $2, 'pin', $3, $4)
-     returning id, name, role, status, branch_id, auth_type`,
-    [name.trim(), req.branchId, pinHash, req.staff.id]
+    `insert into staff (name, role, branch_id, auth_type, pin_hash, created_by_staff_id, work_area)
+     values ($1, 'staff', $2, 'pin', $3, $4, $5)
+     returning id, name, role, status, branch_id, auth_type, work_area`,
+    [name.trim(), req.branchId, pinHash, req.staff.id, work_area || null]
   );
-  await logActivity(req, 'staff_pin_created', { entityType: 'staff', entityId: rows[0].id, detail: { name: rows[0].name } });
+  await logActivity(req, 'staff_pin_created', { entityType: 'staff', entityId: rows[0].id, detail: { name: rows[0].name, work_area: rows[0].work_area } });
   res.status(201).json(rows[0]);
 });
 

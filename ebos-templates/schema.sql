@@ -230,6 +230,15 @@ create table if not exists staff (
   -- Who set up this PIN account -- an accountability trail for the branch
   -- manager who provisioned it, surfaced in the activity log.
   created_by_staff_id uuid references staff(id),
+  -- Splits floor/counter (PIN-tier) staff into two non-overlapping worlds
+  -- once a business has dine-in on -- null (owner/manager, and any staff
+  -- before this existed) means unrestricted, exactly today's behavior.
+  -- 'online' sees Orders (delivery/pickup only) and never the Dine-in tab;
+  -- 'in_house' lands on /in-house (just their table's pending orders) and
+  -- gets the Dine-in tab, never the main Orders board. Chidera 2026-09-11:
+  -- "theyll be 2 types of staff for people with dine in toggle on, the in
+  -- house and online staff... i can just give them their part to manage."
+  work_area text check (work_area in ('online', 'in_house')),
   created_at timestamptz not null default now()
 );
 

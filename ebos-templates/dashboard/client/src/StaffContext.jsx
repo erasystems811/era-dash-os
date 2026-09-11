@@ -61,3 +61,12 @@ export function visibleBranchId(staff) {
 export function isPinTier(staff) {
   return staff?.auth_type === 'pin';
 }
+
+// null (owner/manager, or any staff account from before this existed) means
+// unrestricted -- same null-means-everything idiom as visibleBranchId
+// above. 'online'/'in_house' split floor/counter staff into two
+// non-overlapping worlds once a business has dine-in on, see Layout.jsx's
+// nav split and lib/auth.js's server-side scopeToWorkArea.
+export function workAreaOf(staff) {
+  return staff?.work_area || null;
+}

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 
@@ -15,7 +16,6 @@ export default function DineIn() {
   const [tables, setTables] = useState(null);
   const [branches, setBranches] = useState([]);
   const [feedback, setFeedback] = useState(null);
-  const [pendingOrders, setPendingOrders] = useState(null);
   const [form, setForm] = useState(EMPTY);
   const [error, setError] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -32,21 +32,11 @@ export default function DineIn() {
     api.get('/dinein/tables').then(setTables);
     api.get('/branches').then(setBranches);
     api.get('/dinein/feedback').then(setFeedback);
-    api.get('/dinein/orders/pending').then(setPendingOrders);
   }
   useEffect(load, []);
 
   async function actionFeedback(id) {
     await api.post(`/dinein/feedback/${id}/action`);
-    load();
-  }
-
-  // Reuses the exact same close-out every other order already gets
-  // (routes/api.js's POST /orders/:id/status) -- not a second, dine-in-only
-  // path that could drift out of sync with what "completed" means anywhere
-  // else in EBOS.
-  async function markServed(id) {
-    await api.post(`/orders/${id}/status`, { status: 'completed' });
     load();
   }
 
@@ -173,40 +163,13 @@ export default function DineIn() {
         </div>
       )}
 
-      {error && <div className="error-banner">{error}</div>}
-
-      {pendingOrders && pendingOrders.length > 0 && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>Pending orders</h3>
-          <p className="subtitle">Placed, waiting on the kitchen/bar. Oldest first.</p>
-          <table>
-            <thead>
-              <tr>
-                <th>Table</th>
-                <th>Order</th>
-                <th>Total</th>
-                {editable && <th></th>}
-              </tr>
-            </thead>
-            <tbody>
-              {pendingOrders.map((o) => (
-                <tr key={o.id}>
-                  <td>Table {o.table_label}</td>
-                  <td style={{ color: 'var(--text-muted)' }}>{o.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}</td>
-                  <td>NGN {Number(o.total || 0).toLocaleString()}</td>
-                  {editable && (
-                    <td>
-                      <button className="secondary" onClick={() => markServed(o.id)}>
-                        Served
-                      </button>
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {config.enabled && (
+        <p className="hint">
+          Pending dine-in orders live in <Link to="/in-house">In House</Link> now, not here.
+        </p>
       )}
+
+      {error && <div className="error-banner">{error}</div>}
 
       <div className="card">
         <table>
