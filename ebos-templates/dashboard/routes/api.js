@@ -893,8 +893,15 @@ router.get('/bookings', async (req, res) => {
 // idiom used everywhere else in this file (see scopeToWorkArea). Owner/
 // manager only (requireEditorApi), same tier as Roles/Activity log --
 // customer feedback isn't a PIN-tier staff member's to see.
-function feedbackChannelClause(paramIndex) {
-  return `($${paramIndex}::text is null or ($${paramIndex} = 'online' and channel != 'dinein') or ($${paramIndex} = 'dinein' and channel = 'dinein'))`;
+// colPrefix qualifies the column (e.g. "f.") -- found live, 2026-09-11,
+// Chidera: "the page is empti its meant to have cards": /feedback/recent
+// joins "order" o, which ALSO has its own channel column, so the bare
+// "channel" this used before was genuinely ambiguous SQL -- every call to
+// /feedback/recent 500'd, and Feedback.jsx's `if (!summary || !recent ||
+// !monthly) return null` meant the whole page just silently never
+// rendered anything while waiting on a request that would never resolve.
+function feedbackChannelClause(paramIndex, colPrefix = '') {
+  return `($${paramIndex}::text is null or ($${paramIndex} = 'online' and ${colPrefix}channel != 'dinein') or ($${paramIndex} = 'dinein' and ${colPrefix}channel = 'dinein'))`;
 }
 
 router.get('/feedback/summary', requireEditorApi, async (req, res) => {
@@ -921,7 +928,7 @@ router.get('/feedback/recent', requireEditorApi, async (req, res) => {
      join "order" o on o.id = f.order_id
      join customers c on c.id = f.customer_id
      where f.status = 'answered' and f.created_at > now() - interval '7 days'
-       and ($1::uuid is null or f.branch_id = $1) and ${feedbackChannelClause(2)}
+       and ($1::uuid is null or f.branch_id = $1) and ${feedbackChannelClause(2, 'f.')}
      order by f.created_at desc limit 200`,
     [req.branchId, channel]
   );

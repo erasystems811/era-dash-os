@@ -44,13 +44,21 @@ export default function Feedback() {
   const [recent, setRecent] = useState(null);
   const [monthly, setMonthly] = useState(null);
   const [view, setView] = useState('recent');
+  // A silent-forever blank page used to be the only symptom of a real
+  // backend bug here (found live, 2026-09-11, Chidera: "the page is empti
+  // its meant to have cards") -- /feedback/recent 500'd on every load, and
+  // with no .catch, `recent` just never left its initial null, so the
+  // `if (!summary || !recent || !monthly) return null` guard below kept
+  // rendering nothing forever with no visible error at all.
+  const [error, setError] = useState(null);
 
   function load() {
+    setError(null);
     const branchQ = scopeQuery(scope);
     const q = branchQ ? (channel === 'all' ? branchQ : `${branchQ}&channel=${channel}`) : channel === 'all' ? '' : `?channel=${channel}`;
-    api.get(`/feedback/summary${q}`).then(setSummary);
-    api.get(`/feedback/recent${q}`).then(setRecent);
-    api.get(`/feedback/monthly${q}`).then(setMonthly);
+    api.get(`/feedback/summary${q}`).then(setSummary).catch((err) => setError(err.message));
+    api.get(`/feedback/recent${q}`).then(setRecent).catch((err) => setError(err.message));
+    api.get(`/feedback/monthly${q}`).then(setMonthly).catch((err) => setError(err.message));
   }
   useEffect(() => {
     setSummary(null);
@@ -60,6 +68,7 @@ export default function Feedback() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel, scope]);
 
+  if (error) return <div className="error-banner">{error}</div>;
   if (!summary || !recent || !monthly) return null;
 
   return (
