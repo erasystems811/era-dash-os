@@ -151,6 +151,11 @@ router.post('/', async (req, res) => {
               // Sent directly, not through the AI confirm pipeline -- see
               // handleOrderConfirmNoTap's own comment for why.
               await handleOrderConfirmNoTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
+            } else if (buttonId === 'fulfilment_delivery' || buttonId === 'fulfilment_pickup') {
+              // flow.js's sendFieldPrompt (the delivery/pickup buttons) --
+              // same "put the button's own title through the normal text
+              // pipeline" reasoning as order_confirm_yes above.
+              await handleInboundMessage({ phoneNumber: message.from, text: buttonTitle, channel: 'whatsapp', messageId: message.id, branchId });
             }
             continue;
           }

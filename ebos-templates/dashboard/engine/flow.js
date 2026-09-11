@@ -687,10 +687,12 @@ async function handleGreeting(customer, text) {
   // Chidera 2026-09-11: "welcome to <restaurant name>, what would you
   // like to order" -- then, after an initial pass kept greetingAckFor's
   // tone-matched prefix (Good morning!/Hey there!) alongside it: "not
-  // that hey there". Just the business name now, no tone-matching prefix.
+  // that hey there" -- and then: "add hello before the welcome". Plain
+  // "Hello!", not greetingAckFor's tone-matching (that's the "hey there"
+  // that was already turned down).
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const businessName = bizRows[0]?.name || 'us';
-  const message = `Welcome to ${businessName}, what would you like to order?`;
+  const message = `Hello! Welcome to ${businessName}, what would you like to order?`;
   if (customer.channel !== 'whatsapp') {
     await reply(customer, message, 'greeting');
     return;
@@ -1394,6 +1396,28 @@ async function handleReconfirmAfterEdit(customer, order, text) {
   await sendPaymentInstructions(customer, order);
 }
 
+// Buttons instead of plain text for the one field with a real small,
+// fixed set of options worth tapping -- Chidera 2026-09-11: "make
+// delivery or pickup clickable buttons." Every other field (branch,
+// delivery address, ...) still goes through the plain-text fieldPrompt
+// unchanged; this only intercepts fulfilment_type specifically. A tap
+// sends its own title ("Delivery"/"Pickup") back through the normal text
+// pipeline (webhook-whatsapp.js), so extractAndApply/applyField handle it
+// exactly the same way a typed answer already does -- no new parsing.
+async function sendFieldPrompt(customer, fieldKey, promptText, trigger) {
+  if (fieldKey === 'fulfilment_type' && customer.channel === 'whatsapp') {
+    const credentials = await getWhatsAppCredentials(customer.branch_id);
+    const buttons = [
+      { id: 'fulfilment_delivery', title: 'Delivery' },
+      { id: 'fulfilment_pickup', title: 'Pickup' },
+    ];
+    await sendWhatsAppButtons(recipientFor(customer), promptText, buttons, credentials);
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: trigger || 'bot_flow_step' });
+    return;
+  }
+  await reply(customer, promptText, trigger);
+}
+
 async function handleCollectFulfilment(customer, order, text) {
   // Dine-in (payment_mode = 'at_table') never asks for delivery/pickup or
   // takes payment through the bot -- spec 5.4: "settled at the table...
@@ -1427,9 +1451,9 @@ async function handleCollectFulfilment(customer, order, text) {
       // when `answer` is set the customer asked a real question and this is
       // just the normal follow-up prompt after answering it, not a miss.
       if (answer) {
-        await reply(customer, `${answer} ${await fieldPrompt(outstanding[0], field?.question, order.branch_id)}`);
+        await sendFieldPrompt(customer, outstanding[0], `${answer} ${await fieldPrompt(outstanding[0], field?.question, order.branch_id)}`);
       } else {
-        await reply(customer, await fieldPrompt(outstanding[0], field?.question, order.branch_id), 'field_reprompt');
+        await sendFieldPrompt(customer, outstanding[0], await fieldPrompt(outstanding[0], field?.question, order.branch_id), 'field_reprompt');
       }
       return;
     }
@@ -1441,7 +1465,7 @@ async function handleCollectFulfilment(customer, order, text) {
   if (stillOutstanding.length) {
     const fields = await loadBotFields();
     const nextField = fields.find((f) => f.key === stillOutstanding[0]);
-    await reply(customer, await fieldPrompt(stillOutstanding[0], nextField?.question, order.branch_id));
+    await sendFieldPrompt(customer, stillOutstanding[0], await fieldPrompt(stillOutstanding[0], nextField?.question, order.branch_id));
     return;
   }
 
