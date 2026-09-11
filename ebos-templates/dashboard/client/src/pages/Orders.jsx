@@ -228,7 +228,14 @@ export default function Orders() {
   // this page in the first place (App.jsx redirects it to /in-house).
   const [dineinEnabled, setDineinEnabled] = useState(false);
   const [activeTab, setActiveTab] = useState('online');
-  const [inHouseOrders, setInHouseOrders] = useState(null);
+  // Two real pipelines, not one -- Chidera 2026-09-11: "confirming payment
+  // is different from marking served so there should be 2 piplines."
+  // 'serving' = not yet served_at (a Served button). 'awaitingPayment' =
+  // served, not yet paid (a Mark paid button). See InHouse.jsx's own
+  // comment for the full reasoning -- this tab mirrors it exactly, just
+  // inline instead of its own page.
+  const [inHouseServing, setInHouseServing] = useState(null);
+  const [inHouseAwaitingPayment, setInHouseAwaitingPayment] = useState(null);
   const showTabs = dineinEnabled && !isPinTier(staff);
 
   function loadInHouse() {
@@ -238,8 +245,12 @@ export default function Orders() {
     // anything that would depend on it.
     api
       .get('/dinein/orders/pending')
-      .then(setInHouseOrders)
-      .catch(() => setInHouseOrders([]));
+      .then(setInHouseServing)
+      .catch(() => setInHouseServing([]));
+    api
+      .get('/dinein/orders/serving')
+      .then(setInHouseAwaitingPayment)
+      .catch(() => setInHouseAwaitingPayment([]));
   }
 
   function load() {
@@ -250,7 +261,14 @@ export default function Orders() {
     loadInHouse();
   }
 
-  async function markInHouseFulfilled(e, orderId) {
+  async function markInHouseServed(e, orderId) {
+    e.preventDefault();
+    e.stopPropagation();
+    await api.post(`/dinein/orders/${orderId}/served`);
+    loadInHouse();
+  }
+
+  async function markInHousePaid(e, orderId) {
     e.preventDefault();
     e.stopPropagation();
     await api.post(`/orders/${orderId}/status`, { status: 'completed' });
@@ -327,7 +345,10 @@ export default function Orders() {
   // hints at -- an unread-style count, not every order, same reasoning as
   // In House's own badge below (a queue depth, not a total).
   const onlineNeedsAttention = onlineOrders.filter((o) => o.status === 'confirmation').length;
-  const inHouseCount = (inHouseOrders || []).length;
+  // Both pipelines count toward the one tab badge -- either one means
+  // something needs a look, and the tab itself (not the badge) is where
+  // the split into "Serving" vs "Awaiting payment" actually shows.
+  const inHouseCount = (inHouseServing || []).length + (inHouseAwaitingPayment || []).length;
 
   return (
     <div>
@@ -363,42 +384,83 @@ export default function Orders() {
       )}
 
       {activeTab === 'in_house' && showTabs && (
-        <div className="card">
-          <p className="subtitle" style={{ marginTop: 0 }}>
-            Dine-in orders placed and waiting on the kitchen/bar. Oldest first.
-          </p>
-          <table>
-            <thead>
-              <tr>
-                <th>Table</th>
-                <th>Order</th>
-                <th>Total</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {(inHouseOrders || []).map((o) => (
-                <tr key={o.id} className="clickable" onClick={() => navigate(`/orders/${o.id}`)}>
-                  <td>Table {o.table_label}</td>
-                  <td style={{ color: 'var(--text-muted)' }}>{o.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}</td>
-                  <td>NGN {Number(o.total || 0).toLocaleString()}</td>
-                  <td>
-                    <button className="secondary" onClick={(e) => markInHouseFulfilled(e, o.id)}>
-                      Mark fulfilled
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {!(inHouseOrders || []).length && (
+        <>
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Serving</h3>
+            <p className="subtitle" style={{ marginTop: 0 }}>
+              Placed, waiting on the kitchen/bar.
+            </p>
+            <table>
+              <thead>
                 <tr>
-                  <td colSpan={4} className="empty-state">
-                    Nothing pending right now.
-                  </td>
+                  <th>Table</th>
+                  <th>Order</th>
+                  <th>Total</th>
+                  <th></th>
                 </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {(inHouseServing || []).map((o) => (
+                  <tr key={o.id} className="clickable" onClick={() => navigate(`/orders/${o.id}`)}>
+                    <td>Table {o.table_label}</td>
+                    <td style={{ color: 'var(--text-muted)' }}>{o.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}</td>
+                    <td>NGN {Number(o.total || 0).toLocaleString()}</td>
+                    <td>
+                      <button className="secondary" onClick={(e) => markInHouseServed(e, o.id)}>
+                        Served
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {!(inHouseServing || []).length && (
+                  <tr>
+                    <td colSpan={4} className="empty-state">
+                      Nothing pending right now.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Awaiting payment</h3>
+            <p className="subtitle" style={{ marginTop: 0 }}>
+              Served, not yet paid. A table can't close until this is empty.
+            </p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Table</th>
+                  <th>Order</th>
+                  <th>Total</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {(inHouseAwaitingPayment || []).map((o) => (
+                  <tr key={o.id} className="clickable" onClick={() => navigate(`/orders/${o.id}`)}>
+                    <td>Table {o.table_label}</td>
+                    <td style={{ color: 'var(--text-muted)' }}>{o.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}</td>
+                    <td>NGN {Number(o.total || 0).toLocaleString()}</td>
+                    <td>
+                      <button className="secondary" onClick={(e) => markInHousePaid(e, o.id)}>
+                        Mark paid
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {!(inHouseAwaitingPayment || []).length && (
+                  <tr>
+                    <td colSpan={4} className="empty-state">
+                      Nothing awaiting payment.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
 
       {activeTab === 'online' && (

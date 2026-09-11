@@ -1030,6 +1030,17 @@ alter table "order" add column if not exists channel text not null default 'what
 alter table "order" add column if not exists table_id uuid references restaurant_table(id);
 alter table "order" add column if not exists session_id uuid references table_session(id);
 alter table "order" add column if not exists payment_mode text not null default 'online' check (payment_mode in ('online', 'at_table'));
+-- Dine-in's own two-stage pipeline, separate from the generic order
+-- status column -- "served" (food/drinks physically out) and "paid" are
+-- two different real-world facts a waiter confirms at two different
+-- moments, not one click. Null = not yet served (In House's first
+-- pipeline); set = served, awaiting payment (second pipeline, "Mark
+-- paid" is the existing POST /orders/:id/status {status:'completed'}).
+-- Reset back to null if more items get added to an already-served order
+-- (engine/flow.js's applyOrderModifications) -- there's something new to
+-- bring out again. Chidera 2026-09-11: "confirming payment is different
+-- from marking served so there should be 2 piplines."
+alter table "order" add column if not exists served_at timestamptz;
 
 create table if not exists activity_log (
   id uuid primary key default gen_random_uuid(),

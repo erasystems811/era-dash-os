@@ -1433,7 +1433,7 @@ async function handleCollectFulfilment(customer, order, text) {
     await transitionOrder(order, 'payment_acceptance');
     await pool.query(`update "order" set status = 'preparation' where id = $1`, [order.id]);
     await transitionOrder(order, 'fulfilment');
-    await reply(customer, 'Your order has been placed. Thank you!', 'dinein_order_placed');
+    await reply(customer, 'Your order has been placed. Thank you 🙏\n\nIt will be with you shortly.', 'dinein_order_placed');
     return;
   }
 
@@ -1910,6 +1910,17 @@ async function applyOrderModifications(order, mods, { allowRemovals }) {
 
   const { itemLines, total } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
+  // A dine-in order already marked served that gets something added to it
+  // needs serving again -- back to In House's first pipeline, not sitting
+  // in the second (awaiting payment) still showing the old items. No-op
+  // for every other case: an online order never sets served_at at all, and
+  // a dine-in order not yet served is already null. Chidera 2026-09-11:
+  // "even if staff marks served and it goes to the next pipeline and they
+  // still add it should go back to first pipeline."
+  if (mods.adds.length && order.channel === 'dinein' && order.served_at) {
+    await pool.query(`update "order" set served_at = null where id = $1`, [order.id]);
+    order.served_at = null;
+  }
   return { itemLines, total, addedValue };
 }
 

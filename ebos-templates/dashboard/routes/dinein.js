@@ -122,12 +122,17 @@ router.post('/tables/:id/regenerate-qr', requireEditorApi, async (req, res) => {
   res.json(rows[0]);
 });
 
-// Dine-in orders placed and waiting on the kitchen/bar, oldest first --
-// the dashboard's "in-house guests" queue (Chidera 2026-09-10: "a tab for
-// in house guests where it shows orders pending... and when fulfiled
-// there should be a served button to take them off"). "Served" itself is
-// just the existing POST /orders/:id/status {status:'completed'} -- same
-// close-out every other order already gets, not a second parallel path.
+// Dine-in orders placed and waiting on the kitchen/bar, oldest first -- the
+// dashboard's "in-house guests" first pipeline (Chidera 2026-09-10: "a tab
+// for in house guests where it shows orders pending... and when fulfiled
+// there should be a served button to take them off"). Split into two real
+// pipelines now -- Chidera 2026-09-11: "confirming payment is different
+// from marking served so there should be 2 piplines, the fist one shows
+// kanban with served button and the next one marks paid" -- this is
+// pipeline one: served_at is null, meaning nothing's gone out to the table
+// yet for this order. "Served" (POST /orders/:id/served below) is the only
+// way out of this list; "paid" is a second, separate step (see
+// /orders/serving below), not the same click.
 router.get('/orders/pending', async (req, res) => {
   const { rows } = await pool.query(
     `select o.*, rt.label as table_label,
@@ -135,12 +140,45 @@ router.get('/orders/pending', async (req, res) => {
              from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
      from "order" o
      join restaurant_table rt on rt.id = o.table_id
-     where o.channel = 'dinein' and o.status not in ('completed', 'cancelled')
+     where o.channel = 'dinein' and o.status not in ('completed', 'cancelled') and o.served_at is null
        and ($1::uuid is null or o.branch_id = $1)
      order by o.created_at asc`,
     [req.branchId]
   );
   res.json(rows);
+});
+
+// Pipeline two -- served, still owed. "Mark paid" is the existing POST
+// /orders/:id/status {status:'completed'} (same close-out every other
+// order already gets, not a second parallel path) -- reaching 'completed'
+// from here is what /tables/:id/close below actually waits on.
+router.get('/orders/serving', async (req, res) => {
+  const { rows } = await pool.query(
+    `select o.*, rt.label as table_label,
+            (select coalesce(json_agg(json_build_object('name', p.name, 'quantity', oi.quantity)), '[]')
+             from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
+     from "order" o
+     join restaurant_table rt on rt.id = o.table_id
+     where o.channel = 'dinein' and o.status not in ('completed', 'cancelled') and o.served_at is not null
+       and ($1::uuid is null or o.branch_id = $1)
+     order by o.served_at asc`,
+    [req.branchId]
+  );
+  res.json(rows);
+});
+
+// The only way an order leaves pipeline one -- sets served_at, nothing
+// else (status/payment are untouched, still tracked separately in
+// pipeline two). engine/flow.js's applyOrderModifications resets this back
+// to null if more items get added afterward, so an order can cycle through
+// here more than once in the same sitting.
+router.post('/orders/:id/served', async (req, res) => {
+  const { rows } = await pool.query(
+    `update "order" set served_at = now() where id = $1 and channel = 'dinein' returning *`,
+    [req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
+  res.json(rows[0]);
 });
 
 // Newest first, negative first (spec section 10) -- score isn't
@@ -175,13 +213,28 @@ router.post('/feedback/:id/action', requireEditorApi, async (req, res) => {
 // this regardless of POS access, it's the only close path a client with no
 // POS has at all). Schedules nothing itself yet -- feedback (stage 7)
 // isn't built, so table_session.feedback_state just stays 'none' for now.
+// Blocked while any order from this sitting is still outstanding -- a
+// table can't free up (a new party seated, a new session started on the
+// same physical table) until every round has actually been paid, not just
+// served. Chidera 2026-09-11: "until the waiter marked paid/fulfilled from
+// the second pipline then the table can reopen."
 router.post('/tables/:id/close', requireEditorApi, async (req, res) => {
-  const { rows } = await pool.query(
-    `update table_session set closed_at = now(), closed_by = 'staff', closed_by_staff = $1
-     where table_id = $2 and closed_at is null returning *`,
-    [req.staff.id, req.params.id]
+  const { rows: session } = await pool.query(
+    `select id from table_session where table_id = $1 and closed_at is null`,
+    [req.params.id]
   );
-  if (!rows[0]) return res.status(404).json({ error: 'No open session for this table.' });
+  if (!session[0]) return res.status(404).json({ error: 'No open session for this table.' });
+  const { rows: unpaid } = await pool.query(
+    `select count(*) from "order" where session_id = $1 and status not in ('completed', 'cancelled')`,
+    [session[0].id]
+  );
+  if (Number(unpaid[0].count) > 0) {
+    return res.status(409).json({ error: 'This table still has an order awaiting payment -- mark it paid first.' });
+  }
+  const { rows } = await pool.query(
+    `update table_session set closed_at = now(), closed_by = 'staff', closed_by_staff = $1 where id = $2 returning *`,
+    [req.staff.id, session[0].id]
+  );
   res.json(rows[0]);
 });
 
