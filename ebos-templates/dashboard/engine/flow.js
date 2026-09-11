@@ -1885,7 +1885,15 @@ async function handleOrderModification(customer, order, mods) {
   const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
 
   if (paid && (mods.removes.length || mods.sets.length)) {
-    await reply(customer, `Your order's already paid for, so I can't remove or change what's in it now, but I can add more if you'd like.`);
+    // A change/removal after payment needs a real person -- Chidera
+    // 2026-09-11: "after payment is made if they want to add take it and
+    // add it, but if they want to change, hand it over to a human."
+    // Adding more still goes straight through below unchanged (falls
+    // through to the adds-only branch when mods.adds is also non-empty);
+    // it's only removing or changing what's already paid for that gets
+    // escalated instead of just being declined.
+    await reply(customer, `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`);
+    await handover(customer, 'Customer wants to remove or change items on an already-paid order', null, false);
     if (!mods.adds.length) return;
   }
 
