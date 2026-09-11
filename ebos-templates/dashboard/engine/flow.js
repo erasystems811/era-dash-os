@@ -406,7 +406,10 @@ export async function getOpenOrder(customerId) {
 // 2026-09-03): once completed_at is more than 24h old, this returns null
 // and a bare greeting goes back to the normal cold-open flow -- exactly
 // "back to root" after 24h, no separate cleanup job needed, the interval
-// check alone does it.
+// check alone does it. Now only the FALLBACK for a completed order that
+// never actually got a feedback request out (see wasSentFeedbackRequestFor
+// below, which takes priority) -- e.g. no PUBLIC_URL configured, or a
+// non-WhatsApp customer sendFeedbackRequest skips outright.
 async function recentlyCompletedOrder(customerId) {
   const { rows } = await pool.query(
     `select id from "order" where customer_id = $1 and status = 'completed' and completed_at > now() - interval '24 hours'
@@ -414,6 +417,29 @@ async function recentlyCompletedOrder(customerId) {
     [customerId]
   );
   return rows[0] || null;
+}
+
+// Chidera 2026-09-11: "in era-demo the bot should always restart a
+// conversation after the have been sent the rate message, meaning upon
+// next text a menu with image should be sent" -- then, clarifying, "not
+// just the menu": the real handleGreeting experience (welcome text + menu
+// button + cover photo), not a bare link. Once a customer's been sent the
+// rating request, that's the end of that order's own conversation -- their
+// next message is treated as a brand new inquiry, same as a first-ever
+// contact, rather than the softer "want another order?" prompt
+// recentlyCompletedOrder alone would still give every completed order.
+//
+// Checks order_feedback (a real, permanent record of "was this order's
+// rating request actually sent"), NOT "was the feedback request literally
+// the last outbound message" -- found live, 2026-09-11: an unrelated
+// message sent to the same customer afterward (in this case, a stray
+// kb_miss reply from testing something else entirely) broke that literal
+// reading even though the rating request genuinely had gone out for their
+// most recent completed order. Whether anything else got sent afterward is
+// irrelevant to the actual question being asked.
+async function wasSentFeedbackRequestFor(orderId) {
+  const { rows } = await pool.query(`select 1 from order_feedback where order_id = $1`, [orderId]);
+  return rows.length > 0;
 }
 
 // An order a customer never confirmed or actively walked away from just
@@ -2991,7 +3017,8 @@ async function handlePendingBatch(customer, text) {
     // time. Only overrides a bare greeting -- a real question or a direct
     // "I want jollof rice" still gets handled normally below/by enquiry,
     // no need to ask first when they've already said what they want.
-    if (await recentlyCompletedOrder(customer.id)) {
+    const completedOrder = await recentlyCompletedOrder(customer.id);
+    if (completedOrder && !(await wasSentFeedbackRequestFor(completedOrder.id))) {
       await reply(customer, `Would you like to place another order, or is there anything else I can help you with?`, 'post_completion_greeting');
       return;
     }
