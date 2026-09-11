@@ -142,6 +142,32 @@ proactive half — sends a WhatsApp alert when a business crosses a concern thre
 trailing hour. Needs `ALERT_WA_TOKEN`/`ALERT_WA_PHONE_NUMBER_ID`/`ALERT_RECIPIENT_PHONE` in
 `secrets.env` (see `secrets.env.example`) before it can actually send anything.
 
+## Backups
+
+Every client's Postgres database, backed up daily to the control server's own disk —
+deliberately a different machine than the one each database actually runs on, since a backup
+sitting next to the thing it's backing up isn't a real backup. Add to the control server's
+crontab (`crontab -e`):
+
+```
+0 3 * * * cd /opt/era-control/era-dash-os && node scripts/backup-all-clients.mjs >> /var/log/era-backups.log 2>&1
+```
+
+Dumps land at `/opt/era-control/backups/<client-slug>/<slug>-<timestamp>.sql.gz` (override with
+`ERA_BACKUP_DIR`); the last 14 per client are kept, older ones pruned automatically (override
+with `ERA_BACKUP_KEEP`). Reuses the same `ALERT_WA_*` secrets as Bot Monitoring above to send
+one WhatsApp message if any client's backup fails that run — silent on a normal successful
+run, doesn't page for routine noise.
+
+To restore: `gunzip -c <file>.sql.gz | docker exec -i <slug>-postgres-1 psql -U app <slug>` —
+same shape as `create-client.mjs`'s own initial schema load, just restoring a real dump instead
+of a fresh `init.sql`. Worth actually testing this once against a spare server before you ever
+need it for real, not just trusting the command exists.
+
+Not yet off-site (S3 / OCI Object Storage) — this covers "the server that runs the database
+dies," not "the control server itself dies too." Worth adding once this is proven, not a
+blocker for the first real improvement over having nothing.
+
 ## DNS
 
 erasystems.com.ng's DNS lives on a DirectAdmin server behind Go54's panel

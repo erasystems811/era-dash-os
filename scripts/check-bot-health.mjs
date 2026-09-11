@@ -36,6 +36,7 @@
 import { loadRegistry, saveRegistry, upsertClient } from './lib/registry.mjs';
 import { loadSecrets } from './lib/secrets.mjs';
 import { loadState as loadFixbotState, saveState as saveFixbotState } from '../fixbot/lib/state.mjs';
+import { sendWhatsAppAlert } from './lib/alert.mjs';
 
 // Lower than the old broad definition on purpose -- real code errors are
 // meant to be rare. A handful of genuine exceptions/API failures in one
@@ -59,29 +60,6 @@ async function fetchSummary(client) {
 function concernCount(summary) {
   if (!summary) return null;
   return summary.codeErrorCount;
-}
-
-async function sendWhatsAppAlert(secrets, text) {
-  const { ALERT_WA_TOKEN, ALERT_WA_PHONE_NUMBER_ID, ALERT_RECIPIENT_PHONE } = secrets;
-  if (!ALERT_WA_TOKEN || !ALERT_WA_PHONE_NUMBER_ID || !ALERT_RECIPIENT_PHONE) {
-    console.log('  (WhatsApp alerting not configured -- set ALERT_WA_TOKEN, ALERT_WA_PHONE_NUMBER_ID, ALERT_RECIPIENT_PHONE in secrets.env)');
-    return false;
-  }
-  const res = await fetch(`https://graph.facebook.com/v20.0/${ALERT_WA_PHONE_NUMBER_ID}/messages`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${ALERT_WA_TOKEN}` },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to: ALERT_RECIPIENT_PHONE,
-      type: 'text',
-      text: { body: text },
-    }),
-  });
-  if (!res.ok) {
-    console.error(`  WhatsApp send failed ${res.status}: ${await res.text()}`);
-    return false;
-  }
-  return true;
 }
 
 // Exported (not just run as a script) so panel/server.js can call this

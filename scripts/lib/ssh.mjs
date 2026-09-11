@@ -60,6 +60,14 @@ export async function copyToRemote(ip, localPath, remotePath, { user = 'root', r
   });
 }
 
+// The reverse of copyToRemote -- pulling a file off a client's server
+// (e.g. a pg_dump'd backup) down to wherever this script is actually
+// running. Single files only (no recursive/tar mode -- nothing that needs
+// it yet); add that the same way copyToRemote did if it comes up.
+export async function copyFromRemote(ip, remotePath, localPath, { user = 'root' } = {}) {
+  return run('scp', [...SSH_OPTS, `${user}@${ip}:${remotePath}`, localPath]);
+}
+
 export async function readRemote(ip, remotePath, { user = 'root' } = {}) {
   const { stdout } = await runRemote(ip, `cat ${remotePath}`, { user });
   return stdout;
