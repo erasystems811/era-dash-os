@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, handleFeedbackListTap, retryFailedSendAsTemplate } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, retryFailedSendAsTemplate } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -122,11 +122,6 @@ router.post('/', async (req, res) => {
               // first rather than risk menuRowKind ever treating one as an
               // ordinary product id.
               await handleUpsellListTap({ phoneNumber: message.from, channelId: message.from, rowId, channel: 'whatsapp', branchId });
-            } else if (rowId.startsWith('feedback::')) {
-              // flow.js's sendFeedbackQuestion -- same "own row-id space,
-              // checked before the general menu list" reasoning as upsell
-              // above.
-              await handleFeedbackListTap({ phoneNumber: message.from, channelId: message.from, rowId, channel: 'whatsapp', branchId });
             } else if (menuRowKind(rowId) === 'product') {
               const product = await productForRowId(rowId);
               if (product) await handleMenuItemTap({ phoneNumber: message.from, product, channel: 'whatsapp', branchId });

@@ -1049,7 +1049,16 @@ create table if not exists order_feedback (
   experience_rating integer check (experience_rating between 1 and 5),
   food_rating integer check (food_rating between 1 and 5),
   service_rating integer check (service_rating between 1 and 5),
-  pending_question text check (pending_question in ('experience', 'food', 'service')),
+  -- 'ratings'/'ratings_retry' -- all three asked and parsed from one free-
+  -- text reply (Chidera 2026-09-11: "cant they all be collected in one
+  -- chat or form?" -- a real WhatsApp Flow would need registering with
+  -- Meta first, so this parses one combined text reply with AI instead:
+  -- "no i dont know how but cant you set it up yourself and push without
+  -- meta"), not three separate List Message taps. 'experience'/'food'/
+  -- 'service' kept as allowed values only for a row already mid-flow the
+  -- moment this shipped, never written by fresh code.
+  pending_question text check (pending_question in ('experience', 'food', 'service', 'ratings', 'ratings_retry', 'comment')),
+  comment text,
   status text not null default 'sent' check (status in ('sent', 'answered')),
   created_at timestamptz not null default now(),
   answered_at timestamptz

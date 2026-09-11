@@ -2786,32 +2786,26 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
 // (see the shared hook this function is called from at each of the three
 // real completion sites: routes/api.js's /orders/:id/status,
 // routes/rider.js's delivery-code entry, routes/delivery.js's release),
-// not hours later. One row per order (order_feedback, unique on order_id)
-// filled in one star rating at a time as each List Message question gets
-// tapped -- see handleFeedbackListTap below.
-const FEEDBACK_QUESTIONS = ['experience', 'food', 'service'];
-const FEEDBACK_QUESTION_TEXT = {
-  experience: 'How was your experience?',
-  food: 'How was the food?',
-  service: 'How was the service?',
-};
+// not hours later.
+//
+// One message, not three -- Chidera 2026-09-11: "cant they all be
+// collected in one chat or form?" A real WhatsApp Flow (Meta's own native
+// multi-field form) would be the closest thing to an actual form, but
+// needs authoring and registering a Flow with Meta first; asked
+// separately whether to build that: "no i dont know how but cant you set
+// it up yourself and push without meta" -- so this asks all three in one
+// text message instead, parsed by AI rather than three separate List
+// Message taps.
+const FEEDBACK_RATINGS_PROMPT =
+  'The customer was asked to rate three separate things from 1 to 5 each: their overall experience, the food, and the service. Read their reply and pull out all three as integers 1-5. If one of them genuinely was not given, return null for that one specifically -- never guess a rating that was not actually stated. Reply ONLY with JSON: {"experience": <1-5 or null>, "food": <1-5 or null>, "service": <1-5 or null>}';
 
-async function sendFeedbackQuestion(customer, question) {
-  const rows = [1, 2, 3, 4, 5].map((n) => ({
-    id: `feedback::${question}::${n}`,
-    title: '⭐'.repeat(n),
-    description: `${n} star${n === 1 ? '' : 's'}`,
-  }));
-  const bodyText = FEEDBACK_QUESTION_TEXT[question];
-  await sendListMessage(recipientFor(customer), { bodyText, buttonText: 'Rate', sectionTitle: 'Stars', rows });
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger: 'feedback_question_asked' });
+function validRating(n) {
+  return Number.isInteger(n) && n >= 1 && n <= 5;
 }
 
-// Fire-and-forget from each of the three real completion sites -- WhatsApp
-// only (List Messages, same channel gate sendUpsellList already uses), and
-// on conflict do nothing + returning is what makes this safe to call more
-// than once for the same order without ever double-sending the first
-// question.
+// Fire-and-forget from each of the three real completion sites. On
+// conflict do nothing + returning is what makes this safe to call more
+// than once for the same order without ever double-sending the ask.
 export async function sendFeedbackRequest(orderId) {
   const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [orderId]);
   const order = orderRows[0];
@@ -2819,74 +2813,86 @@ export async function sendFeedbackRequest(orderId) {
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
   const customer = customerRows[0];
   if (!customer || customer.channel !== 'whatsapp') return;
-  if (!process.env.META_PHONE_NUMBER_ID || !process.env.META_ACCESS_TOKEN) return;
   const { rows: inserted } = await pool.query(
     `insert into order_feedback (order_id, branch_id, customer_id, channel, pending_question)
-     values ($1, $2, $3, $4, 'experience') on conflict (order_id) do nothing returning id`,
+     values ($1, $2, $3, $4, 'ratings') on conflict (order_id) do nothing returning id`,
     [order.id, order.branch_id, order.customer_id, order.channel]
   );
   if (!inserted.length) return; // already sent for this order
-  await sendFeedbackQuestion(customer, 'experience');
+  await reply(customer, 'How was your experience, the food, and the service? Rate each 1 to 5 (e.g. 5, 4, 5).', 'feedback_ratings_ask');
 }
 
-// A tap on sendFeedbackQuestion's own List Message above. Looks up by
-// customer + the exact question this tap claims to answer (not by
-// encoding an order/feedback id in the row) -- there's realistically only
-// ever one feedback request in flight per customer at a time, and this
-// mirrors the same "match by pending state, not by id" idiom
-// handlePendingUpsell already uses for order.pending_upsell_category.
-export async function handleFeedbackListTap({ phoneNumber, channelId, rowId, channel = 'whatsapp', branchId }) {
-  const [, question, ratingStr] = rowId.split('::');
-  if (!FEEDBACK_QUESTIONS.includes(question)) return;
-  const rating = Number(ratingStr);
-  if (!(rating >= 1 && rating <= 5)) return;
+// The reply to sendFeedbackRequest's own message above -- checked in
+// handlePendingBatch below, same "match by pending state on the most
+// recent row, not by an id" idiom as everywhere else pending state lives
+// in this file (order.pending_upsell_category, order.pending_question_id).
+// Saves whatever ratings it can confidently parse even on a partial/messy
+// reply -- never discards a real answer just because another one in the
+// same message was unclear. Retries exactly once (pending_question moves
+// to 'ratings_retry') before giving up quietly rather than nagging forever
+// on a reply that was never actually trying to answer this.
+async function handlePendingFeedbackRatings(customer, fb, text) {
+  const result = await askJson(FEEDBACK_RATINGS_PROMPT, text);
+  const experience = validRating(result?.experience) ? result.experience : null;
+  const food = validRating(result?.food) ? result.food : null;
+  const service = validRating(result?.service) ? result.service : null;
 
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  const { rows } = await pool.query(
-    `select * from order_feedback where customer_id = $1 and pending_question = $2 order by created_at desc limit 1`,
-    [customer.id, question]
-  );
-  const fb = rows[0];
-  if (!fb) return; // stale tap -- already answered another way, or too old to still match
-
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${question} = ${'⭐'.repeat(rating)}]`, processed: true });
-  const column = `${question}_rating`; // safe -- question is already checked against FEEDBACK_QUESTIONS above
-  await pool.query(`update order_feedback set ${column} = $1 where id = $2`, [rating, fb.id]);
-
-  const next = FEEDBACK_QUESTIONS[FEEDBACK_QUESTIONS.indexOf(question) + 1];
-  if (next) {
-    await pool.query(`update order_feedback set pending_question = $1 where id = $2`, [next, fb.id]);
-    await sendFeedbackQuestion(customer, next);
-    return;
+  const sets = [];
+  const vals = [];
+  if (experience != null) { sets.push(`experience_rating = $${sets.length + 1}`); vals.push(experience); }
+  if (food != null) { sets.push(`food_rating = $${sets.length + 1}`); vals.push(food); }
+  if (service != null) { sets.push(`service_rating = $${sets.length + 1}`); vals.push(service); }
+  if (sets.length) {
+    vals.push(fb.id);
+    await pool.query(`update order_feedback set ${sets.join(', ')} where id = $${vals.length}`, vals);
   }
-  // 'service' just answered -- the three ratings that actually matter are
-  // complete and safe to aggregate right now. The comment below is
-  // deliberately optional and never blocks that -- Chidera 2026-09-11: "let
-  // there also be a space they can type but optional."
-  await pool.query(
-    `update order_feedback set pending_question = 'comment', status = 'answered', answered_at = now() where id = $1`,
+
+  const { rows: nowRows } = await pool.query(
+    `select experience_rating, food_rating, service_rating from order_feedback where id = $1`,
     [fb.id]
   );
-  await reply(customer, "Thank you! Anything else you'd like to add? (optional -- just skip if not)", 'feedback_comment_ask');
+  const row = nowRows[0];
+  if (row.experience_rating != null && row.food_rating != null && row.service_rating != null) {
+    await pool.query(
+      `update order_feedback set pending_question = 'comment', status = 'answered', answered_at = now() where id = $1`,
+      [fb.id]
+    );
+    await reply(customer, "Thank you! Anything else you'd like to add? (optional -- just skip if not)", 'feedback_comment_ask');
+  } else if (fb.pending_question === 'ratings') {
+    await pool.query(`update order_feedback set pending_question = 'ratings_retry' where id = $1`, [fb.id]);
+    await reply(customer, 'Sorry, I need a number 1 to 5 for each -- experience, food, and service. For example: 5, 4, 5.', 'feedback_ratings_retry');
+  } else {
+    // Already retried once and it's still incomplete -- stop asking.
+    await pool.query(`update order_feedback set pending_question = null where id = $1`, [fb.id]);
+  }
 }
 
 async function handlePendingBatch(customer, text) {
   if (await handleDineinScan(customer, text)) return;
-  // The optional free-text reply to sendFeedbackQuestion's own "anything
-  // else you'd like to add?" (see handleFeedbackListTap) -- logged onto
-  // that same order_feedback row, not treated as a new order/enquiry.
-  // Bounded to 30 minutes, same as every other "was the last thing I asked
-  // still live" check in this file -- a much later, unrelated message
-  // should never get swallowed as a stale comment.
+  // The reply to sendFeedbackRequest's ratings ask, or to its own later
+  // "anything else you'd like to add?" (see handlePendingFeedbackRatings) --
+  // both logged onto that same order_feedback row, not treated as a new
+  // order/enquiry. The comment ask is bounded to 30 minutes, same as every
+  // other "was the last thing I asked still live" check in this file (a
+  // much later, unrelated message should never get swallowed as a stale
+  // comment); ratings has no such bound -- it's the very first thing sent
+  // after completion, so there's nothing else it could plausibly be a
+  // reply to.
   {
     const { rows: fb } = await pool.query(
-      `select id from order_feedback where customer_id = $1 and pending_question = 'comment'
-         and answered_at > now() - interval '30 minutes' order by created_at desc limit 1`,
+      `select * from order_feedback where customer_id = $1
+         and (pending_question in ('ratings', 'ratings_retry')
+              or (pending_question = 'comment' and answered_at > now() - interval '30 minutes'))
+       order by created_at desc limit 1`,
       [customer.id]
     );
-    if (fb.length) {
+    if (fb.length && fb[0].pending_question === 'comment') {
       await pool.query(`update order_feedback set pending_question = null, comment = $1 where id = $2`, [text.trim(), fb[0].id]);
       await reply(customer, 'Thank you, noted.', 'feedback_comment_ack');
+      return;
+    }
+    if (fb.length) {
+      await handlePendingFeedbackRatings(customer, fb[0], text);
       return;
     }
   }
