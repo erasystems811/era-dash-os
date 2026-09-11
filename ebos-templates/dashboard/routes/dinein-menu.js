@@ -6,7 +6,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage } from '../engine/menu-page-template.js';
-import { sendConfirmButtons } from '../engine/flow.js';
+import { sendConfirmButtons, getOpenOrder } from '../engine/flow.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
 
@@ -120,13 +120,27 @@ router.post('/:qrToken/review', async (req, res) => {
   }
   if (!resolved.length) return res.status(400).json({ error: "Sorry, nothing in your basket is available right now." });
 
-  const ref = `ORD-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-  const { rows: orderRows } = await pool.query(
-    `insert into "order" (customer_id, reference, branch_id, channel, table_id, session_id, fulfilment_type, payment_mode, engine_state, status)
-     values ($1, $2, $3, 'dinein', $4, $5, 'table', 'at_table', 'confirm_order', 'new') returning *`,
-    [customer.id, ref, table.branch_id, table.id, session.id]
-  );
-  const order = orderRows[0];
+  // Still deciding on THIS round (hasn't said yes yet) -- replace its items
+  // with the full new basket instead of creating a second, duplicate order
+  // and abandoning the first. Found live, 2026-09-11, Chidera: "dine in
+  // didnt reserve my orders fo when i tapped change it" -- every re-submit
+  // from "No, change it" (handleOrderConfirmNoTap's own menu link) silently
+  // orphaned the original order and created a fresh one, which is what
+  // actually made it look like the order had vanished.
+  const existing = await getOpenOrder(customer.id);
+  let order;
+  if (existing && existing.engine_state === 'confirm_order' && existing.table_id === table.id) {
+    order = existing;
+    await pool.query('delete from order_item where order_id = $1', [order.id]);
+  } else {
+    const ref = `ORD-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const { rows: orderRows } = await pool.query(
+      `insert into "order" (customer_id, reference, branch_id, channel, table_id, session_id, fulfilment_type, payment_mode, engine_state, status)
+       values ($1, $2, $3, 'dinein', $4, $5, 'table', 'at_table', 'confirm_order', 'new') returning *`,
+      [customer.id, ref, table.branch_id, table.id, session.id]
+    );
+    order = orderRows[0];
+  }
   for (const item of resolved) {
     await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
   }
@@ -145,10 +159,40 @@ router.post('/:qrToken/review', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Only while the current round is still being decided (engine_state still
+// 'confirm_order', hasn't said yes yet) -- once confirmed it moves straight
+// through to preparation (payment_mode = 'at_table'), and reopening the
+// menu after that really is a fresh round (a table ordering drinks, then
+// food later, is two real separate kitchen tickets, not one growing
+// order), so this correctly returns null then, same as before. Chidera
+// 2026-09-11: "dine in didnt reserve my orders fo when i tapped change
+// it" -- this used to be hardcoded null unconditionally, so even a round
+// still being decided vanished from the basket the moment the menu
+// reopened (handleOrderConfirmNoTap's "No, change it" link, or just
+// scanning again before saying yes).
+async function pendingOrderPayload(customerId, tableId) {
+  const order = await getOpenOrder(customerId);
+  if (!order || order.engine_state !== 'confirm_order' || order.table_id !== tableId) return null;
+  const { rows: items } = await pool.query(
+    `select oi.product_id, oi.quantity, p.name from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+    [order.id]
+  );
+  if (!items.length) return null;
+  return {
+    items: items.map((i) => ({ productId: i.product_id, quantity: i.quantity, name: i.name })),
+    total: Number(order.total) || 0,
+  };
+}
+
 router.get('/:qrToken', async (req, res) => {
   const table = await resolveTable(req.params.qrToken);
   if (!table) return res.status(404).send('Table not found.');
-  const [products, waNumber] = await Promise.all([menuForBranch(table.branch_id), resolveWaNumber(table.branch_id)]);
+  const session = await openSessionFor(table);
+  const [products, waNumber, pendingOrder] = await Promise.all([
+    menuForBranch(table.branch_id),
+    resolveWaNumber(table.branch_id),
+    session ? pendingOrderPayload(session.customer_id, table.id) : Promise.resolve(null),
+  ]);
   res.set('Content-Type', 'text/html').send(
     renderMenuPage({
       reviewPath: `/t/${req.params.qrToken}/review`,
@@ -157,10 +201,7 @@ router.get('/:qrToken', async (req, res) => {
       coverPhotoVersion: table.cover_photo_version,
       waNumber,
       products,
-      // A dine-in round is always a fresh order (a table ordering drinks,
-      // then food later, is two real separate rounds to the kitchen, not
-      // one growing order) -- no pending-order basket to pre-load here.
-      pendingOrder: null,
+      pendingOrder,
       initialCategory: req.query.cat || null,
     })
   );
