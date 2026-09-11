@@ -2653,7 +2653,7 @@ async function getDineinConfig() {
 
 async function sendDineinWelcome(customer, table) {
   const dinein = await getDineinConfig();
-  const { rows: bizRows } = await pool.query('select name, logo_data_url from business limit 1');
+  const { rows: bizRows } = await pool.query('select name from business limit 1');
   const biz = bizRows[0];
   const body = `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
   const buttons = [
@@ -2661,7 +2661,15 @@ async function sendDineinWelcome(customer, table) {
     { id: 'dinein_waiter', title: 'Call a waiter' },
     { id: 'dinein_specials', title: "Today's specials" },
   ];
-  const headerImage = dinein?.welcome_image_url || biz?.logo_data_url || null;
+  // Same cover-photo mechanism the normal chat greeting already uses
+  // (handleGreeting's businessCoverPhotoUrl) -- Chidera 2026-09-11: "why
+  // does dine in not have the photo thing we did from normal conversation
+  // flow on the chat?" welcome_image_url has no UI anywhere to ever set it
+  // (always null in practice), and business.logo_data_url is a data: URI,
+  // which sendWhatsAppButtons silently drops (Meta needs a real http URL
+  // to fetch it) -- so this never actually showed a header image before,
+  // regardless of what a business had uploaded.
+  const headerImage = dinein?.welcome_image_url || (await businessCoverPhotoUrl()) || null;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppButtons(recipientFor(customer), body, buttons, credentials, headerImage);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body, trigger: 'dinein_welcome' });

@@ -30,7 +30,15 @@ async function whatsappNumberForBranch(branchId) {
 async function qrDataUrlFor(table, whatsappNumber) {
   if (!whatsappNumber) return null;
   const text = encodeURIComponent(`Menu Table ${table.label}`);
-  const link = `https://wa.me/${whatsappNumber}?text=${text}`;
+  // _r isn't read by wa.me (it only recognizes "text") and never shows up
+  // in the customer's prefilled message -- it exists purely so the QR
+  // code's own encoded bytes, and so the image, actually change when
+  // regenerate-qr below gives a table a fresh qr_token. Found live,
+  // 2026-09-11, Chidera: "when i press new qr, no qr is actually
+  // renewing" -- before this, the QR was built from only the WhatsApp
+  // number and the table's label, neither of which regenerating touches,
+  // so every "new" QR was pixel-identical to the one before it.
+  const link = `https://wa.me/${whatsappNumber}?text=${text}&_r=${table.qr_token.slice(0, 8)}`;
   return QRCode.toDataURL(link, { margin: 1, width: 320 });
 }
 
@@ -91,11 +99,13 @@ router.post('/tables/:id', requireEditorApi, async (req, res) => {
 
 // A stolen or renumbered printed card is invalidated by giving the table a
 // fresh qr_token -- the old printed code still decodes to a real wa.me
-// link (it only ever encoded the number + table label text, not the
-// token itself, see qrDataUrlFor above), so the actual protection here is
-// operational (reprint and swap the card), not cryptographic. This exists
-// so the dashboard has a real "regenerate" action to pair with that swap,
-// and so a regenerated token shows up as a visibly different QR image.
+// link with the same number + table label text (see qrDataUrlFor's own
+// _r comment for why the token itself only affects the QR's encoded
+// bytes, never what a customer sees or sends), so the actual protection
+// here is operational (reprint and swap the card), not cryptographic.
+// This exists so the dashboard has a real "regenerate" action to pair
+// with that swap, and so a regenerated token shows up as a visibly
+// different QR image.
 router.post('/tables/:id/regenerate-qr', requireEditorApi, async (req, res) => {
   const { rows } = await pool.query(
     'update restaurant_table set qr_token = $1 where id = $2 returning *',
