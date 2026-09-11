@@ -1,7 +1,7 @@
 // Shared HTML for the web menu page -- used by both routes/dinein-menu.js
 // (table-scoped, GET /t/:qrToken) and routes/menu-page.js (general
 // ordering, GET /m/:token). Same page either way, just a different way of
-// knowing who's looking at it and where "Review order" posts to. Styling
+// knowing who's looking at it and where "Place order" posts to. Styling
 // matches the reference demo (Downloads/EBOS-Web-Menu-Demo.html,
 // Chidera 2026-09-10) -- Fraunces/Inter, warm paper background, pill
 // buttons -- not the plainer first pass this replaced.
@@ -131,7 +131,7 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoV
   <div id="sec" class="sec"></div>
   <div id="grid" class="grid"></div>
 </div>
-<div class="bask"><span id="bc">Nothing added yet</span><button class="go" id="go">Review order</button></div>
+<div class="bask"><span id="bc">Nothing added yet</span><button class="go" id="go">Place order</button></div>
 <div id="backdrop" class="backdrop" hidden></div>
 <div id="sheet" class="sheet" hidden>
   <div class="sheetHead"><h3>Your order</h3><button id="sheetClose" class="sheetClose" aria-label="Close">&times;</button></div>

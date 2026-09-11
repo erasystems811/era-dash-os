@@ -1853,6 +1853,22 @@ async function handleWaitingOnPayment(customer, order, text) {
 // stage (handleCollectInfo, a different, softer acknowledgment since the
 // order hasn't reached that gate yet). Same mutation either way, just
 // different words wrapped around it per stage.
+// Removing an order_item that still has an item-customization question
+// pending on it (order.pending_question_order_item_id -- "peppered or
+// not?", asked per-item, see line ~1136) hit the row's own foreign key
+// live, 2026-09-11: deleting it while that column still pointed at it
+// threw order_pending_question_order_item_id_fkey, a 500 on both the AI
+// "remove X" path and the web menu's "Review order" (a removed item that
+// happened to still be mid-question). Clearing the pointer first -- same
+// as a normal answer would once it's actually answered -- is the fix,
+// not skipping the delete or working around the constraint.
+async function clearPendingQuestionIfOnItem(order, orderItemId) {
+  if (order.pending_question_order_item_id !== orderItemId) return;
+  order.pending_question_order_item_id = null;
+  order.pending_question_id = null;
+  await pool.query('update "order" set pending_question_order_item_id = null, pending_question_id = null where id = $1', [order.id]);
+}
+
 async function applyOrderModifications(order, mods, { allowRemovals }) {
   const { rows: existingItems } = await pool.query('select id, product_id, quantity from order_item where order_id = $1', [order.id]);
   let addedValue = 0;
@@ -1869,6 +1885,8 @@ async function applyOrderModifications(order, mods, { allowRemovals }) {
 
   if (allowRemovals) {
     for (const item of mods.removes) {
+      const existing = existingItems.find((e) => e.product_id === item.productId);
+      if (existing) await clearPendingQuestionIfOnItem(order, existing.id);
       await pool.query('delete from order_item where order_id = $1 and product_id = $2', [order.id, item.productId]);
     }
     for (const item of mods.sets) {
@@ -3100,8 +3118,9 @@ export async function handleWebMenuOrder(customer, items) {
     return;
   }
 
-  const { rows: existingItems } = await pool.query('select product_id, quantity from order_item where order_id = $1', [order.id]);
+  const { rows: existingItems } = await pool.query('select id, product_id, quantity from order_item where order_id = $1', [order.id]);
   const existingMap = new Map(existingItems.map((r) => [r.product_id, r.quantity]));
+  const existingIdMap = new Map(existingItems.map((r) => [r.product_id, r.id]));
   const submittedIds = new Set(items.map((i) => i.productId));
 
   const adds = [];
@@ -3162,6 +3181,8 @@ export async function handleWebMenuOrder(customer, items) {
     await pool.query('update order_item set quantity = $1 where order_id = $2 and product_id = $3', [item.quantity, order.id, item.productId]);
   }
   for (const item of removes) {
+    const itemId = existingIdMap.get(item.productId);
+    if (itemId) await clearPendingQuestionIfOnItem(order, itemId);
     await pool.query('delete from order_item where order_id = $1 and product_id = $2', [order.id, item.productId]);
   }
   await finishItemsCollection(customer, order, 'Got it. ');
