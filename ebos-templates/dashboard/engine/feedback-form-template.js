@@ -8,7 +8,8 @@
 // cta_url button (engine/flow.js's sendFeedbackRequest), no Meta approval
 // needed for any of it. Same warm paper/Fraunces/Inter app-shell as those
 // two pages, not a bare form.
-export function renderFeedbackFormPage({ businessName, reference, submitted, submitPath }) {
+export function renderFeedbackFormPage({ businessName, reference, submitted, submitPath, waNumber }) {
+  const waDigits = String(waNumber || '').replace(/\D/g, '');
   return `<!doctype html>
 <html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Rate your order</title>
@@ -62,6 +63,7 @@ export function renderFeedbackFormPage({ businessName, reference, submitted, sub
 </div>
 <script>
 const SUBMIT_PATH = ${JSON.stringify(submitPath)};
+const WA_DIGITS = ${JSON.stringify(waDigits)};
 const ratings = { experience: 0, food: 0, service: 0 };
 document.querySelectorAll('.stars').forEach(function (row) {
   const field = row.dataset.field;
@@ -97,7 +99,14 @@ if (submitBtn) {
       });
       const data = await res.json().catch(function () { return {}; });
       if (!res.ok) throw new Error(data.error || 'Something went wrong.');
-      document.getElementById('content').innerHTML = '<div class="done"><h2>Thank you!</h2><p>Your feedback has been sent.</p></div>';
+      document.getElementById('content').innerHTML = '<div class="done"><h2>Thank you!</h2><p>Your feedback has been sent'
+        + (WA_DIGITS ? '.<br>Taking you back to the chat\\u2026' : '.') + '</p></div>';
+      // Hands the guest straight back to the WhatsApp thread instead of
+      // leaving them stranded here -- same wa.me trick the web menu page
+      // already uses (WhatsApp's own in-app browser intercepts it and
+      // swaps back to the chat). Chidera 2026-09-11: "after feedback, take
+      // them back to chat automatically."
+      if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
     } catch (err) {
       errEl.textContent = err.message || 'Could not submit -- please check your connection and try again.';
       errEl.style.display = 'block';
