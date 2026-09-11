@@ -9,7 +9,7 @@ import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extrac
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
 import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
-import { sendMenuList, sendListMessage, productForRowId } from './menu-message.js';
+import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
@@ -684,7 +684,13 @@ async function findSpecialsCategory(branchId) {
 // tone-matching deterministically (used the same way in handleEnquiry/
 // handleCollectInfo already), just without the network round trip.
 async function handleGreeting(customer, text) {
-  const message = `${greetingAckFor(text)}What would you like to order today?`.trim();
+  // Chidera 2026-09-11: "welcome to <restaurant name>, what would you
+  // like to order" -- then, after an initial pass kept greetingAckFor's
+  // tone-matched prefix (Good morning!/Hey there!) alongside it: "not
+  // that hey there". Just the business name now, no tone-matching prefix.
+  const { rows: bizRows } = await pool.query('select name from business limit 1');
+  const businessName = bizRows[0]?.name || 'us';
+  const message = `Welcome to ${businessName}, what would you like to order?`;
   if (customer.channel !== 'whatsapp') {
     await reply(customer, message, 'greeting');
     return;
@@ -1704,9 +1710,8 @@ function looksLikeBrowseQuestion(text) {
 }
 
 // Shared by every place that can be asked a broad "what do you have" --
-// Instagram has no equivalent of WhatsApp's interactive List Message --
-// sendMenuList is a WhatsApp-only Graph API feature, confirmed while
-// building the WhatsApp version of this. The system prompt driving `answer`
+// Instagram has no equivalent of WhatsApp's cta_url interactive message,
+// so sendWebMenuLink is WhatsApp-only. The system prompt driving `answer`
 // (answerOrderQuestion/answerFromKnowledgeBase) is told never to write out
 // the item list itself for a broad availability question, on the promise
 // that "a real menu is shown separately as an interactive button right
@@ -1752,21 +1757,22 @@ async function resolveGeneralAvailability(customer, isGeneralAvailability, answe
     if (!menuText) return answer;
     return answer ? `${answer}\n\n${menuText}` : menuText;
   }
-  if (process.env.EBOS_SANDBOX === '1') return answer;
-
-  const shown = await sendMenuList(recipientFor(customer), "Here's our menu, tap below to see everything we have.", branchId).catch((err) => {
-    console.error('sendMenuList failed:', err.message);
+  // The real web menu (site), not the old native List Message -- Chidera
+  // 2026-09-11: "anywhere bot was meant to give that list view menu
+  // remove and put the site one, the list one will only be used for
+  // upsell." sendWebMenuLink already handles its own sandbox awareness
+  // and logging (sendMenuList had neither), so no separate EBOS_SANDBOX
+  // gate or logMessage call needed here anymore either.
+  const shown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.").catch((err) => {
+    console.error('sendWebMenuLink failed:', err.message);
     return false;
   });
-  // sendMenuList sends straight via the Graph API, not through reply() --
-  // logged here so it actually shows up in the conversation history.
-  if (shown) await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[interactive menu button sent]', trigger: 'menu_shown' });
-  // Whether the button sent or not, `answer` is returned unchanged here --
+  // Whether the link sent or not, `answer` is returned unchanged here --
   // it's either null (a pure browse question, nothing else to say) or a
   // short factual clause ("no, we don't have that") that's genuinely worth
-  // saying on its own, alongside the button when it sent, and by itself if
+  // saying on its own, alongside the link when it sent, and by itself if
   // it didn't. Never falls back to writing the full item list as text on
-  // failure -- that's exactly the wall-of-text problem this button exists
+  // failure -- that's exactly the wall-of-text problem this link exists
   // to avoid, worse the bigger the menu. A short generic nudge instead.
   if (shown || answer) return answer;
   return 'Sorry, having a little trouble showing the menu right now. Let me know what you would like, or ask about a specific item.';
