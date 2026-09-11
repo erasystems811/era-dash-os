@@ -16,6 +16,7 @@ const BASE_NAV = [
   { to: '/knowledge-base', label: 'Knowledge base' },
   { to: '/branches', label: 'Branches' },
   { to: '/documents', label: 'Documents' },
+  { to: '/feedback', label: 'Feedback' },
   { to: '/staff', label: 'Roles and numbers' },
   { to: '/activity-log', label: 'Activity log' },
   { to: '/settings', label: 'Settings' },

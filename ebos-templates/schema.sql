@@ -1008,9 +1008,11 @@ create table if not exists waiter_call (
 );
 create index if not exists waiter_call_open_idx on waiter_call (table_id) where status = 'open';
 
--- Sent feedback_delay_minutes after a table closes, never on an
--- auto-closed session (table_session.feedback_state tracks this so a
--- sweep never sends it twice).
+-- Retired -- Chidera 2026-09-11 replaced dine-in's own Good/Alright/Not
+-- good feedback with a unified 3-question star system for every order
+-- (see order_feedback below), sent right after payment/completion instead
+-- of hours later on table-close. Table kept, not dropped (existing rows
+-- are real history), just nothing reads or writes it anymore.
 create table if not exists feedback (
   id uuid primary key default gen_random_uuid(),
   session_id uuid not null references table_session(id),
@@ -1023,6 +1025,37 @@ create table if not exists feedback (
   created_at timestamptz not null default now()
 );
 create index if not exists feedback_branch_idx on feedback (branch_id, created_at desc);
+
+-- Every order's feedback now, one row per order, filled in progressively
+-- as each of the 3 star questions gets answered (pending_question tracks
+-- which is next; a WhatsApp List Message tap answers exactly one).
+-- Chidera 2026-09-11: "the questions will be how was your experience? how
+-- was the food? and how was the service? 5 starts to rate" -- sent the
+-- moment any order reaches status = 'completed' (delivery/pickup
+-- delivered or picked up, or dine-in's "Mark paid" -- see In House's own
+-- two pipelines), one shared trigger for all three instead of the old
+-- dine-in-only, table-close-delayed version.
+create table if not exists order_feedback (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references "order"(id) on delete cascade,
+  branch_id uuid references branch(id),
+  customer_id uuid not null references customers(id),
+  -- Copied at write time from order.channel, not re-derived by joining --
+  -- 'dinein' vs everything else is exactly the in-house/online split
+  -- Chidera asked the dashboard to filter by: "let the dashboard kind of
+  -- also differentiate the feedback for inhouse or online so they know
+  -- where the complain is from."
+  channel text not null,
+  experience_rating integer check (experience_rating between 1 and 5),
+  food_rating integer check (food_rating between 1 and 5),
+  service_rating integer check (service_rating between 1 and 5),
+  pending_question text check (pending_question in ('experience', 'food', 'service')),
+  status text not null default 'sent' check (status in ('sent', 'answered')),
+  created_at timestamptz not null default now(),
+  answered_at timestamptz
+);
+create unique index if not exists order_feedback_order_idx on order_feedback (order_id);
+create index if not exists order_feedback_branch_created_idx on order_feedback (branch_id, created_at desc);
 
 -- A dine-in order's own channel/fulfilment shape -- settled at the table,
 -- never delivered or collected, no payment confirmation step.

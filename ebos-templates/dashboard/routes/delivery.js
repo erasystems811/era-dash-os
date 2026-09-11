@@ -9,6 +9,7 @@ import { pool } from '../lib/db.js';
 import { requireEditorApi } from '../lib/auth.js';
 import { encrypt } from '../lib/crypto.js';
 import { hashRiderPin } from '../engine/rider-auth.js';
+import { sendFeedbackRequest } from '../engine/flow.js';
 
 export const router = express.Router();
 
@@ -181,6 +182,10 @@ router.post('/assignments/:id/release', requireEditorApi, async (req, res) => {
   // caused -- a staff override closing out a stuck delivery is just as
   // real a completion as the rider entering the code themselves.
   await pool.query(`update "order" set status = 'completed' where id = $1 and status in ('ready', 'in_transit')`, [rows[0].order_id]);
+  // Third of the three real completion sites -- see engine/flow.js's own
+  // comment on sendFeedbackRequest. Fire-and-forget, never blocks the
+  // release itself.
+  sendFeedbackRequest(rows[0].order_id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
   res.json(rows[0]);
 });
 

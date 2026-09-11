@@ -15,7 +15,6 @@ export default function DineIn() {
   const [config, setConfig] = useState(null);
   const [tables, setTables] = useState(null);
   const [branches, setBranches] = useState([]);
-  const [feedback, setFeedback] = useState(null);
   const [form, setForm] = useState(EMPTY);
   const [error, setError] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -31,14 +30,8 @@ export default function DineIn() {
     api.get('/dinein-config').then(setConfig);
     api.get('/dinein/tables').then(setTables);
     api.get('/branches').then(setBranches);
-    api.get('/dinein/feedback').then(setFeedback);
   }
   useEffect(load, []);
-
-  async function actionFeedback(id) {
-    await api.post(`/dinein/feedback/${id}/action`);
-    load();
-  }
 
   const showBranchPicker = branches.length > 1;
 
@@ -165,7 +158,8 @@ export default function DineIn() {
 
       {config.enabled && (
         <p className="hint">
-          Pending dine-in orders live in <Link to="/in-house">In House</Link> now, not here.
+          Pending dine-in orders live in <Link to="/in-house">In House</Link> now, not here. Customer ratings live in{' '}
+          <Link to="/feedback">Feedback</Link>.
         </p>
       )}
 
@@ -269,45 +263,6 @@ export default function DineIn() {
           </tbody>
         </table>
       </div>
-
-      {feedback && feedback.length > 0 && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>Feedback</h3>
-          <p className="subtitle">Newest first, negative first. A "Not good" rating is already in the Needs-a-person queue too.</p>
-          <table>
-            <thead>
-              <tr>
-                <th>Table</th>
-                <th>Rating</th>
-                <th>Said</th>
-                <th>Ordered</th>
-                {editable && <th></th>}
-              </tr>
-            </thead>
-            <tbody>
-              {feedback.map((f) => (
-                <tr key={f.id}>
-                  <td>{f.table_label}</td>
-                  <td>
-                    <span className={`badge ${f.score === 'bad' ? 'disabled' : f.score === 'alright' ? 'new' : 'active'}`}>{f.score}</span>
-                  </td>
-                  <td style={{ color: 'var(--text-muted)' }}>{f.comment || '--'}</td>
-                  <td style={{ color: 'var(--text-muted)' }}>{f.ordered || '--'}</td>
-                  {editable && (
-                    <td>
-                      {f.status !== 'actioned' && (
-                        <button className="secondary" onClick={() => actionFeedback(f.id)}>
-                          Mark actioned
-                        </button>
-                      )}
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
 
       {editable && (
         <div className="card">

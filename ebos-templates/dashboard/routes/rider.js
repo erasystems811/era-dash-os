@@ -9,7 +9,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { verifyRiderPin } from '../engine/rider-auth.js';
 import { offerBus } from '../engine/offer-bus.js';
-import { notifyDeliveryAssigned } from '../engine/flow.js';
+import { notifyDeliveryAssigned, sendFeedbackRequest } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { sendPayout } from '../engine/payout-providers.js';
 import { resolveSource } from '../engine/delivery.js';
@@ -432,6 +432,10 @@ router.post('/assignments/:id/deliver', requireRider, async (req, res) => {
     `update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1 and status = 'in_transit'`,
     [existing.order_id]
   );
+  // Second of the three real completion sites -- see engine/flow.js's own
+  // comment on sendFeedbackRequest. Fire-and-forget: never block the
+  // rider's own "delivery complete" response on this.
+  sendFeedbackRequest(existing.order_id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
   res.json(rows[0]);
 
   // Manual payout (the default, spec B9's own "manual before automatic")

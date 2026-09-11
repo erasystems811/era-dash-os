@@ -181,38 +181,11 @@ router.post('/orders/:id/served', async (req, res) => {
   res.json(rows[0]);
 });
 
-// Newest first, negative first (spec section 10) -- score isn't
-// alphabetically 'bad' < 'good' < 'alright', so an explicit case order
-// rather than relying on text sort.
-router.get('/feedback', async (req, res) => {
-  const { rows } = await pool.query(
-    `select f.*, rt.label as table_label, c.name as customer_name, c.phone_number,
-            (select string_agg(p.name || ' x' || oi.quantity, ', ') from order_item oi join product p on p.id = oi.product_id join "order" o on o.id = oi.order_id where o.session_id = f.session_id) as ordered
-     from feedback f
-     join table_session ts on ts.id = f.session_id
-     join restaurant_table rt on rt.id = ts.table_id
-     join customers c on c.id = f.customer_id
-     where ($1::uuid is null or f.branch_id = $1)
-     order by case f.score when 'bad' then 0 when 'alright' then 1 else 2 end, f.created_at desc
-     limit 200`,
-    [req.branchId]
-  );
-  res.json(rows);
-});
-
-router.post('/feedback/:id/action', requireEditorApi, async (req, res) => {
-  const { rows } = await pool.query(
-    `update feedback set status = 'actioned', actioned_by = $1 where id = $2 returning *`,
-    [req.staff.id, req.params.id]
-  );
-  if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
-  res.json(rows[0]);
-});
-
 // Stage 6 -- the dashboard fallback for closing a table (spec 6.2: build
 // this regardless of POS access, it's the only close path a client with no
-// POS has at all). Schedules nothing itself yet -- feedback (stage 7)
-// isn't built, so table_session.feedback_state just stays 'none' for now.
+// POS has at all). Doesn't send feedback itself -- that already went out
+// per-order the moment each one was marked paid (POST /orders/:id/status,
+// see engine/flow.js's sendFeedbackRequest), not once at table-close.
 // Blocked while any order from this sitting is still outstanding -- a
 // table can't free up (a new party seated, a new session started on the
 // same physical table) until every round has actually been paid, not just

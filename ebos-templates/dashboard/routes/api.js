@@ -22,7 +22,7 @@ import {
   logActivity,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { createDelivery } from '../engine/delivery.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
@@ -812,6 +812,11 @@ router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
   // schema.sql's comment on the column.
   if (status === 'completed') {
     await pool.query('update "order" set completed_at = now() where id = $1', [req.params.id]);
+    // One of the three real completion sites -- covers pickup's "Picked
+    // up" click and dine-in's "Mark paid" (In House's second pipeline).
+    // Fire-and-forget: a feedback-send failure should never block staff
+    // from actually closing the order out.
+    sendFeedbackRequest(req.params.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
   }
   // One "Mark as ready" click on the Preparation stage, same button
   // regardless of fulfilment_type (Chidera's call) -- everything below
@@ -875,6 +880,66 @@ router.get('/bookings', async (req, res) => {
     `select b.*, c.name as customer_name, c.phone_number as customer_phone, p.name as product_name
      from booking b join customers c on c.id = b.customer_id join product p on p.id = b.product_id
      order by b.date desc limit 200`
+  );
+  res.json(rows);
+});
+
+// --- Feedback (order_feedback -- see engine/flow.js's sendFeedbackRequest,
+// sent for every order the moment it's actually completed, not just
+// dine-in on table-close) -----------------------------------------------
+
+// Shared by all three views below -- 'online'/'dinein' is the same
+// null-means-everything, "differentiate feedback for in house or online"
+// idiom used everywhere else in this file (see scopeToWorkArea). Owner/
+// manager only (requireEditorApi), same tier as Roles/Activity log --
+// customer feedback isn't a PIN-tier staff member's to see.
+function feedbackChannelClause(paramIndex) {
+  return `($${paramIndex}::text is null or ($${paramIndex} = 'online' and channel != 'dinein') or ($${paramIndex} = 'dinein' and channel = 'dinein'))`;
+}
+
+router.get('/feedback/summary', requireEditorApi, async (req, res) => {
+  const channel = ['online', 'dinein'].includes(req.query.channel) ? req.query.channel : null;
+  const { rows } = await pool.query(
+    `select avg(experience_rating) as experience, avg(food_rating) as food, avg(service_rating) as service, count(*) as total
+     from order_feedback
+     where status = 'answered' and ($1::uuid is null or branch_id = $1) and ${feedbackChannelClause(2)}`,
+    [req.branchId, channel]
+  );
+  res.json(rows[0]);
+});
+
+// Last 7 days only -- Chidera 2026-09-11: "the individual is for a week
+// only after a weak it can clear so that it wont get too chocked up."
+// Nothing is ever deleted (that's what /feedback/monthly and
+// /feedback/summary above are for, unaffected by this window) -- purely a
+// display filter on the recent-list view.
+router.get('/feedback/recent', requireEditorApi, async (req, res) => {
+  const channel = ['online', 'dinein'].includes(req.query.channel) ? req.query.channel : null;
+  const { rows } = await pool.query(
+    `select f.*, o.reference as order_reference, c.name as customer_name, c.phone_number as customer_phone
+     from order_feedback f
+     join "order" o on o.id = f.order_id
+     join customers c on c.id = f.customer_id
+     where f.status = 'answered' and f.created_at > now() - interval '7 days'
+       and ($1::uuid is null or f.branch_id = $1) and ${feedbackChannelClause(2)}
+     order by f.created_at desc limit 200`,
+    [req.branchId, channel]
+  );
+  res.json(rows);
+});
+
+// "he can see feedback per month" -- one row per calendar month, so a
+// manager can tell whether the experience is trending up or down over
+// time, not just a single all-time number.
+router.get('/feedback/monthly', requireEditorApi, async (req, res) => {
+  const channel = ['online', 'dinein'].includes(req.query.channel) ? req.query.channel : null;
+  const { rows } = await pool.query(
+    `select to_char(date_trunc('month', created_at), 'YYYY-MM') as month,
+            avg(experience_rating) as experience, avg(food_rating) as food, avg(service_rating) as service, count(*) as total
+     from order_feedback
+     where status = 'answered' and ($1::uuid is null or branch_id = $1) and ${feedbackChannelClause(2)}
+     group by 1 order by 1 desc limit 24`,
+    [req.branchId, channel]
   );
   res.json(rows);
 });

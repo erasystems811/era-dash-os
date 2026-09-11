@@ -2754,15 +2754,6 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${buttonId}]` , processed: true });
 
-  // Feedback (Stage 7) happens on a CLOSED table_session -- checked first,
-  // before the open-session lookup below (which would otherwise reject it
-  // with "please scan again", the wrong message for a guest who already
-  // left).
-  if (buttonId.startsWith('dinein_feedback_')) {
-    await handleDineinFeedbackTap(customer, buttonId);
-    return;
-  }
-
   const session = await currentDineinSession(customer);
   if (!session) {
     await reply(customer, 'Please scan your table\'s QR code to get started.', 'dinein_no_session');
@@ -2787,109 +2778,116 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
   await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
 }
 
-// Dine-in add-on, Stage 7: feedback. Called on a periodic sweep
-// (server.js), same shape as closeStaleOrders/sweepOfferEscalation --
-// finds every closed table_session past its feedback_delay_minutes with
-// nothing sent yet, and sends one simple 3-button rating request per
-// session. Never fires for an auto-closed session (spec 9: "you do not
-// know whether they had a good night or simply left") or when the add-on
-// or feedback specifically is switched off.
-export async function sweepDineinFeedback() {
-  const dinein = await getDineinConfig();
-  if (!dinein?.enabled || !dinein.feedback_enabled) return;
-  const { rows: due } = await pool.query(
-    `select ts.*, rt.label as table_label, c.name as customer_name, c.phone_number, c.channel, c.channel_id, c.branch_id as customer_branch_id
-     from table_session ts
-     join restaurant_table rt on rt.id = ts.table_id
-     join customers c on c.id = ts.customer_id
-     where ts.closed_at is not null and ts.closed_by != 'auto' and ts.feedback_state = 'none'
-       and ts.closed_at <= now() - make_interval(mins => $1)`,
-    [dinein.feedback_delay_minutes]
-  );
-  for (const session of due) {
-    const { rows: bizRows } = await pool.query('select name from business limit 1');
-    const name = session.customer_name ? `Hi ${session.customer_name}, ` : 'Hi, ';
-    const body = `${name}thank you for coming to ${bizRows[0]?.name || 'us'} tonight. How was it?`;
-    const buttons = [
-      { id: 'dinein_feedback_good', title: 'Good' },
-      { id: 'dinein_feedback_alright', title: 'Alright' },
-      { id: 'dinein_feedback_bad', title: 'Not good' },
-    ];
-    const customer = { id: session.customer_id, channel: session.channel, channel_id: session.channel_id, phone_number: session.phone_number, branch_id: session.customer_branch_id };
-    try {
-      const credentials = await getWhatsAppCredentials(customer.branch_id);
-      await sendWhatsAppButtons(recipientFor(customer), body, buttons, credentials);
-      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body, trigger: 'dinein_feedback_ask' });
-      await pool.query(`update table_session set feedback_state = 'sent' where id = $1`, [session.id]);
-    } catch (err) {
-      console.error(`Dine-in feedback send failed for session ${session.id}:`, err.message);
-    }
-  }
+// Unified feedback -- replaces the old dine-in-only, table-close-delayed,
+// 3-button Good/Alright/Not-good system entirely. Chidera 2026-09-11: "the
+// questions will be how was your experience? how was the food? and how
+// was the service? 5 starts to rate" -- sent for EVERY order (delivery,
+// pickup, or dine-in) the moment it actually reaches status = 'completed'
+// (see the shared hook this function is called from at each of the three
+// real completion sites: routes/api.js's /orders/:id/status,
+// routes/rider.js's delivery-code entry, routes/delivery.js's release),
+// not hours later. One row per order (order_feedback, unique on order_id)
+// filled in one star rating at a time as each List Message question gets
+// tapped -- see handleFeedbackListTap below.
+const FEEDBACK_QUESTIONS = ['experience', 'food', 'service'];
+const FEEDBACK_QUESTION_TEXT = {
+  experience: 'How was your experience?',
+  food: 'How was the food?',
+  service: 'How was the service?',
+};
+
+async function sendFeedbackQuestion(customer, question) {
+  const rows = [1, 2, 3, 4, 5].map((n) => ({
+    id: `feedback::${question}::${n}`,
+    title: '⭐'.repeat(n),
+    description: `${n} star${n === 1 ? '' : 's'}`,
+  }));
+  const bodyText = FEEDBACK_QUESTION_TEXT[question];
+  await sendListMessage(recipientFor(customer), { bodyText, buttonText: 'Rate', sectionTitle: 'Stars', rows });
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger: 'feedback_question_asked' });
 }
 
-async function handleDineinFeedbackTap(customer, buttonId) {
+// Fire-and-forget from each of the three real completion sites -- WhatsApp
+// only (List Messages, same channel gate sendUpsellList already uses), and
+// on conflict do nothing + returning is what makes this safe to call more
+// than once for the same order without ever double-sending the first
+// question.
+export async function sendFeedbackRequest(orderId) {
+  const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [orderId]);
+  const order = orderRows[0];
+  if (!order) return;
+  const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+  const customer = customerRows[0];
+  if (!customer || customer.channel !== 'whatsapp') return;
+  if (!process.env.META_PHONE_NUMBER_ID || !process.env.META_ACCESS_TOKEN) return;
+  const { rows: inserted } = await pool.query(
+    `insert into order_feedback (order_id, branch_id, customer_id, channel, pending_question)
+     values ($1, $2, $3, $4, 'experience') on conflict (order_id) do nothing returning id`,
+    [order.id, order.branch_id, order.customer_id, order.channel]
+  );
+  if (!inserted.length) return; // already sent for this order
+  await sendFeedbackQuestion(customer, 'experience');
+}
+
+// A tap on sendFeedbackQuestion's own List Message above. Looks up by
+// customer + the exact question this tap claims to answer (not by
+// encoding an order/feedback id in the row) -- there's realistically only
+// ever one feedback request in flight per customer at a time, and this
+// mirrors the same "match by pending state, not by id" idiom
+// handlePendingUpsell already uses for order.pending_upsell_category.
+export async function handleFeedbackListTap({ phoneNumber, channelId, rowId, channel = 'whatsapp', branchId }) {
+  const [, question, ratingStr] = rowId.split('::');
+  if (!FEEDBACK_QUESTIONS.includes(question)) return;
+  const rating = Number(ratingStr);
+  if (!(rating >= 1 && rating <= 5)) return;
+
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   const { rows } = await pool.query(
-    `select ts.*, rt.label as table_label from table_session ts join restaurant_table rt on rt.id = ts.table_id
-     where ts.customer_id = $1 and ts.feedback_state = 'sent' order by ts.closed_at desc limit 1`,
-    [customer.id]
+    `select * from order_feedback where customer_id = $1 and pending_question = $2 order by created_at desc limit 1`,
+    [customer.id, question]
   );
-  const session = rows[0];
-  if (!session) return false;
+  const fb = rows[0];
+  if (!fb) return; // stale tap -- already answered another way, or too old to still match
 
-  const score = buttonId === 'dinein_feedback_good' ? 'good' : buttonId === 'dinein_feedback_alright' ? 'alright' : 'bad';
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${question} = ${'⭐'.repeat(rating)}]`, processed: true });
+  const column = `${question}_rating`; // safe -- question is already checked against FEEDBACK_QUESTIONS above
+  await pool.query(`update order_feedback set ${column} = $1 where id = $2`, [rating, fb.id]);
+
+  const next = FEEDBACK_QUESTIONS[FEEDBACK_QUESTIONS.indexOf(question) + 1];
+  if (next) {
+    await pool.query(`update order_feedback set pending_question = $1 where id = $2`, [next, fb.id]);
+    await sendFeedbackQuestion(customer, next);
+    return;
+  }
+  // 'service' just answered -- the three ratings that actually matter are
+  // complete and safe to aggregate right now. The comment below is
+  // deliberately optional and never blocks that -- Chidera 2026-09-11: "let
+  // there also be a space they can type but optional."
   await pool.query(
-    `insert into feedback (session_id, branch_id, customer_id, score) values ($1, $2, $3, $4)`,
-    [session.id, session.branch_id, customer.id, score]
+    `update order_feedback set pending_question = 'comment', status = 'answered', answered_at = now() where id = $1`,
+    [fb.id]
   );
-  await pool.query(`update table_session set feedback_state = 'answered' where id = $1`, [session.id]);
-
-  if (score === 'good') {
-    const dinein = await getDineinConfig();
-    const reviewLine = dinein?.review_link ? ` We'd really appreciate a review here: ${dinein.review_link}` : '';
-    await reply(customer, `So glad to hear it! Thank you.${reviewLine}`, 'dinein_feedback_good_ack');
-    return true;
-  }
-  // alright/bad both ask what could be better -- the answer is captured as
-  // a free-text reply, matched the same "was the last bot message this
-  // exact trigger" way handleDineinScan's own "which table" follow-up is.
-  const ask = score === 'bad' ? "I'm sorry to hear that. What went wrong?" : 'Thank you for letting us know. What would have made it better?';
-  await reply(customer, ask, 'dinein_feedback_followup');
-  if (score === 'bad') {
-    // Spec 8.3: "the entire commercial argument for this capability" --
-    // into the queue immediately, not after the comment comes back, since
-    // a guest who doesn't answer the follow-up must still surface.
-    const { rows: orderRows } = await pool.query(
-      `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id
-       join "order" o on o.id = oi.order_id where o.session_id = $1`,
-      [session.id]
-    );
-    const orderedLine = orderRows.length ? ` They ordered: ${orderRows.map((r) => `${r.quantity}x ${r.name}`).join(', ')}.` : '';
-    await handover(customer, `Table ${session.table_label} left "Not good" feedback after dine-in.${orderedLine}`, null, false);
-  }
-  return true;
+  await reply(customer, "Thank you! Anything else you'd like to add? (optional -- just skip if not)", 'feedback_comment_ask');
 }
 
 async function handlePendingBatch(customer, text) {
   if (await handleDineinScan(customer, text)) return;
-  // The free-text answer to "what went wrong / what would have made it
-  // better" (see handleDineinFeedbackTap) -- logged onto the feedback row
-  // that's still open for this customer, not treated as a new order/enquiry.
+  // The optional free-text reply to sendFeedbackQuestion's own "anything
+  // else you'd like to add?" (see handleFeedbackListTap) -- logged onto
+  // that same order_feedback row, not treated as a new order/enquiry.
+  // Bounded to 30 minutes, same as every other "was the last thing I asked
+  // still live" check in this file -- a much later, unrelated message
+  // should never get swallowed as a stale comment.
   {
-    const { rows } = await pool.query(
-      `select 1 from message where customer_id = $1 and trigger = 'dinein_feedback_followup' and created_at > now() - interval '30 minutes'
-       order by created_at desc limit 1`,
+    const { rows: fb } = await pool.query(
+      `select id from order_feedback where customer_id = $1 and pending_question = 'comment'
+         and answered_at > now() - interval '30 minutes' order by created_at desc limit 1`,
       [customer.id]
     );
-    if (rows.length) {
-      const { rows: fb } = await pool.query(
-        `select id from feedback where customer_id = $1 and comment is null order by created_at desc limit 1`,
-        [customer.id]
-      );
-      if (fb.length) {
-        await pool.query(`update feedback set comment = $1 where id = $2`, [text.trim(), fb[0].id]);
-        await reply(customer, 'Thank you, noted.', 'dinein_feedback_comment_ack');
-        return;
-      }
+    if (fb.length) {
+      await pool.query(`update order_feedback set pending_question = null, comment = $1 where id = $2`, [text.trim(), fb[0].id]);
+      await reply(customer, 'Thank you, noted.', 'feedback_comment_ack');
+      return;
     }
   }
   // Checked first, before ANY other routing -- deterministic and free.

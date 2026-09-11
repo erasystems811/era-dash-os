@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, retryFailedSendAsTemplate } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, handleFeedbackListTap, retryFailedSendAsTemplate } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -122,6 +122,11 @@ router.post('/', async (req, res) => {
               // first rather than risk menuRowKind ever treating one as an
               // ordinary product id.
               await handleUpsellListTap({ phoneNumber: message.from, channelId: message.from, rowId, channel: 'whatsapp', branchId });
+            } else if (rowId.startsWith('feedback::')) {
+              // flow.js's sendFeedbackQuestion -- same "own row-id space,
+              // checked before the general menu list" reasoning as upsell
+              // above.
+              await handleFeedbackListTap({ phoneNumber: message.from, channelId: message.from, rowId, channel: 'whatsapp', branchId });
             } else if (menuRowKind(rowId) === 'product') {
               const product = await productForRowId(rowId);
               if (product) await handleMenuItemTap({ phoneNumber: message.from, product, channel: 'whatsapp', branchId });
@@ -137,7 +142,7 @@ router.post('/', async (req, res) => {
             const buttonTitle = message.interactive.button_reply.title;
             if (buttonId === 'start_order') {
               await handleStartOrderTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
-            } else if (['dinein_menu', 'dinein_specials', 'dinein_feedback_good', 'dinein_feedback_alright', 'dinein_feedback_bad'].includes(buttonId)) {
+            } else if (['dinein_menu', 'dinein_specials'].includes(buttonId)) {
               await handleDineinButtonTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
             } else if (buttonId === 'order_confirm_yes') {
               // flow.js's sendConfirmButtons -- put through the exact same
