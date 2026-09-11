@@ -47,7 +47,7 @@ const PIN_NAV = [
 // the floor, nothing a counter/delivery-focused tab would ever mean to
 // them.
 const IN_HOUSE_NAV = [
-  { to: '/in-house', label: 'Orders', end: true },
+  { to: '/in-house', label: 'In House', end: true },
   { to: '/dinein', label: 'Dine-in' },
 ];
 
@@ -90,8 +90,18 @@ export default function Layout() {
   // who can actually change anything once there.
   const baseNav = locked ? BASE_NAV.filter((item) => item.to !== '/branches') : BASE_NAV;
   const workArea = workAreaOf(staff);
+  // The /in-house URL is deliberately handed out as its own link (Chidera
+  // 2026-09-11: "i need a era-demo.erasystems.com.ng/in-house link that
+  // opend the management for the in house guest, so staffs arent
+  // confused") -- so it must show only these 2 tabs for WHOEVER is
+  // logged in while looking at it, not only for an account actually
+  // locked to work_area = 'in_house'. Found live: an owner/manager
+  // opening that same link saw their own full sidebar instead, because
+  // the nav was keyed off the session's work_area alone with no regard
+  // for which page they were actually on.
+  const onInHousePage = location.pathname === '/in-house' || location.pathname.startsWith('/in-house/');
   const NAV =
-    workArea === 'in_house'
+    workArea === 'in_house' || onInHousePage
       ? IN_HOUSE_NAV
       : isPinTier(staff)
         ? PIN_NAV
