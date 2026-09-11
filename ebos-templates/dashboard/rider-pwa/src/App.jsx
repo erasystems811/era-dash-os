@@ -460,6 +460,16 @@ function Duty({ rider, initialActive, onLoggedOut }) {
     const source = new EventSource('/rider/api/offers/stream');
     source.onmessage = (event) => {
       const data = JSON.parse(event.data);
+      // Staff handling the order directly (Orders.jsx's "Mark in delivery"
+      // button) cancels the offer server-side and retracts it here too --
+      // otherwise a rider already staring at this exact offer would have
+      // no way to know it's no longer really available, and would either
+      // sit on a dead alarm or get a confusing "someone else already
+      // accepted" the moment they tried (Chidera's ask, 2026-09-11).
+      if (data.retracted) {
+        setOffer((current) => (current?.id === data.id ? null : current));
+        return;
+      }
       setOffer((current) => current || data); // never interrupt an offer already being decided
     };
     return () => source.close();
