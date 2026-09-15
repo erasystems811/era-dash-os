@@ -11,6 +11,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { startJob } from '../jobs.mjs';
 import { loadSecrets } from '../../scripts/lib/secrets.mjs';
+import { loadRegistry, clientsOnServer } from '../../scripts/lib/registry.mjs';
 
 export const router = express.Router();
 
@@ -46,6 +47,21 @@ async function callClaudeForMenu({ text, image }) {
     .map((i) => ({ name: String(i.name).trim(), description: i.description ? String(i.description).trim() : '', price: i.price }));
 }
 
+// Lets the Business Details tab offer "join an existing shared server" as
+// a real dropdown (IP + provider + how many EBOS clients already on it)
+// instead of asking someone to type an IP address from memory. Only
+// mode:'shared' servers -- create-client.mjs's --shared-server=ip only
+// ever makes sense against one of those (see shared-host.mjs's own
+// reasoning: a dedicated server has no shared Caddy for a second tenant
+// to attach to).
+router.get('/shared-servers', (req, res) => {
+  const registry = loadRegistry();
+  const servers = registry.servers
+    .filter((s) => s.mode === 'shared')
+    .map((s) => ({ ip: s.ip, provider: s.provider, clientCount: clientsOnServer(registry, s.ip).length }));
+  res.json(servers);
+});
+
 router.post('/parse-menu', async (req, res) => {
   const { text, image } = req.body;
   if (!text && !image) return res.status(400).json({ error: 'Paste some menu text or attach a photo.' });
@@ -59,10 +75,13 @@ router.post('/parse-menu', async (req, res) => {
 });
 
 router.post('/build', (req, res) => {
-  const { businessName, subdomain, size, provider, business, owner, catalogue, botFields, botStates, knowledgeBase } = req.body;
+  const { businessName, subdomain, size, provider, sharedServerMode, sharedServerIp, business, owner, catalogue, botFields, botStates, knowledgeBase } = req.body;
 
   if (!businessName || !business?.type || !owner?.name || !owner?.email) {
     return res.status(400).json({ error: 'Business name, business type, owner name and owner email are all required before building.' });
+  }
+  if (sharedServerMode === 'join' && !sharedServerIp) {
+    return res.status(400).json({ error: 'Pick which shared server to join.' });
   }
 
   const seedDir = path.join(os.tmpdir(), 'era-workstation-seeds');
@@ -77,6 +96,13 @@ router.post('/build', (req, res) => {
   // not passed -- the workstation UI's own form controls whether this is
   // ever sent, same as size/subdomain above.
   if (provider) args.push(`--provider=${provider}`);
+  // Packing multiple EBOS clients onto one server (scripts/lib/shared-host.mjs)
+  // instead of one dedicated server each -- Chidera's call, 2026-09-16:
+  // start doing this going forward, once there's a server with real room
+  // to share (this account's own Oracle capacity is already down to its
+  // last slice, not a meaningful "share until full" candidate yet).
+  if (sharedServerMode === 'join') args.push(`--shared-server=${sharedServerIp}`);
+  else if (sharedServerMode === 'new') args.push('--new-shared-server');
 
   const jobId = startJob('create-client.mjs', args);
   res.json({ jobId });

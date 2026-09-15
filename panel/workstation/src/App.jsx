@@ -22,6 +22,11 @@ export default function App() {
   const [subdomain, setSubdomain] = useState('');
   const [size, setSize] = useState('small');
   const [provider, setProvider] = useState('oracle');
+  // 'none' -- own dedicated server, same as always. 'join' -- pack onto an
+  // existing shared server (scripts/lib/shared-host.mjs). 'new' -- start a
+  // fresh server in shared mode, ready for more clients later.
+  const [sharedServerMode, setSharedServerMode] = useState('none');
+  const [sharedServerIp, setSharedServerIp] = useState('');
   const [business, setBusiness] = useState({
     name: '',
     type: 'restaurant',
@@ -45,7 +50,20 @@ export default function App() {
   const [botStates, setBotStates] = useState(DEFAULT_BOT_STATES);
   const [knowledgeBase, setKnowledgeBase] = useState([]);
 
-  const draft = { businessName: business.name, subdomain, size, provider, business, owner, catalogue, botFields, botStates, knowledgeBase };
+  const draft = {
+    businessName: business.name,
+    subdomain,
+    size,
+    provider,
+    sharedServerMode,
+    sharedServerIp,
+    business,
+    owner,
+    catalogue,
+    botFields,
+    botStates,
+    knowledgeBase,
+  };
 
   return (
     <div className="shell">
@@ -85,6 +103,10 @@ export default function App() {
             setSize={setSize}
             provider={provider}
             setProvider={setProvider}
+            sharedServerMode={sharedServerMode}
+            setSharedServerMode={setSharedServerMode}
+            sharedServerIp={sharedServerIp}
+            setSharedServerIp={setSharedServerIp}
             business={business}
             setBusiness={setBusiness}
             owner={owner}

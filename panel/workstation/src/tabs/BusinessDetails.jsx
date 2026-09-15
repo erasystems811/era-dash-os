@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { BUSINESS_TYPES, DEFAULT_BOT_FIELDS, OTHER_TYPE } from '../defaults.js';
+import { api } from '../api.js';
 
 // True if the current question list is still exactly one of the built-in
 // presets (or empty) -- i.e. nobody has customised it yet, so switching
@@ -10,8 +11,36 @@ function isUntouchedDefault(fields) {
   return Object.values(DEFAULT_BOT_FIELDS).some((preset) => JSON.stringify(preset) === JSON.stringify(fields));
 }
 
-export default function BusinessDetails({ subdomain, setSubdomain, size, setSize, provider, setProvider, business, setBusiness, owner, setOwner, botFields, setBotFields }) {
+export default function BusinessDetails({
+  subdomain,
+  setSubdomain,
+  size,
+  setSize,
+  provider,
+  setProvider,
+  sharedServerMode,
+  setSharedServerMode,
+  sharedServerIp,
+  setSharedServerIp,
+  business,
+  setBusiness,
+  owner,
+  setOwner,
+  botFields,
+  setBotFields,
+}) {
   const isKnownType = BUSINESS_TYPES.some((t) => t.value === business.type);
+
+  // Fetched once on mount -- which servers are already running in shared
+  // mode (scripts/lib/shared-host.mjs), so "join an existing one" can be a
+  // real dropdown instead of asking for a memorized IP address.
+  const [sharedServers, setSharedServers] = useState([]);
+  useEffect(() => {
+    api
+      .get('/api/workstation/shared-servers')
+      .then(setSharedServers)
+      .catch(() => setSharedServers([]));
+  }, []);
 
   function set(key, value) {
     setBusiness((b) => ({ ...b, [key]: value }));
@@ -178,6 +207,33 @@ export default function BusinessDetails({ subdomain, setSubdomain, size, setSize
               <option value="hetzner">Hetzner</option>
             </select>
           </div>
+        </div>
+        <div className="form-row">
+          <div className="field">
+            <label>Hosting</label>
+            <select value={sharedServerMode} onChange={(e) => setSharedServerMode(e.target.value)}>
+              <option value="none">Dedicated server (own server, just for this business)</option>
+              <option value="new">Start a new shared server (room for more clients later)</option>
+              <option value="join">Join an existing shared server</option>
+            </select>
+          </div>
+          {sharedServerMode === 'join' && (
+            <div className="field">
+              <label>Which shared server?</label>
+              {sharedServers.length ? (
+                <select value={sharedServerIp} onChange={(e) => setSharedServerIp(e.target.value)}>
+                  <option value="">Choose one...</option>
+                  {sharedServers.map((s) => (
+                    <option key={s.ip} value={s.ip}>
+                      {s.ip} ({s.provider}, {s.clientCount} client{s.clientCount === 1 ? '' : 's'} on it)
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <p className="hint">No shared servers exist yet -- pick "Start a new shared server" instead.</p>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
