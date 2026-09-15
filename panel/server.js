@@ -633,6 +633,7 @@ function page(clients, ebosClients) {
       <select name="provider">
         <option value="oracle">Oracle Cloud</option>
         <option value="ovh">OVHcloud</option>
+        <option value="digitalocean">DigitalOcean</option>
         <option value="hetzner">Hetzner</option>
       </select>
       <button type="submit">Create client</button>
@@ -648,6 +649,15 @@ function page(clients, ebosClients) {
       <label>Consumer Key</label><input name="consumerKey" type="password" required>
       <label>Project ID (serviceName)</label><input name="projectId" required>
       <label>SSH public key (same one used for Hetzner/Oracle)</label><input name="sshPublicKey" required>
+      <button type="submit">Save</button>
+    </form>
+  </fieldset>
+
+  <fieldset>
+    <legend>DigitalOcean credentials</legend>
+    <p class="muted">Needed once before creating any client with DigitalOcean as the provider. Token comes from DigitalOcean's control panel -&gt; API -&gt; Tokens/Keys -&gt; Generate New Token (give it Write scope). Also add your SSH public key at Settings -&gt; Security -&gt; SSH Keys in the DO console first -- unlike OVH, this isn't set via a form field here, every droplet just picks up whatever SSH keys already exist on the account (same as Hetzner). Status: <span id="doCredsStatus">checking...</span></p>
+    <form id="doCredsForm">
+      <label>API Token</label><input name="token" type="password" required>
       <button type="submit">Save</button>
     </form>
   </fieldset>
@@ -876,6 +886,7 @@ document.getElementById('createForm').addEventListener('submit', (e) => {
     pdf: f.get('pdf') === 'on',
     payment: f.get('payment') || undefined,
     size: f.get('size'),
+    provider: f.get('provider') || undefined,
   });
 });
 
@@ -1135,6 +1146,37 @@ if (ovhCredsForm) {
     e.target.reset();
     loadOvhCredsStatus();
     alert('Saved. You can now create a client with OVHcloud as the provider.');
+  });
+}
+
+async function loadDoCredsStatus() {
+  const el = document.getElementById('doCredsStatus');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/do-creds-status');
+    const data = await res.json();
+    el.textContent = data.configured ? 'configured' : 'not set yet';
+  } catch (err) {
+    el.textContent = 'error checking';
+  }
+}
+loadDoCredsStatus();
+
+const doCredsForm = document.getElementById('doCredsForm');
+if (doCredsForm) {
+  doCredsForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const res = await fetch('/api/do-creds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: f.get('token') }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed'); return; }
+    e.target.reset();
+    loadDoCredsStatus();
+    alert('Saved. You can now create a client with DigitalOcean as the provider.');
   });
 }
 
@@ -1600,6 +1642,30 @@ app.post('/api/ovh-creds', (req, res) => {
   }
 });
 
+// DigitalOcean credentials for create-client.mjs's --provider=digitalocean
+// path -- a plain bearer token (scripts/lib/digitalocean.mjs), no
+// multi-credential dance like OVH's. Same self-service shape as everything
+// else above.
+app.get('/api/do-creds-status', (req, res) => {
+  try {
+    const secrets = loadSecrets();
+    res.json({ configured: Boolean(secrets.DIGITALOCEAN_TOKEN) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/do-creds', (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'token is required' });
+  try {
+    patchSecrets({ DIGITALOCEAN_TOKEN: token });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ONE shared Meta Tech Provider app for every EBOS business's self-serve
 // WhatsApp connect (see /connect/:token above), same "set once in
 // secrets.env, never per-business" shape as the Chowdeck/OVH creds above.
@@ -1655,7 +1721,7 @@ app.get('/api/clients', (req, res) => {
 });
 
 app.post('/api/create', (req, res) => {
-  const { name, subdomain, customDomain, whatsapp, pdf, payment, size } = req.body;
+  const { name, subdomain, customDomain, whatsapp, pdf, payment, size, provider } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (subdomain && customDomain) return res.status(400).json({ error: 'Use either Subdomain or Custom domain, not both.' });
   const args = [`--name=${name}`];
@@ -1665,6 +1731,7 @@ app.post('/api/create', (req, res) => {
   if (pdf) args.push('--pdf');
   if (payment) args.push(`--payment=${payment}`);
   if (size) args.push(`--size=${size}`);
+  if (provider) args.push(`--provider=${provider}`);
   const jobId = startJob('create-client.mjs', args);
   res.json({ jobId });
 });

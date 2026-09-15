@@ -50,6 +50,7 @@ import { templatesDirFor } from './lib/templates-dir.mjs';
 import * as hetzner from './lib/hetzner.mjs';
 import * as oracle from './lib/oracle.mjs';
 import * as ovh from './lib/ovh.mjs';
+import * as digitalocean from './lib/digitalocean.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
 import { waitForSsh, waitForCloudInit, runRemote, copyToRemote } from './lib/ssh.mjs';
@@ -82,8 +83,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--shared-server=')) args.sharedServer = arg.slice('--shared-server='.length);
     else if (arg === '--new-shared-server') args.newSharedServer = true;
   }
-  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--provider=oracle|hetzner|ovh] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server]');
-  if (!['oracle', 'hetzner', 'ovh'].includes(args.provider)) throw new Error(`Unknown --provider="${args.provider}" -- only "oracle", "hetzner" and "ovh" are wired up (see scripts/lib/oracle.mjs / hetzner.mjs / ovh.mjs).`);
+  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--provider=oracle|hetzner|ovh|digitalocean] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server]');
+  if (!['oracle', 'hetzner', 'ovh', 'digitalocean'].includes(args.provider)) throw new Error(`Unknown --provider="${args.provider}" -- only "oracle", "hetzner", "ovh" and "digitalocean" are wired up (see scripts/lib/oracle.mjs / hetzner.mjs / ovh.mjs / digitalocean.mjs).`);
   // A shared server's IP is provider-agnostic once it exists (join mode
   // never calls a provider API at all -- see the sharedMode==='join'
   // branch below), so --provider only matters for --new-shared-server or
@@ -161,6 +162,7 @@ async function main() {
   // check happens there instead of being folded into this list.
   if (!args.sharedServer) {
     if (args.provider === 'hetzner') requiredSecrets.push('HETZNER_TOKEN');
+    if (args.provider === 'digitalocean') requiredSecrets.push('DIGITALOCEAN_TOKEN');
   }
   // DirectAdmin secrets only matter for the erasystems.com.ng subdomain
   // path — a custom domain never touches that account.
@@ -296,6 +298,10 @@ async function main() {
     } else if (args.provider === 'ovh') {
       serverId = await ovh.createServer(ovhConfig, { name: dropletName, size: args.size });
       ip = await ovh.waitForServerActive(ovhConfig, serverId);
+    } else if (args.provider === 'digitalocean') {
+      const sizeSlug = { small: 's-2vcpu-4gb', medium: 's-4vcpu-8gb', large: 's-8vcpu-16gb' }[args.size] || 's-2vcpu-4gb';
+      serverId = await digitalocean.createDroplet(secrets.DIGITALOCEAN_TOKEN, { name: dropletName, size: sizeSlug });
+      ip = await digitalocean.waitForDropletActive(secrets.DIGITALOCEAN_TOKEN, serverId);
     } else {
       serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
       ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);

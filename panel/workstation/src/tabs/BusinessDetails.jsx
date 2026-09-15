@@ -174,6 +174,7 @@ export default function BusinessDetails({ subdomain, setSubdomain, size, setSize
             <select value={provider} onChange={(e) => setProvider(e.target.value)}>
               <option value="oracle">Oracle Cloud</option>
               <option value="ovh">OVHcloud</option>
+              <option value="digitalocean">DigitalOcean</option>
               <option value="hetzner">Hetzner</option>
             </select>
           </div>
