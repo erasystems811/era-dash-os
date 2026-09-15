@@ -681,6 +681,15 @@ function page(clients, ebosClients) {
   </fieldset>
 
   <fieldset>
+    <legend>Hetzner credentials</legend>
+    <p class="muted">Needed once before creating any client with Hetzner as the provider. Token comes from the Hetzner Cloud console -&gt; Security -&gt; API Tokens -&gt; Generate API Token (Read &amp; Write). Also add your SSH public key at Security -&gt; SSH Keys in the Hetzner console first -- every server just picks up whatever SSH keys already exist on the account, same as DigitalOcean. Status: <span id="hetznerCredsStatus">checking...</span></p>
+    <form id="hetznerCredsForm">
+      <label>API Token</label><input name="token" type="password" required>
+      <button type="submit">Save</button>
+    </form>
+  </fieldset>
+
+  <fieldset>
     <legend>Meta WhatsApp connect (Embedded Signup)</legend>
     <p class="muted">One shared Meta app for every EBOS business's self-serve "Connect WhatsApp" link -- set once. App ID and App secret are on the app's App settings -&gt; Basic page (developers.facebook.com); Login config ID is on Facebook Login for Business -&gt; Configurations, the config using login variation "WhatsApp Embedded Signup". Status: <span id="metaCredsStatus">checking...</span></p>
     <form id="metaCredsForm">
@@ -1239,6 +1248,37 @@ if (doCredsForm) {
   });
 }
 
+async function loadHetznerCredsStatus() {
+  const el = document.getElementById('hetznerCredsStatus');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/hetzner-creds-status');
+    const data = await res.json();
+    el.textContent = data.configured ? 'configured' : 'not set yet';
+  } catch (err) {
+    el.textContent = 'error checking';
+  }
+}
+loadHetznerCredsStatus();
+
+const hetznerCredsForm = document.getElementById('hetznerCredsForm');
+if (hetznerCredsForm) {
+  hetznerCredsForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const res = await fetch('/api/hetzner-creds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: f.get('token') }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed'); return; }
+    e.target.reset();
+    loadHetznerCredsStatus();
+    alert('Saved. You can now create a client with Hetzner as the provider.');
+  });
+}
+
 async function loadMetaCredsStatus() {
   const el = document.getElementById('metaCredsStatus');
   if (!el) return;
@@ -1767,6 +1807,29 @@ app.post('/api/do-creds', (req, res) => {
   if (!token) return res.status(400).json({ error: 'token is required' });
   try {
     patchSecrets({ DIGITALOCEAN_TOKEN: token });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Hetzner credentials for create-client.mjs's --provider=hetzner path --
+// a plain bearer token (scripts/lib/hetzner.mjs), same self-service shape
+// as DigitalOcean's above.
+app.get('/api/hetzner-creds-status', (req, res) => {
+  try {
+    const secrets = loadSecrets();
+    res.json({ configured: Boolean(secrets.HETZNER_TOKEN) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/hetzner-creds', (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'token is required' });
+  try {
+    patchSecrets({ HETZNER_TOKEN: token });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
