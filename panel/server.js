@@ -654,6 +654,24 @@ function page(clients, ebosClients) {
   </fieldset>
 
   <fieldset>
+    <legend>Oracle Cloud credentials (client-hosting account)</legend>
+    <p class="muted">For a SEPARATE Oracle account used only for client hosting -- not the internal-ops one era-demo runs on. From that account's OCI console: Tenancy/User OCID and Fingerprint are under Identity -&gt; Users -&gt; your user -&gt; API Keys -&gt; Add API Key (paste the raw .pem private key file's contents below, exactly as downloaded -- this form base64-encodes it for you, no separate command needed). Compartment OCID -&gt; the tenancy OCID itself if you haven't created a sub-compartment. Subnet OCID -&gt; Networking -&gt; Virtual Cloud Networks -&gt; create one with the "VCN wizard" (creates a public subnet automatically) -&gt; that subnet's OCID. Image OCID -&gt; Compute -&gt; Images -&gt; filter by your region, pick an Ubuntu 24.04 image, copy its OCID. Status: <span id="oracleCredsStatus">checking...</span></p>
+    <form id="oracleCredsForm">
+      <label>Tenancy OCID</label><input name="tenancyOcid" required>
+      <label>User OCID</label><input name="userOcid" required>
+      <label>Fingerprint</label><input name="fingerprint" required>
+      <label>Private key (paste the raw .pem file contents)</label>
+      <textarea name="privateKey" rows="6" required placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
+      <label>Region (e.g. uk-london-1)</label><input name="region" required>
+      <label>Compartment OCID</label><input name="compartmentOcid" required>
+      <label>Subnet OCID</label><input name="subnetOcid" required>
+      <label>Image OCID (Ubuntu 24.04, for this region)</label><input name="imageOcid" required>
+      <label>SSH public key</label><input name="sshPublicKey" required>
+      <button type="submit">Save</button>
+    </form>
+  </fieldset>
+
+  <fieldset>
     <legend>DigitalOcean credentials</legend>
     <p class="muted">Needed once before creating any client with DigitalOcean as the provider. Token comes from DigitalOcean's control panel -&gt; API -&gt; Tokens/Keys -&gt; Generate New Token (give it Write scope). Also add your SSH public key at Settings -&gt; Security -&gt; SSH Keys in the DO console first -- unlike OVH, this isn't set via a form field here, every droplet just picks up whatever SSH keys already exist on the account (same as Hetzner). Status: <span id="doCredsStatus">checking...</span></p>
     <form id="doCredsForm">
@@ -1149,6 +1167,47 @@ if (ovhCredsForm) {
   });
 }
 
+async function loadOracleCredsStatus() {
+  const el = document.getElementById('oracleCredsStatus');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/oracle-creds-status');
+    const data = await res.json();
+    el.textContent = data.configured ? 'configured' : 'not set yet';
+  } catch (err) {
+    el.textContent = 'error checking';
+  }
+}
+loadOracleCredsStatus();
+
+const oracleCredsForm = document.getElementById('oracleCredsForm');
+if (oracleCredsForm) {
+  oracleCredsForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const res = await fetch('/api/oracle-creds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tenancyOcid: f.get('tenancyOcid'),
+        userOcid: f.get('userOcid'),
+        fingerprint: f.get('fingerprint'),
+        privateKey: f.get('privateKey'),
+        region: f.get('region'),
+        compartmentOcid: f.get('compartmentOcid'),
+        subnetOcid: f.get('subnetOcid'),
+        imageOcid: f.get('imageOcid'),
+        sshPublicKey: f.get('sshPublicKey'),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed'); return; }
+    e.target.reset();
+    loadOracleCredsStatus();
+    alert('Saved. You can now create a client with Oracle Cloud as the provider.');
+  });
+}
+
 async function loadDoCredsStatus() {
   const el = document.getElementById('doCredsStatus');
   if (!el) return;
@@ -1635,6 +1694,54 @@ app.post('/api/ovh-creds', (req, res) => {
       OVH_CONSUMER_KEY: consumerKey,
       OVH_PROJECT_ID: projectId,
       OVH_SSH_PUBLIC_KEY: sshPublicKey,
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Oracle Cloud credentials for create-client.mjs's --provider=oracle path
+// (scripts/lib/oracle.mjs). A single shared set, same keys era-demo's own
+// account happened to use -- safe to repoint at a different Oracle account
+// (Chidera's call, 2026-09-15: a second account dedicated to client
+// hosting, kept separate from the internal-ops one era-demo runs on),
+// since these credentials are only ever used to CREATE or DELETE a
+// server, never to operate one that's already running -- era-demo's own
+// live containers don't read secrets.env at all. Private key is accepted
+// here as the raw .pem contents (what OCI's console actually hands you)
+// and base64-encoded server-side into ORACLE_PRIVATE_KEY_B64 -- see
+// oracle.mjs's header comment for why that encoding exists (secrets.env
+// is single-line KEY=value, can't hold a real multi-line PEM directly).
+app.get('/api/oracle-creds-status', (req, res) => {
+  try {
+    const secrets = loadSecrets();
+    res.json({
+      configured: Boolean(
+        secrets.ORACLE_TENANCY_OCID && secrets.ORACLE_USER_OCID && secrets.ORACLE_FINGERPRINT && secrets.ORACLE_PRIVATE_KEY_B64 && secrets.ORACLE_REGION
+      ),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/oracle-creds', (req, res) => {
+  const { tenancyOcid, userOcid, fingerprint, privateKey, region, compartmentOcid, subnetOcid, imageOcid, sshPublicKey } = req.body;
+  if (!tenancyOcid || !userOcid || !fingerprint || !privateKey || !region || !compartmentOcid || !subnetOcid || !imageOcid || !sshPublicKey) {
+    return res.status(400).json({ error: 'All fields are required.' });
+  }
+  try {
+    patchSecrets({
+      ORACLE_TENANCY_OCID: tenancyOcid,
+      ORACLE_USER_OCID: userOcid,
+      ORACLE_FINGERPRINT: fingerprint,
+      ORACLE_PRIVATE_KEY_B64: Buffer.from(privateKey, 'utf8').toString('base64'),
+      ORACLE_REGION: region,
+      ORACLE_COMPARTMENT_OCID: compartmentOcid,
+      ORACLE_SUBNET_OCID: subnetOcid,
+      ORACLE_IMAGE_OCID: imageOcid,
+      ORACLE_SSH_PUBLIC_KEY: sshPublicKey,
     });
     res.json({ ok: true });
   } catch (err) {
