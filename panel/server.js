@@ -1,6 +1,7 @@
 import express from 'express';
 import basicAuth from 'express-basic-auth';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadRegistry, saveRegistry, findClient, upsertClient } from '../scripts/lib/registry.mjs';
@@ -26,6 +27,117 @@ app.use(express.json());
 // to reach this without credentials.
 app.get('/privacy', (req, res) => {
   res.sendFile(path.join(__dirname, 'privacy-policy.html'));
+});
+
+// Self-serve WhatsApp connect (Embedded Signup) -- public on purpose, same
+// reasoning as /privacy above: the business owner completing this has no
+// panel login and should not need one (Chidera, 2026-09-15: "i cant be
+// onboarding all i need this to become selfserve"). Each link is
+// single-purpose -- a randomly generated token minted per client from the
+// Manage panel's "Generate connect link" button -- and expires after 24h,
+// same TTL and sha256-hash-not-plaintext pattern as the EBOS dashboard's
+// own staff magic links (ebos-templates/dashboard/lib/auth.js). A
+// stolen/guessed link is the real risk here (unlike the admin panel's own
+// basic auth, which this deliberately bypasses): completing it attaches
+// whoever finishes the flow's WhatsApp Business Account to THIS client's
+// registry row, so the token has to be unguessable, not just obscure.
+function hashConnectToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function findClientByConnectToken(registry, token) {
+  const hash = hashConnectToken(token);
+  const client = registry.clients.find((c) => c.connectTokenHash === hash);
+  if (!client || !client.connectTokenExpiresAt || new Date(client.connectTokenExpiresAt) <= new Date()) return null;
+  return client;
+}
+
+app.get('/connect/:token', (req, res) => {
+  const client = findClientByConnectToken(loadRegistry(), req.params.token);
+  if (!client) return res.status(404).send('This connection link is invalid or has expired. Ask ERA Systems for a new one.');
+  let secrets;
+  try {
+    secrets = loadSecrets();
+  } catch {
+    secrets = {};
+  }
+  if (!secrets.META_APP_ID || !secrets.META_LOGIN_CONFIG_ID) {
+    return res.status(500).send('WhatsApp connect is not configured yet on this server. Ask ERA Systems.');
+  }
+  res.send(connectPage(client, req.params.token, secrets.META_APP_ID, secrets.META_LOGIN_CONFIG_ID));
+});
+
+// Everything Embedded Signup hands back arrives as a message event in the
+// browser, not a server redirect -- this is the server-to-server half the
+// client-side page below calls the moment that event fires. The
+// authorization code is only valid for ~30 seconds (Meta's own limit), so
+// this has to exchange it immediately, not queue it.
+app.post('/api/connect/:token/complete', async (req, res) => {
+  const registry = loadRegistry();
+  const client = findClientByConnectToken(registry, req.params.token);
+  if (!client) return res.status(404).json({ error: 'This connection link is invalid or has expired.' });
+
+  const { code, wabaId, phoneNumberId } = req.body || {};
+  if (!code || !wabaId || !phoneNumberId) return res.status(400).json({ error: 'code, wabaId and phoneNumberId are required.' });
+
+  let secrets;
+  try {
+    secrets = loadSecrets();
+  } catch (err) {
+    return res.status(500).json({ error: `Could not read secrets.env: ${err.message}` });
+  }
+  if (!secrets.META_APP_ID || !secrets.META_APP_SECRET) {
+    return res.status(500).json({ error: 'WhatsApp connect is not configured yet on this server.' });
+  }
+
+  try {
+    // This IS the Business Integration System User token (Never Expire,
+    // per the login config's own access token setting) -- the same shape
+    // of value add-whatsapp.mjs already expects as --token below, nothing
+    // special-cased for how it was obtained.
+    const tokenUrl = `https://graph.facebook.com/v21.0/oauth/access_token?client_id=${secrets.META_APP_ID}&client_secret=${secrets.META_APP_SECRET}&code=${encodeURIComponent(code)}`;
+    const tokenRes = await fetch(tokenUrl);
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok || !tokenData.access_token) {
+      throw new Error(tokenData.error?.message || `Token exchange failed (${tokenRes.status})`);
+    }
+    const accessToken = tokenData.access_token;
+
+    // Required so THIS app actually receives webhooks for the client's
+    // WABA -- Embedded Signup does not do this on its own, and the gap is
+    // invisible until the first real message comes in and nothing happens.
+    const subRes = await fetch(`https://graph.facebook.com/v21.0/${wabaId}/subscribed_apps`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const subData = await subRes.json();
+    if (!subRes.ok || !subData.success) {
+      throw new Error(subData.error?.message || `WABA subscription failed (${subRes.status})`);
+    }
+
+    // Reuses the exact same provisioning add-whatsapp.mjs already does for
+    // a manually-typed number (client .env + restart + registry + outreach
+    // template) -- this flow only changes where the three Meta values come
+    // from. verifyToken is generated fresh rather than asked of the
+    // client: Meta only ever calls the one shared panel-level webhook
+    // above (WEBHOOK_VERIFY_TOKEN), never a per-client one, so this value
+    // only fills add-whatsapp.mjs's required arg / a client .env field kept
+    // for backward compatibility with the pre-router architecture.
+    const verifyToken = crypto.randomBytes(16).toString('hex');
+    const jobId = startJob(
+      'add-whatsapp.mjs',
+      [`--client=${client.name}`, `--token=${accessToken}`, `--phone-id=${phoneNumberId}`, `--verify-token=${verifyToken}`, `--waba-id=${wabaId}`],
+      (job) => {
+        if (job.status !== 'done') return;
+        const r = loadRegistry();
+        upsertClient(r, { name: client.name, connectTokenHash: null, connectTokenExpiresAt: null });
+        saveRegistry(r);
+      }
+    );
+    res.json({ jobId });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
 });
 
 // The real per-client WhatsApp router. One Meta App (ERA's own, used via
@@ -115,6 +227,123 @@ if (process.env.PANEL_DISABLE_AUTH !== '1') {
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// The public self-serve connect page (see /connect/:token above). Its own
+// giant template literal, same FIX-PROTOCOL.md gotcha as page() below: a
+// bare \' anywhere in the inner <script> gets silently eaten by THIS outer
+// template literal before a browser ever sees it, no syntax error either
+// side. Every user-facing string in here is written without apostrophes on
+// purpose, to stay out of that trap entirely rather than relying on
+// getting every escape right -- see scripts/verify-panel-script.mjs, which
+// checks this function's rendered output too.
+function connectPage(client, token, appId, configId) {
+  const name = esc(client.displayName || client.name);
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect WhatsApp -- ${name}</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #f4f4f4; margin: 0; padding: 24px 16px; }
+  .card { max-width: 480px; margin: 40px auto; background: #fff; border-radius: 12px; padding: 32px 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  p { color: #444; line-height: 1.5; }
+  button { width: 100%; padding: 14px; font-size: 16px; background: #25D366; color: #fff; border: none; border-radius: 8px; margin-top: 16px; cursor: pointer; }
+  button:disabled { opacity: 0.6; }
+  #status { margin-top: 16px; font-size: 14px; color: #555; min-height: 20px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Connect WhatsApp for ${name}</h1>
+  <p>Sign in below with the Facebook account that manages this business WhatsApp. You will keep using your WhatsApp Business App exactly as it is today -- this only connects it to ERA Systems, it does not take it over or replace it.</p>
+  <button id="connectBtn">Connect WhatsApp</button>
+  <div id="status"></div>
+</div>
+<div id="fb-root"></div>
+<script>
+  window.fbAsyncInit = function () {
+    FB.init({ appId: "${appId}", autoLogAppEvents: true, xfbml: true, version: "v21.0" });
+  };
+</script>
+<script async defer src="https://connect.facebook.net/en_US/sdk.js"></script>
+<script>
+  var statusEl = document.getElementById("status");
+  var connectBtn = document.getElementById("connectBtn");
+  var sessionInfo = null;
+
+  window.addEventListener("message", function (event) {
+    if (typeof event.origin !== "string" || event.origin.indexOf("facebook.com") === -1) return;
+    var data;
+    try { data = JSON.parse(event.data); } catch (e) { return; }
+    if (!data || data.type !== "WA_EMBEDDED_SIGNUP") return;
+    if (data.event === "FINISH" || data.event === "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING") {
+      sessionInfo = data.data;
+    } else if (data.event === "CANCEL") {
+      statusEl.textContent = "Cancelled -- click Connect WhatsApp to try again.";
+    } else if (data.event === "ERROR") {
+      var msg = (data.data && data.data.error_message) || "unknown error";
+      statusEl.textContent = "Meta reported an error: " + msg + ". Try again or contact ERA Systems.";
+    }
+  });
+
+  function pollJob(jobId) {
+    var iv = setInterval(function () {
+      fetch("/api/jobs/" + jobId).then(function (r) { return r.json(); }).then(function (job) {
+        if (job.status === "running") return;
+        clearInterval(iv);
+        statusEl.textContent = job.status === "done"
+          ? "WhatsApp connected. You can close this page now -- ERA Systems will confirm with you shortly."
+          : "Something went wrong finishing setup. Contact ERA Systems.";
+      });
+    }, 2000);
+  }
+
+  connectBtn.addEventListener("click", function () {
+    connectBtn.disabled = true;
+    statusEl.textContent = "Opening WhatsApp sign-in...";
+    FB.login(function (response) {
+      if (!response.authResponse || !response.authResponse.code) {
+        statusEl.textContent = "Sign-in closed before finishing. Click Connect WhatsApp to try again.";
+        connectBtn.disabled = false;
+        return;
+      }
+      if (!sessionInfo || !sessionInfo.waba_id || !sessionInfo.phone_number_id) {
+        statusEl.textContent = "Could not read your WhatsApp account details. Click Connect WhatsApp to try again.";
+        connectBtn.disabled = false;
+        return;
+      }
+      statusEl.textContent = "Connecting your WhatsApp, this can take a minute, please keep this page open...";
+      fetch("/api/connect/${token}/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: response.authResponse.code, wabaId: sessionInfo.waba_id, phoneNumberId: sessionInfo.phone_number_id }),
+      })
+        .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+        .then(function (result) {
+          if (!result.ok) {
+            statusEl.textContent = "Connection failed: " + (result.data.error || "unknown error") + ". Contact ERA Systems.";
+            connectBtn.disabled = false;
+            return;
+          }
+          pollJob(result.data.jobId);
+        })
+        .catch(function () {
+          statusEl.textContent = "Network error, check your connection and try again.";
+          connectBtn.disabled = false;
+        });
+    }, {
+      config_id: "${configId}",
+      response_type: "code",
+      override_default_response_type: true,
+      extras: { setup: {}, featureType: "whatsapp_business_app_onboarding", sessionInfoVersion: "3" },
+    });
+  });
+</script>
+</body>
+</html>`;
 }
 
 // Every EBOS business is its own full, physically separate stack (see
@@ -423,6 +652,17 @@ function page(clients, ebosClients) {
     </form>
   </fieldset>
 
+  <fieldset>
+    <legend>Meta WhatsApp connect (Embedded Signup)</legend>
+    <p class="muted">One shared Meta app for every EBOS business's self-serve "Connect WhatsApp" link -- set once. App ID and App secret are on the app's App settings -&gt; Basic page (developers.facebook.com); Login config ID is on Facebook Login for Business -&gt; Configurations, the config using login variation "WhatsApp Embedded Signup". Status: <span id="metaCredsStatus">checking...</span></p>
+    <form id="metaCredsForm">
+      <label>App ID</label><input name="appId" required>
+      <label>App secret</label><input name="appSecret" type="password" required>
+      <label>Login config ID</label><input name="loginConfigId" required>
+      <button type="submit">Save</button>
+    </form>
+  </fieldset>
+
   <fieldset id="managePanel" class="hidden">
     <legend>Manage: <span id="manageClientName"></span></legend>
 
@@ -435,6 +675,11 @@ function page(clients, ebosClients) {
       <label>Webhook verify token</label><input name="verifyToken" required>
       <button type="submit">Add WhatsApp</button>
     </form>
+
+    <h4>Self-serve WhatsApp connect</h4>
+    <p class="muted">Generates a one-time link the business owner opens themselves to connect their own WhatsApp -- no token typing, no asking ERA Systems. Expires in 24 hours. Requires Meta WhatsApp connect to be configured above.</p>
+    <button type="button" onclick="generateConnectLink()">Generate connect link</button>
+    <div id="connectLinkResult" style="margin-top:10px;"></div>
 
     <h4>Add / update Instagram</h4>
     <form id="instagramForm">
@@ -893,6 +1138,54 @@ if (ovhCredsForm) {
   });
 }
 
+async function loadMetaCredsStatus() {
+  const el = document.getElementById('metaCredsStatus');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/meta-creds-status');
+    const data = await res.json();
+    el.textContent = data.configured ? 'configured' : 'not set yet';
+  } catch (err) {
+    el.textContent = 'error checking';
+  }
+}
+loadMetaCredsStatus();
+
+const metaCredsForm = document.getElementById('metaCredsForm');
+if (metaCredsForm) {
+  metaCredsForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const res = await fetch('/api/meta-creds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        appId: f.get('appId'),
+        appSecret: f.get('appSecret'),
+        loginConfigId: f.get('loginConfigId'),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed'); return; }
+    e.target.reset();
+    loadMetaCredsStatus();
+    alert('Saved. You can now generate connect links for a client below.');
+  });
+}
+
+async function generateConnectLink() {
+  const el = document.getElementById('connectLinkResult');
+  el.textContent = 'Generating...';
+  const res = await fetch('/api/ebos/connect-link', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client: currentClient }),
+  });
+  const data = await res.json();
+  if (!res.ok) { el.textContent = 'Error: ' + (data.error || 'failed'); return; }
+  el.innerHTML = '<input readonly style="width:100%;font-family:monospace;font-size:12px;" value="' + data.url + '" onclick="this.select()"> <div class="muted" style="margin-top:4px;">Expires in 24 hours. Send this to the business owner -- they open it, sign in, and pick Connect your existing WhatsApp Business App.</div>';
+}
+
 async function loadMigrationFiles() {
   const el = document.getElementById('migrationFileSelect');
   if (!el) return;
@@ -1305,6 +1598,56 @@ app.post('/api/ovh-creds', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ONE shared Meta Tech Provider app for every EBOS business's self-serve
+// WhatsApp connect (see /connect/:token above), same "set once in
+// secrets.env, never per-business" shape as the Chowdeck/OVH creds above.
+// APP_ID/LOGIN_CONFIG_ID are not secret (they are already visible in every
+// connect page's own HTML) but live alongside APP_SECRET here anyway --
+// one place to configure, one place to check is-it-set. Never returns the
+// actual stored values back to the browser.
+app.get('/api/meta-creds-status', (req, res) => {
+  try {
+    const secrets = loadSecrets();
+    res.json({ configured: Boolean(secrets.META_APP_ID && secrets.META_APP_SECRET && secrets.META_LOGIN_CONFIG_ID) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/meta-creds', (req, res) => {
+  const { appId, appSecret, loginConfigId } = req.body;
+  if (!appId || !appSecret || !loginConfigId) {
+    return res.status(400).json({ error: 'appId, appSecret and loginConfigId are all required' });
+  }
+  try {
+    patchSecrets({ META_APP_ID: appId, META_APP_SECRET: appSecret, META_LOGIN_CONFIG_ID: loginConfigId });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mints one connect link for one client -- see /connect/:token above for
+// why this has to be a fresh unguessable token per business rather than a
+// bare /connect/:client-slug URL. 24h TTL, same as the EBOS dashboard's own
+// staff magic links.
+const CONNECT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+app.post('/api/ebos/connect-link', (req, res) => {
+  const { client } = req.body;
+  const registry = loadRegistry();
+  if (!findClient(registry, client)) return res.status(404).json({ error: `No client "${client}" in the registry.` });
+
+  const token = crypto.randomBytes(24).toString('base64url');
+  upsertClient(registry, {
+    name: client,
+    connectTokenHash: hashConnectToken(token),
+    connectTokenExpiresAt: new Date(Date.now() + CONNECT_TOKEN_TTL_MS).toISOString(),
+  });
+  saveRegistry(registry);
+
+  res.json({ url: `https://dash.erasystems.com.ng/connect/${token}` });
 });
 
 app.get('/api/clients', (req, res) => {
