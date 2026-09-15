@@ -21,6 +21,7 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [subdomain, setSubdomain] = useState('');
   const [size, setSize] = useState('small');
+  const [provider, setProvider] = useState('oracle');
   const [business, setBusiness] = useState({
     name: '',
     type: 'restaurant',
@@ -44,7 +45,7 @@ export default function App() {
   const [botStates, setBotStates] = useState(DEFAULT_BOT_STATES);
   const [knowledgeBase, setKnowledgeBase] = useState([]);
 
-  const draft = { businessName: business.name, subdomain, size, business, owner, catalogue, botFields, botStates, knowledgeBase };
+  const draft = { businessName: business.name, subdomain, size, provider, business, owner, catalogue, botFields, botStates, knowledgeBase };
 
   return (
     <div className="shell">
@@ -82,6 +83,8 @@ export default function App() {
             setSubdomain={setSubdomain}
             size={size}
             setSize={setSize}
+            provider={provider}
+            setProvider={setProvider}
             business={business}
             setBusiness={setBusiness}
             owner={owner}

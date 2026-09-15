@@ -59,7 +59,7 @@ router.post('/parse-menu', async (req, res) => {
 });
 
 router.post('/build', (req, res) => {
-  const { businessName, subdomain, size, business, owner, catalogue, botFields, botStates, knowledgeBase } = req.body;
+  const { businessName, subdomain, size, provider, business, owner, catalogue, botFields, botStates, knowledgeBase } = req.body;
 
   if (!businessName || !business?.type || !owner?.name || !owner?.email) {
     return res.status(400).json({ error: 'Business name, business type, owner name and owner email are all required before building.' });
@@ -73,6 +73,10 @@ router.post('/build', (req, res) => {
   const args = [`--name=${businessName}`, '--template=ebos', `--ebos-seed=${seedPath}`];
   if (subdomain) args.push(`--subdomain=${subdomain}`);
   if (size) args.push(`--size=${size}`);
+  // Defaults to create-client.mjs's own default (currently 'oracle') when
+  // not passed -- the workstation UI's own form controls whether this is
+  // ever sent, same as size/subdomain above.
+  if (provider) args.push(`--provider=${provider}`);
 
   const jobId = startJob('create-client.mjs', args);
   res.json({ jobId });

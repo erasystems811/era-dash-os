@@ -10,7 +10,7 @@ function isUntouchedDefault(fields) {
   return Object.values(DEFAULT_BOT_FIELDS).some((preset) => JSON.stringify(preset) === JSON.stringify(fields));
 }
 
-export default function BusinessDetails({ subdomain, setSubdomain, size, setSize, business, setBusiness, owner, setOwner, botFields, setBotFields }) {
+export default function BusinessDetails({ subdomain, setSubdomain, size, setSize, provider, setProvider, business, setBusiness, owner, setOwner, botFields, setBotFields }) {
   const isKnownType = BUSINESS_TYPES.some((t) => t.value === business.type);
 
   function set(key, value) {
@@ -165,6 +165,16 @@ export default function BusinessDetails({ subdomain, setSubdomain, size, setSize
               <option value="small">Small</option>
               <option value="medium">Medium</option>
               <option value="large">Large</option>
+            </select>
+          </div>
+        </div>
+        <div className="form-row">
+          <div className="field">
+            <label>Server provider</label>
+            <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+              <option value="oracle">Oracle Cloud</option>
+              <option value="ovh">OVHcloud</option>
+              <option value="hetzner">Hetzner</option>
             </select>
           </div>
         </div>

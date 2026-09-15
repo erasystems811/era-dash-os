@@ -10,6 +10,7 @@ import { loadSecrets } from './lib/secrets.mjs';
 import * as digitalocean from './lib/digitalocean.mjs';
 import * as hetzner from './lib/hetzner.mjs';
 import * as oracle from './lib/oracle.mjs';
+import * as ovh from './lib/ovh.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
 import { runRemote } from './lib/ssh.mjs';
@@ -63,6 +64,8 @@ async function main() {
       await hetzner.deleteServer(secrets.HETZNER_TOKEN, serverId);
     } else if (provider === 'oracle') {
       await oracle.deleteServer(oracle.requireOracleConfig(secrets), serverId);
+    } else if (provider === 'ovh') {
+      await ovh.deleteServer(ovh.requireOvhConfig(secrets), serverId);
     } else {
       await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, serverId);
     }

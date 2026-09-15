@@ -400,7 +400,26 @@ function page(clients, ebosClients) {
         <option value="medium">Medium</option>
         <option value="large">Large</option>
       </select>
+      <label>Server provider</label>
+      <select name="provider">
+        <option value="oracle">Oracle Cloud</option>
+        <option value="ovh">OVHcloud</option>
+        <option value="hetzner">Hetzner</option>
+      </select>
       <button type="submit">Create client</button>
+    </form>
+  </fieldset>
+
+  <fieldset>
+    <legend>OVHcloud credentials</legend>
+    <p class="muted">Needed once before creating any client with OVHcloud as the provider. Application Key/Secret come from <a href="https://eu.api.ovh.com/createApp" target="_blank" rel="noopener">eu.api.ovh.com/createApp</a>; Consumer Key comes from running <code>node scripts/ovh-get-consumer-key.mjs</code> once (a one-time interactive step -- it can't be generated purely by form); Project ID is your Public Cloud project's "serviceName" (OVH console -&gt; Public Cloud -&gt; Project Settings -&gt; General information). Status: <span id="ovhCredsStatus">checking...</span></p>
+    <form id="ovhCredsForm">
+      <label>Application Key</label><input name="applicationKey" required>
+      <label>Application Secret</label><input name="applicationSecret" type="password" required>
+      <label>Consumer Key</label><input name="consumerKey" type="password" required>
+      <label>Project ID (serviceName)</label><input name="projectId" required>
+      <label>SSH public key (same one used for Hetzner/Oracle)</label><input name="sshPublicKey" required>
+      <button type="submit">Save</button>
     </form>
   </fieldset>
 
@@ -837,6 +856,43 @@ if (chowdeckSecretForm) {
   });
 }
 
+async function loadOvhCredsStatus() {
+  const el = document.getElementById('ovhCredsStatus');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/ovh-creds-status');
+    const data = await res.json();
+    el.textContent = data.configured ? 'configured' : 'not set yet';
+  } catch (err) {
+    el.textContent = 'error checking';
+  }
+}
+loadOvhCredsStatus();
+
+const ovhCredsForm = document.getElementById('ovhCredsForm');
+if (ovhCredsForm) {
+  ovhCredsForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const res = await fetch('/api/ovh-creds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        applicationKey: f.get('applicationKey'),
+        applicationSecret: f.get('applicationSecret'),
+        consumerKey: f.get('consumerKey'),
+        projectId: f.get('projectId'),
+        sshPublicKey: f.get('sshPublicKey'),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed'); return; }
+    e.target.reset();
+    loadOvhCredsStatus();
+    alert('Saved. You can now create a client with OVHcloud as the provider.');
+  });
+}
+
 async function loadMigrationFiles() {
   const el = document.getElementById('migrationFileSelect');
   if (!el) return;
@@ -1212,6 +1268,39 @@ app.post('/api/ebos/chowdeck-secret', (req, res) => {
   if (!secretKey || !merchantReference) return res.status(400).json({ error: 'secretKey and merchantReference are required' });
   try {
     patchSecrets({ CHOWDECK_SECRET_KEY: secretKey, CHOWDECK_MERCHANT_REFERENCE: merchantReference });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// OVHcloud credentials for create-client.mjs's --provider=ovh path (see
+// scripts/lib/ovh.mjs's header for what each key is/where it comes from).
+// Same "set once from the browser, never SSH" shape as the Chowdeck secret
+// above. Never returns the actual stored values back to the browser, only
+// whether they're currently set.
+app.get('/api/ovh-creds-status', (req, res) => {
+  try {
+    const secrets = loadSecrets();
+    res.json({ configured: Boolean(secrets.OVH_APPLICATION_KEY && secrets.OVH_APPLICATION_SECRET && secrets.OVH_CONSUMER_KEY && secrets.OVH_PROJECT_ID) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/ovh-creds', (req, res) => {
+  const { applicationKey, applicationSecret, consumerKey, projectId, sshPublicKey } = req.body;
+  if (!applicationKey || !applicationSecret || !consumerKey || !projectId || !sshPublicKey) {
+    return res.status(400).json({ error: 'applicationKey, applicationSecret, consumerKey, projectId and sshPublicKey are all required' });
+  }
+  try {
+    patchSecrets({
+      OVH_APPLICATION_KEY: applicationKey,
+      OVH_APPLICATION_SECRET: applicationSecret,
+      OVH_CONSUMER_KEY: consumerKey,
+      OVH_PROJECT_ID: projectId,
+      OVH_SSH_PUBLIC_KEY: sshPublicKey,
+    });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

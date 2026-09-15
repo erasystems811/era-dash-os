@@ -49,6 +49,7 @@ import { render } from './lib/render-template.mjs';
 import { templatesDirFor } from './lib/templates-dir.mjs';
 import * as hetzner from './lib/hetzner.mjs';
 import * as oracle from './lib/oracle.mjs';
+import * as ovh from './lib/ovh.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
 import { waitForSsh, waitForCloudInit, runRemote, copyToRemote } from './lib/ssh.mjs';
@@ -81,8 +82,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--shared-server=')) args.sharedServer = arg.slice('--shared-server='.length);
     else if (arg === '--new-shared-server') args.newSharedServer = true;
   }
-  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--provider=oracle|hetzner] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server]');
-  if (!['oracle', 'hetzner'].includes(args.provider)) throw new Error(`Unknown --provider="${args.provider}" -- only "oracle" and "hetzner" are wired up (see scripts/lib/oracle.mjs / hetzner.mjs).`);
+  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--provider=oracle|hetzner|ovh] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server]');
+  if (!['oracle', 'hetzner', 'ovh'].includes(args.provider)) throw new Error(`Unknown --provider="${args.provider}" -- only "oracle", "hetzner" and "ovh" are wired up (see scripts/lib/oracle.mjs / hetzner.mjs / ovh.mjs).`);
   // A shared server's IP is provider-agnostic once it exists (join mode
   // never calls a provider API at all -- see the sharedMode==='join'
   // branch below), so --provider only matters for --new-shared-server or
@@ -166,9 +167,10 @@ async function main() {
   if (!args.customDomain) requiredSecrets.push('DA_USERNAME', 'DA_LOGIN_KEY', 'DA_HOST');
   if (!args.skipGithub) requiredSecrets.push('GITHUB_TOKEN');
   requireSecrets(secrets, requiredSecrets);
-  // See the comment above -- Oracle's own config check (which names each
-  // specific missing key) rather than a generic requireSecrets entry.
+  // See the comment above -- Oracle's/OVH's own config checks (which name
+  // each specific missing key) rather than a generic requireSecrets entry.
   const oracleConfig = !args.sharedServer && args.provider === 'oracle' ? oracle.requireOracleConfig(secrets) : null;
+  const ovhConfig = !args.sharedServer && args.provider === 'ovh' ? ovh.requireOvhConfig(secrets) : null;
 
   const registry = loadRegistry();
   if (findClient(registry, args.slug)) {
@@ -291,6 +293,9 @@ async function main() {
     if (args.provider === 'oracle') {
       serverId = await oracle.createServer(oracleConfig, { name: dropletName, size: args.size });
       ip = await oracle.waitForServerActive(oracleConfig, serverId);
+    } else if (args.provider === 'ovh') {
+      serverId = await ovh.createServer(ovhConfig, { name: dropletName, size: args.size });
+      ip = await ovh.waitForServerActive(ovhConfig, serverId);
     } else {
       serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
       ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
