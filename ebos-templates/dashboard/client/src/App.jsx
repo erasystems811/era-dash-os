@@ -22,6 +22,7 @@ import Voice from './pages/Voice.jsx';
 import DineIn from './pages/DineIn.jsx';
 import InHouse from './pages/InHouse.jsx';
 import Feedback from './pages/Feedback.jsx';
+import Customers from './pages/Customers.jsx';
 
 // Every path a PIN-tier (Tier 3) session is allowed to land on -- matches
 // Layout.jsx's PIN_NAV exactly. Not just a nav-hiding trick: this actually
@@ -80,6 +81,7 @@ export default function App() {
           <Route path="/delivery" element={<Delivery />} />
           <Route path="/voice" element={<Voice />} />
           <Route path="/dinein" element={<DineIn />} />
+          <Route path="/customers" element={<Customers />} />
           <Route path="/in-house" element={<InHouse />} />
           <Route path="/conversations" element={<Conversations />} />
           <Route path="/conversations/:id" element={<ConversationDetail />} />

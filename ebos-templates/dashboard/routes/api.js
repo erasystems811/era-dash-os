@@ -459,6 +459,30 @@ router.post('/dinein-config', requireEraAdmin, async (req, res) => {
   res.json(rows[0]);
 });
 
+// Customer database (CRM) add-on toggle -- same dual-auth/ERA-switches-it
+// shape as delivery-config/voice-config/dinein-config just above. Chidera,
+// 2026-09-16: a client wants a customer profile/spend/birthday dashboard,
+// no mass-marketing send (deliberately never built -- see the Customers
+// list's "Text" button, which only ever opens ONE existing conversation,
+// same as Conversations already does).
+router.get('/crm-config', async (req, res) => {
+  const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
+  if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
+  const { rows } = await pool.query(`select business_id, enabled from crm_config limit 1`);
+  res.json(rows[0] || { enabled: false });
+});
+
+router.post('/crm-config', requireEraAdmin, async (req, res) => {
+  const { enabled } = req.body;
+  const { rows } = await pool.query(
+    `insert into crm_config (business_id, enabled) values ((select id from business limit 1), $1)
+     on conflict (business_id) do update set enabled = excluded.enabled returning *`,
+    [enabled]
+  );
+  res.json(rows[0]);
+});
+
 // Both below are ERA control-plane calls, same requireEraAdmin gate as
 // delivery-config/voice-config/dinein-config just above -- and both must
 // stay above the router.use(requireStaffApi) line for the same reason
@@ -1467,6 +1491,67 @@ router.get('/conversations/:id', async (req, res) => {
   if (!customerRows[0]) return res.status(404).json({ error: 'Not found.' });
   const { rows: messages } = await pool.query('select * from message where customer_id = $1 order by created_at', [req.params.id]);
   res.json({ customer: customerRows[0], messages });
+});
+
+// Customer database (CRM add-on) -- every customer with spend computed
+// live from real completed orders, never a separately-maintained number
+// that could drift from the actual order history. Deliberately no bulk-
+// send anywhere on this list or its export -- see crm-config's own comment
+// on why (Chidera's explicit call, 2026-09-16).
+router.get('/customers', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select c.*,
+       coalesce(o.order_count, 0)::int as order_count,
+       coalesce(o.total_spend, 0) as total_spend,
+       case when coalesce(o.order_count, 0) > 0 then round(o.total_spend / o.order_count, 2) else 0 end as average_spend
+     from customers c
+     left join (
+       select customer_id, count(*) as order_count, sum(total) as total_spend
+       from "order" where status = 'completed'
+       group by customer_id
+     ) o on o.customer_id = c.id
+     order by o.total_spend desc nulls last, c.created_at desc`
+  );
+  res.json(rows);
+});
+
+// Deliberately its own narrow route (one field), not folded into a
+// general customer-edit endpoint that doesn't otherwise exist yet -- this
+// is the popup on an order's own page asking for a missing birthday
+// (Chidera: "can it be a pop up when taking orders...for customers that
+// dont have"), not a broader profile editor.
+router.post('/customers/:id/birthday', requireEditorApi, async (req, res) => {
+  const { birthday } = req.body;
+  const { rows } = await pool.query('update customers set birthday = $1 where id = $2 returning *', [birthday || null, req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
+  res.json(rows[0]);
+});
+
+// "Able to extract their data" -- a real CSV a business owner can open in
+// Excel/Sheets, not the full JSON /export dump above (built for a data
+// migration/backup, not for a person to actually read).
+router.get('/customers/export', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select c.name, c.phone_number, c.birthday,
+       coalesce(o.order_count, 0)::int as order_count,
+       coalesce(o.total_spend, 0) as total_spend,
+       case when coalesce(o.order_count, 0) > 0 then round(o.total_spend / o.order_count, 2) else 0 end as average_spend
+     from customers c
+     left join (
+       select customer_id, count(*) as order_count, sum(total) as total_spend
+       from "order" where status = 'completed'
+       group by customer_id
+     ) o on o.customer_id = c.id
+     order by o.total_spend desc nulls last, c.created_at desc`
+  );
+  const esc = (v) => (v === null || v === undefined ? '' : `"${String(v).replace(/"/g, '""')}"`);
+  const header = 'Name,Phone number,Birthday,Orders,Total spend,Average spend\n';
+  const body = rows
+    .map((r) => [r.name, r.phone_number, r.birthday, r.order_count, r.total_spend, r.average_spend].map(esc).join(','))
+    .join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="customers.csv"');
+  res.send(header + body);
 });
 
 // Staff reaching a phone number with no existing thread yet -- just opens

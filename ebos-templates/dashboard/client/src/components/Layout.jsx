@@ -68,6 +68,9 @@ export default function Layout() {
   // Dine-in add-on (QR table ordering) -- same "genuinely inert while off"
   // rule as deliveryMode/voiceEnabled above.
   const [dineinEnabled, setDineinEnabled] = useState(false);
+  // Customer database (CRM) add-on -- same "genuinely inert while off"
+  // rule as the other add-ons above.
+  const [crmEnabled, setCrmEnabled] = useState(false);
   const location = useLocation();
   // Zero DOM below one branch, not just hidden -- a single-location
   // business must not be able to tell this feature exists at all. Also
@@ -81,6 +84,7 @@ export default function Layout() {
     ...(deliveryMode === 'own_riders' ? [{ to: '/delivery', label: 'Delivery' }] : []),
     ...(voiceEnabled ? [{ to: '/voice', label: 'Voice' }] : []),
     ...(dineinEnabled ? [{ to: '/dinein', label: 'Dine-in' }] : []),
+    ...(crmEnabled ? [{ to: '/customers', label: 'Customers' }] : []),
   ];
   // Branches is hidden (not just filtered) for a branch-locked manager --
   // closes a real gap that used to exist: the page itself used to show
@@ -114,6 +118,7 @@ export default function Layout() {
     api.get('/delivery-config').then((c) => setDeliveryMode(c?.mode || 'none'));
     api.get('/voice-config').then((c) => setVoiceEnabled(Boolean(c?.enabled)));
     api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
+    api.get('/crm-config').then((c) => setCrmEnabled(Boolean(c?.enabled)));
   }, []);
 
   // A route change is the clearest signal the user picked something on
