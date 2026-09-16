@@ -1693,6 +1693,127 @@ router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
   });
 });
 
+// Same shape as /customers/stats above (stat cards + Customer Overview
+// chart + Customer Segments donut), scoped to one real calendar month
+// instead of all time. Chidera, 2026-09-16: "i didnt meant recent text by
+// month, i meant even revenue, retention, customers, should also be able
+// to be checked by month, customer overview and customer segment" -- the
+// plain monthly table (/customers/monthly above) covered the table view;
+// this is what lets Crm.jsx swap the stat cards/charts themselves to a
+// specific month, reusing the exact same rendering code either way.
+//
+// segments here still classify each customer by their real, all-time
+// segment (new/repeat/vip) -- there's no separate "this customer's segment
+// as of last month" concept anywhere else in this codebase, and inventing
+// one just for this view would answer a question nobody asked ("of the
+// people who bought in September, how many are VIPs overall" is the useful
+// question, not "were they a VIP specifically in September").
+router.get('/customers/monthly-stats', requireFullAccessApi, async (req, res) => {
+  const month = req.query.month; // 'YYYY-MM'
+  if (!/^\d{4}-\d{2}$/.test(month || '')) return res.status(400).json({ error: 'month must be YYYY-MM.' });
+  const start = `${month}-01`;
+
+  const [current, previous, segmentsByMonth, daily] = await Promise.all([
+    pool.query(
+      `with month_orders as (
+         select customer_id, total, completed_at,
+           row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed' and completed_at is not null
+       ),
+       per_customer as (
+         select customer_id, sum(total) as month_spend, min(order_rank) as first_rank
+         from month_orders
+         where completed_at >= $1::date and completed_at < ($1::date + interval '1 month')
+         group by customer_id
+       )
+       select
+         count(*)::int as total_customers,
+         count(*) filter (where first_rank = 1)::int as new_count,
+         count(*) filter (where first_rank > 1)::int as repeat_count,
+         coalesce(sum(month_spend), 0) as total_revenue
+       from per_customer`,
+      [start]
+    ),
+    // Preceding calendar month -- what "vs last month" compares against
+    // here, same idea as the cumulative route's trailing-30-days compare,
+    // just calendar-aligned since a specific month is already the frame.
+    pool.query(
+      `with month_orders as (
+         select customer_id, total, completed_at,
+           row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed' and completed_at is not null
+       ),
+       per_customer as (
+         select customer_id, sum(total) as month_spend, min(order_rank) as first_rank
+         from month_orders
+         where completed_at >= ($1::date - interval '1 month') and completed_at < $1::date
+         group by customer_id
+       )
+       select
+         count(*) filter (where first_rank = 1)::int as new_count,
+         coalesce(sum(month_spend), 0) as total_revenue
+       from per_customer`,
+      [start]
+    ),
+    pool.query(
+      `with all_time as (
+         select customer_id, count(*) as order_count, sum(total) as total_spend
+         from "order" where status = 'completed' and completed_at is not null
+         group by customer_id
+       ),
+       repeat_ranked as (
+         select customer_id, percent_rank() over (order by total_spend) as spend_pct_rank
+         from all_time where order_count >= 2
+       ),
+       segment as (
+         select a.customer_id,
+           case when a.order_count = 1 then 'new' when coalesce(r.spend_pct_rank, 0) >= 0.9 then 'vip' else 'repeat' end as name
+         from all_time a left join repeat_ranked r on r.customer_id = a.customer_id
+       ),
+       month_customers as (
+         select distinct customer_id from "order"
+         where status = 'completed' and completed_at >= $1::date and completed_at < ($1::date + interval '1 month')
+       )
+       select seg.name, count(*)::int as n
+       from month_customers mc join segment seg on seg.customer_id = mc.customer_id
+       group by seg.name`,
+      [start]
+    ),
+    pool.query(
+      `select date(completed_at) as day,
+         count(*) filter (where order_rank = 1)::int as new_customers,
+         count(*) filter (where order_rank > 1)::int as repeat_customers
+       from (
+         select customer_id, completed_at, row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed' and completed_at is not null
+       ) o
+       where completed_at >= $1::date and completed_at < ($1::date + interval '1 month')
+       group by date(completed_at)
+       order by day`,
+      [start]
+    ),
+  ]);
+
+  const c = current.rows[0];
+  const p = previous.rows[0];
+  const retentionRate = c.total_customers > 0 ? Math.round((c.repeat_count / c.total_customers) * 1000) / 10 : 0;
+  const segMap = Object.fromEntries(segmentsByMonth.rows.map((r) => [r.name, r.n]));
+  const pctChange = (curr, prev) => (prev > 0 ? Math.round(((curr - prev) / prev) * 1000) / 10 : null);
+
+  res.json({
+    totalCustomers: c.total_customers,
+    repeatCustomers: c.repeat_count,
+    retentionRate,
+    totalRevenue: Number(c.total_revenue),
+    segments: { new: segMap.new || 0, repeat: segMap.repeat || 0, vip: segMap.vip || 0 },
+    deltas: {
+      newCustomersPct: pctChange(c.new_count, p.new_count),
+      revenuePct: pctChange(Number(c.total_revenue), Number(p.total_revenue)),
+    },
+    daily: daily.rows.map((r) => ({ day: r.day, newCustomers: r.new_customers, repeatCustomers: r.repeat_customers })),
+  });
+});
+
 // Chidera, 2026-09-16: "let crm tab and customer tab seperate cause
 // customer can reach 2000 and make crm tab too long, so let crm only be
 // recent chat" -- CRM's own "Recent" tab (Crm.jsx), same 7-day window and
@@ -1725,11 +1846,19 @@ router.get('/customers/recent', requireFullAccessApi, async (req, res) => {
   res.json(rows);
 });
 
-// CRM's "By month" tab -- same one-row-per-calendar-month shape as
-// Feedback's own monthly view. new_customers counts each customer once, on
-// the month of their first-ever completed order; repeat_customers counts a
-// customer at most once per month even if they ordered more than once
-// that month (order_rank > 1 marks every order after their first, ever).
+// CRM's "By month" list -- one row per calendar month. new_customers counts
+// each customer once, on the month of their first-ever completed order;
+// repeat_customers counts a customer at most once per month even if they
+// ordered more than once that month (order_rank > 1 marks every order
+// after their first, ever).
+//
+// completed_at is not null found live, 2026-09-16: a real completed order
+// with no completed_at set (a data gap, not something this route should
+// paper over silently) grouped into a `month: null` row, which crashed the
+// dashboard's own date formatting -- Chidera: "when i click by month on
+// crm it goes blank." Filtered out here rather than letting one bad row
+// take down the whole report; that order still exists and still counts
+// everywhere completed_at isn't the grouping key.
 router.get('/customers/monthly', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query(
     `select to_char(date_trunc('month', completed_at), 'YYYY-MM') as month,
@@ -1739,7 +1868,7 @@ router.get('/customers/monthly', requireFullAccessApi, async (req, res) => {
        count(*)::int as total_orders
      from (
        select customer_id, total, completed_at, row_number() over (partition by customer_id order by completed_at) as order_rank
-       from "order" where status = 'completed'
+       from "order" where status = 'completed' and completed_at is not null
      ) o
      group by date_trunc('month', completed_at)
      order by date_trunc('month', completed_at) desc`
@@ -1757,6 +1886,60 @@ router.post('/customers/:id/birthday', requireEditorApi, async (req, res) => {
   const { rows } = await pool.query('update customers set birthday = $1 where id = $2 returning *', [birthday || null, req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
   res.json(rows[0]);
+});
+
+// Chidera, 2026-09-16: "delete the chat even in back end" -- a real,
+// permanent delete (not an archive/hide), for a customer who genuinely
+// shouldn't have a record left (a test conversation, a privacy request),
+// as distinct from cancelling one order (routes/api.js's /orders/:id/status
+// already does that -- staff cancel the order first, then delete the
+// customer here if the whole conversation should go too).
+//
+// requireEditorApi (owner/manager only, not PIN-tier) -- this is the one
+// genuinely irreversible write on this whole customers surface, so it gets
+// a narrower gate than birthday/export above.
+//
+// Most customer_id-referencing tables cascade through `order` already
+// (order_item, order_payment_proof, order_topup, generated_document,
+// order_feedback, delivery -- see schema.sql's own "on delete cascade" on
+// each), but four tables reference an order/voice_call/table_session
+// WITHOUT cascade (delivery_offer, delivery_assignment, callback_task,
+// waiter_call) and would otherwise block the delete with a foreign key
+// violation -- cleared explicitly, deepest-dependency-first, before the
+// order/booking/voice_call/table_session rows they point to. This is the
+// first explicit transaction in this codebase (everywhere else is plain
+// sequential pool.query calls) -- deliberate here specifically because a
+// partial delete across this many tables would be a real, hard-to-notice
+// data integrity problem, not just a UX annoyance.
+router.delete('/customers/:id', requireEditorApi, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const id = req.params.id;
+    const { rows: existing } = await client.query('select id from customers where id = $1', [id]);
+    if (!existing[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not found.' });
+    }
+    await client.query(`delete from waiter_call where session_id in (select id from table_session where customer_id = $1)`, [id]);
+    await client.query(`delete from table_session where customer_id = $1`, [id]);
+    await client.query(`delete from callback_task where customer_id = $1 or call_id in (select id from voice_call where customer_id = $1)`, [id]);
+    await client.query(`delete from call_turn where call_id in (select id from voice_call where customer_id = $1)`, [id]);
+    await client.query(`delete from voice_call where customer_id = $1`, [id]);
+    await client.query(`delete from delivery_assignment where order_id in (select id from "order" where customer_id = $1)`, [id]);
+    await client.query(`delete from delivery_offer where order_id in (select id from "order" where customer_id = $1)`, [id]);
+    await client.query(`delete from booking where customer_id = $1`, [id]);
+    await client.query(`delete from "order" where customer_id = $1`, [id]);
+    await client.query(`delete from message where customer_id = $1`, [id]);
+    await client.query(`delete from customers where id = $1`, [id]);
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
 });
 
 // "Able to extract their data" -- a real CSV a business owner can open in

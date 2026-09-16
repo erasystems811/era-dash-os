@@ -17,39 +17,45 @@ function formatMoneyShort(n) {
 }
 
 function formatDay(iso) {
-  return new Date(iso).toLocaleDateString('en-GB', { weekday: 'short' });
+  return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
 function formatMonth(m) {
+  if (!/^\d{4}-\d{2}$/.test(m || '')) return m || 'Unknown';
   const [y, mo] = m.split('-');
   return new Date(Number(y), Number(mo) - 1, 1).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
 }
 
 const SEGMENT_COLORS = { new: '#b4700f', repeat: '#1b2a4a', vip: '#b8964f' };
 
-// Chidera, 2026-09-16: "let feedback tab feel like the customer tab and
-// have a crm tab and customer tab seperate cause customer can reach 2000
-// and make crm tab too long, so let crm only be recent chat and customer
-// tab be all customers and then the crm how can it be looked it per month
-// and as a cummulative/ like feedback" -- split out of what used to be one
-// Customers.jsx: the cumulative stat cards/charts (always visible, same
-// shape as Feedback's own stat row) plus a Recent (7 days)/By month tab
-// pair, exactly matching Feedback.jsx's own structure. The full customer
-// LIST (which can genuinely reach thousands of rows) lives on its own,
-// separate Customers.jsx page instead of loading here every time.
+// Chidera, 2026-09-16: first pass had a fixed "cumulative always, Recent/By
+// month tabs below" -- her actual ask: "i didnt meant recent text by
+// month, i meant even revenue, retention, customers, should also be able
+// to be checked by month, customer overview and customer segment." So the
+// stat cards and both charts now respond to a period picker (Cumulative or
+// any real month with data, from /customers/monthly-stats) instead of
+// always showing all-time -- same rendering code either way, just a
+// different fetch. "Recent" (last 7 days of activity) stays its own,
+// separate, always-visible section underneath -- not part of the period
+// picker, per her own correction.
 export default function Crm() {
+  const [period, setPeriod] = useState('cumulative');
   const [stats, setStats] = useState(null);
   const [recent, setRecent] = useState(null);
-  const [monthly, setMonthly] = useState(null);
-  const [view, setView] = useState('recent');
+  const [months, setMonths] = useState(null);
 
   useEffect(() => {
-    api.get('/customers/stats').then(setStats);
     api.get('/customers/recent').then(setRecent);
-    api.get('/customers/monthly').then(setMonthly);
+    api.get('/customers/monthly').then((rows) => setMonths(rows.map((r) => r.month)));
   }, []);
 
-  if (!stats || !recent || !monthly) return <Loading />;
+  useEffect(() => {
+    setStats(null);
+    const url = period === 'cumulative' ? '/customers/stats' : `/customers/monthly-stats?month=${period}`;
+    api.get(url).then(setStats);
+  }, [period]);
+
+  if (!stats || !recent || !months) return <Loading />;
 
   const segmentData = [
     { key: 'new', name: 'New', value: stats.segments.new },
@@ -59,14 +65,23 @@ export default function Crm() {
   const segmentTotal = stats.segments.new + stats.segments.repeat + stats.segments.vip;
 
   const chartData = stats.daily.map((d) => ({ day: formatDay(d.day), New: d.newCustomers, Repeat: d.repeatCustomers }));
+  const chartSubtitle = period === 'cumulative' ? 'New vs repeat customers, last 7 days' : `New vs repeat customers, ${formatMonth(period)}, by day`;
 
   return (
     <div>
       <div className="page-header">
         <div>
           <h1>CRM</h1>
-          <p className="subtitle">How your customer base is doing -- cumulative, and trending by month. For the full customer list, see Customers.</p>
+          <p className="subtitle">How your customer base is doing -- cumulative, or any month on its own. For the full customer list, see Customers.</p>
         </div>
+        <select value={period} onChange={(e) => setPeriod(e.target.value)}>
+          <option value="cumulative">Cumulative (all time)</option>
+          {months.map((m) => (
+            <option key={m} value={m}>
+              {formatMonth(m)}
+            </option>
+          ))}
+        </select>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 20 }}>
@@ -130,9 +145,9 @@ export default function Crm() {
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, alignItems: 'stretch', marginBottom: 20 }}>
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Customer Overview</h3>
-          <p className="hint" style={{ marginTop: -8 }}>New vs repeat customers, last 7 days</p>
+          <p className="hint" style={{ marginTop: -8 }}>{chartSubtitle}</p>
           {chartData.length === 0 ? (
-            <p className="hint">No completed orders in the last 7 days yet.</p>
+            <p className="hint">No completed orders in this period yet.</p>
           ) : (
             <ResponsiveContainer width="100%" height={220}>
               <LineChart data={chartData}>
@@ -179,90 +194,46 @@ export default function Crm() {
         </div>
       </div>
 
-      <div className="tab-row" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <button className={view === 'recent' ? '' : 'secondary'} onClick={() => setView('recent')}>
-          Recent (7 days)
-        </button>
-        <button className={view === 'monthly' ? '' : 'secondary'} onClick={() => setView('monthly')}>
-          By month
-        </button>
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Recent Activity (7 days)</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Customer</th>
+              <th>Phone number</th>
+              <th>Last order</th>
+              <th>Orders</th>
+              <th>Total spend</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {recent.map((c) => (
+              <tr key={c.id}>
+                <td>{c.name || '(no name on file)'}</td>
+                <td>{c.phone_number || '—'}</td>
+                <td>{new Date(c.last_order_at).toLocaleString()}</td>
+                <td>{c.order_count}</td>
+                <td>{formatMoney(c.total_spend)}</td>
+                <td>{c.segment && <span className={`badge ${c.segment}`}>{c.segment}</span>}</td>
+                <td>
+                  <Link to={`/conversations/${c.id}`} className="btn secondary" style={{ padding: '4px 10px', fontSize: 13 }}>
+                    Text
+                  </Link>
+                </td>
+              </tr>
+            ))}
+            {!recent.length && (
+              <tr>
+                <td colSpan={7} className="empty-state">
+                  No customer activity in the last 7 days.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
-
-      {view === 'recent' && (
-        <div className="card">
-          <table>
-            <thead>
-              <tr>
-                <th>Customer</th>
-                <th>Phone number</th>
-                <th>Last order</th>
-                <th>Orders</th>
-                <th>Total spend</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.map((c) => (
-                <tr key={c.id}>
-                  <td>{c.name || '(no name on file)'}</td>
-                  <td>{c.phone_number || '—'}</td>
-                  <td>{new Date(c.last_order_at).toLocaleString()}</td>
-                  <td>{c.order_count}</td>
-                  <td>{formatMoney(c.total_spend)}</td>
-                  <td>{c.segment && <span className={`badge ${c.segment}`}>{c.segment}</span>}</td>
-                  <td>
-                    <Link to={`/conversations/${c.id}`} className="btn secondary" style={{ padding: '4px 10px', fontSize: 13 }}>
-                      Text
-                    </Link>
-                  </td>
-                </tr>
-              ))}
-              {!recent.length && (
-                <tr>
-                  <td colSpan={7} className="empty-state">
-                    No customer activity in the last 7 days.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {view === 'monthly' && (
-        <div className="card">
-          <table>
-            <thead>
-              <tr>
-                <th>Month</th>
-                <th>New customers</th>
-                <th>Repeat customers</th>
-                <th>Orders</th>
-                <th>Revenue</th>
-              </tr>
-            </thead>
-            <tbody>
-              {monthly.map((m) => (
-                <tr key={m.month}>
-                  <td>{formatMonth(m.month)}</td>
-                  <td>{m.new_customers}</td>
-                  <td>{m.repeat_customers}</td>
-                  <td>{m.total_orders}</td>
-                  <td>{formatMoney(m.revenue)}</td>
-                </tr>
-              ))}
-              {!monthly.length && (
-                <tr>
-                  <td colSpan={5} className="empty-state">
-                    Nothing yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   );
 }
