@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import Loading from '../components/Loading.jsx';
 
 function formatMoney(n) {
   return `NGN ${Number(n || 0).toLocaleString()}`;
@@ -46,7 +47,7 @@ export default function Pos() {
     api.get('/pos-transactions/stats').then(setStats);
   }, []);
 
-  if (!transactions || !stats) return null;
+  if (!transactions || !stats) return <Loading />;
 
   return (
     <div>

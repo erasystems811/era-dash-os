@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
+import Loading from '../components/Loading.jsx';
 
 // "Receipts" here means the real payment-proof photos customers actually
 // sent (and staff confirmed against), not a system-generated document --
@@ -17,7 +18,7 @@ export default function Documents() {
     api.get('/documents').then(setProofs);
   }, []);
 
-  if (!proofs) return null;
+  if (!proofs) return <Loading />;
 
   return (
     <div>

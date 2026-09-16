@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
+import Loading from '../components/Loading.jsx';
 
 export default function ConversationDetail() {
   const { id } = useParams();
@@ -26,7 +27,7 @@ export default function ConversationDetail() {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [data?.messages?.length]);
 
-  if (!data) return null;
+  if (!data) return <Loading />;
   const { customer, messages } = data;
 
   async function returnToBot() {

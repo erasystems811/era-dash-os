@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
+import Loading from '../components/Loading.jsx';
 
 // Human labels for every action lib/auth.js's logActivity call sites can
 // record -- see routes/api.js for exactly where each one fires. Falls back
@@ -34,7 +35,7 @@ export default function ActivityLog() {
     api.get(`/activity-log${scopeQuery(scope)}`).then(setEntries);
   }, [scope]);
 
-  if (!entries) return null;
+  if (!entries) return <Loading />;
 
   return (
     <div>

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import Loading from '../components/Loading.jsx';
 
 function naira(amount) {
   return `₦${Number(amount).toLocaleString()}`;
@@ -24,7 +25,7 @@ export default function AllBranches() {
     api.get('/branches/summary').then(setRows);
   }, []);
 
-  if (!rows) return null;
+  if (!rows) return <Loading />;
 
   return (
     <div>

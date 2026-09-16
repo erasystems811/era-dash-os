@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import Loading from '../components/Loading.jsx';
 
 // A restaurant (this sample business) has no bookings, only orders -- this
 // page is here because booking-mode businesses (apartment/car_rental/
@@ -14,7 +15,7 @@ export default function Bookings() {
     api.get('/bookings').then(setBookings);
   }, []);
 
-  if (!bookings) return null;
+  if (!bookings) return <Loading />;
 
   return (
     <div>

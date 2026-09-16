@@ -6,6 +6,7 @@ import L from 'leaflet';
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
 import markerShadow from 'leaflet/dist/images/marker-shadow.png';
+import Loading from '../components/Loading.jsx';
 
 // Leaflet's default marker icon paths break once bundled (a well-known
 // Leaflet+Vite gotcha -- the CSS references relative image paths that
@@ -88,7 +89,7 @@ function Zones() {
     load();
   }
 
-  if (!zones) return null;
+  if (!zones) return <Loading />;
 
   return (
     <div>
@@ -240,7 +241,7 @@ function Riders() {
     load();
   }
 
-  if (!riders) return null;
+  if (!riders) return <Loading />;
 
   return (
     <div>
@@ -480,7 +481,7 @@ function PayoutSettings() {
   }
   useEffect(load, []);
 
-  if (!config) return null;
+  if (!config) return <Loading />;
 
   async function save(e) {
     e.preventDefault();
@@ -583,7 +584,7 @@ function Payouts() {
     }
   }
 
-  if (!payouts) return null;
+  if (!payouts) return <Loading />;
 
   const totalOwed = payouts.filter((p) => p.status === 'PENDING' || p.status === 'FAILED').reduce((sum, p) => sum + Number(p.amount), 0);
 

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
+import Loading from '../components/Loading.jsx';
 
 // Owner/manager only (see routes/api.js's requireEditorApi on every
 // /feedback/* route -- never in PIN_NAV/IN_HOUSE_NAV, same tier as Roles
@@ -44,6 +45,13 @@ export default function Feedback() {
   const [recent, setRecent] = useState(null);
   const [monthly, setMonthly] = useState(null);
   const [view, setView] = useState('recent');
+  // Chidera, 2026-09-16: "if a business does not have in house or dine in
+  // why does feedback dashboard make room for it on toogle?" -- the
+  // channel filter used to always offer "In House only" even for a
+  // business with the dine-in add-on off, where no feedback could ever
+  // actually be tagged dinein. Same on/off source every other dine-in-gated
+  // piece of UI already reads (routes/api.js's /dinein-config).
+  const [dineinEnabled, setDineinEnabled] = useState(false);
   // A silent-forever blank page used to be the only symptom of a real
   // backend bug here (found live, 2026-09-11, Chidera: "the page is empti
   // its meant to have cards") -- /feedback/recent 500'd on every load, and
@@ -67,9 +75,12 @@ export default function Feedback() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel, scope]);
+  useEffect(() => {
+    api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
+  }, []);
 
   if (error) return <div className="error-banner">{error}</div>;
-  if (!summary || !recent || !monthly) return null;
+  if (!summary || !recent || !monthly) return <Loading />;
 
   return (
     <div>
@@ -80,8 +91,8 @@ export default function Feedback() {
         </div>
         <select value={channel} onChange={(e) => setChannel(e.target.value)}>
           <option value="all">All orders</option>
-          <option value="online">Online only</option>
-          <option value="dinein">In House only</option>
+          {dineinEnabled && <option value="online">Online only</option>}
+          {dineinEnabled && <option value="dinein">In House only</option>}
         </select>
       </div>
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
+import Loading from '../components/Loading.jsx';
 
 export default function KnowledgeBase() {
   // Every tier that can reach this page (owner/manager/PIN staff) can edit
@@ -50,7 +51,7 @@ export default function KnowledgeBase() {
     load();
   }
 
-  if (!entries) return null;
+  if (!entries) return <Loading />;
 
   return (
     <div>

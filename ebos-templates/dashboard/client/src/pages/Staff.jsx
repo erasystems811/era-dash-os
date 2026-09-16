@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
+import Loading from '../components/Loading.jsx';
 
 const EMPTY = { name: '', phone_number: '', email: '', password: '', role: 'manager', branch_id: '' };
 const EMPTY_PIN = { name: '', pin: '', work_area: '' };
@@ -115,7 +116,7 @@ export default function StaffPage() {
     }
   }
 
-  if (!list) return null;
+  if (!list) return <Loading />;
 
   return (
     <div>

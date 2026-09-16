@@ -5,6 +5,7 @@ import { useScope, scopeQuery } from '../ScopeContext.jsx';
 import AllBranches from './AllBranches.jsx';
 import { useStaff, canEdit, isPinTier, workAreaOf } from '../StaffContext.jsx';
 import { nextStageFor, ORDER_COLUMNS as COLUMNS, isRecentlyCompleted } from '../orderStages.js';
+import Loading from '../components/Loading.jsx';
 
 // Purely a visual affordance -- a long unattended wait means something
 // different at different stages, but a single flat threshold is the
@@ -119,7 +120,7 @@ function NewOrderForm({ onCreated, onCancel }) {
     }
   }
 
-  if (!products || !zones) return null;
+  if (!products || !zones) return <Loading />;
 
   return (
     <div className="card">
@@ -333,7 +334,7 @@ export default function Orders() {
   // not a filtered version of this one.
   if (scope === 'all') return <AllBranches />;
 
-  if (!orders) return null;
+  if (!orders) return <Loading />;
 
   // channel !== 'dinein' is the one real split between the two worlds --
   // everything else (branch, status, payment) already applies equally to

@@ -1,29 +1,40 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { StaffProvider, useStaff, isPinTier, workAreaOf } from './StaffContext.jsx';
 import { ScopeProvider } from './ScopeContext.jsx';
 import Layout from './components/Layout.jsx';
+import Loading from './components/Loading.jsx';
 import Login from './pages/Login.jsx';
 import PinLogin from './pages/PinLogin.jsx';
-import Orders from './pages/Orders.jsx';
-import OrderDetail from './pages/OrderDetail.jsx';
-import Bookings from './pages/Bookings.jsx';
-import Catalogue from './pages/Catalogue.jsx';
-import Branches from './pages/Branches.jsx';
-import Conversations from './pages/Conversations.jsx';
-import ConversationDetail from './pages/ConversationDetail.jsx';
-import KnowledgeBase from './pages/KnowledgeBase.jsx';
-import Documents from './pages/Documents.jsx';
-import Staff from './pages/Staff.jsx';
-import ActivityLog from './pages/ActivityLog.jsx';
-import Settings from './pages/Settings.jsx';
-import Delivery from './pages/Delivery.jsx';
-import Voice from './pages/Voice.jsx';
-import DineIn from './pages/DineIn.jsx';
-import InHouse from './pages/InHouse.jsx';
-import Feedback from './pages/Feedback.jsx';
-import Customers from './pages/Customers.jsx';
-import Pos from './pages/Pos.jsx';
+
+// Chidera, 2026-09-16: "why is my dashboard lagging... when i tap a new tab,
+// why does it just stay white and blank for a while" -- every page used to
+// be bundled into one ~870KB JS file loaded up front, so even opening the
+// dashboard for the first time (or after a cache-busting deploy) meant
+// waiting on every page's code, not just the one being viewed. Login/PinLogin
+// stay eager (the very first thing almost anyone sees); everything past the
+// login wall loads on demand, one small chunk per page, shown behind the
+// same Loading spinner every page already uses for its own data fetch --
+// so a slow network now shows the same honest "loading", never blank white.
+const Orders = lazy(() => import('./pages/Orders.jsx'));
+const OrderDetail = lazy(() => import('./pages/OrderDetail.jsx'));
+const Bookings = lazy(() => import('./pages/Bookings.jsx'));
+const Catalogue = lazy(() => import('./pages/Catalogue.jsx'));
+const Branches = lazy(() => import('./pages/Branches.jsx'));
+const Conversations = lazy(() => import('./pages/Conversations.jsx'));
+const ConversationDetail = lazy(() => import('./pages/ConversationDetail.jsx'));
+const KnowledgeBase = lazy(() => import('./pages/KnowledgeBase.jsx'));
+const Documents = lazy(() => import('./pages/Documents.jsx'));
+const Staff = lazy(() => import('./pages/Staff.jsx'));
+const ActivityLog = lazy(() => import('./pages/ActivityLog.jsx'));
+const Settings = lazy(() => import('./pages/Settings.jsx'));
+const Delivery = lazy(() => import('./pages/Delivery.jsx'));
+const Voice = lazy(() => import('./pages/Voice.jsx'));
+const DineIn = lazy(() => import('./pages/DineIn.jsx'));
+const InHouse = lazy(() => import('./pages/InHouse.jsx'));
+const Feedback = lazy(() => import('./pages/Feedback.jsx'));
+const Customers = lazy(() => import('./pages/Customers.jsx'));
+const Pos = lazy(() => import('./pages/Pos.jsx'));
 
 // Every path a PIN-tier (Tier 3) session is allowed to land on -- matches
 // Layout.jsx's PIN_NAV exactly. Not just a nav-hiding trick: this actually
@@ -62,6 +73,7 @@ function Protected({ children }) {
 export default function App() {
   return (
     <StaffProvider>
+      <Suspense fallback={<Loading />}>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/staff-login" element={<PinLogin />} />
@@ -95,6 +107,7 @@ export default function App() {
           <Route path="/settings" element={<Settings />} />
         </Route>
       </Routes>
+      </Suspense>
     </StaffProvider>
   );
 }

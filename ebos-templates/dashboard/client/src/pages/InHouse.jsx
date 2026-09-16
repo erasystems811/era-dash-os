@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
+import Loading from '../components/Loading.jsx';
 
 // The dedicated home for in-house-scoped staff (staff.work_area ===
 // 'in_house') -- Chidera 2026-09-11: "i need a era-demo.erasystems.com.ng/
@@ -53,7 +54,7 @@ export default function InHouse() {
     load();
   }
 
-  if (!serving || !awaitingPayment) return null;
+  if (!serving || !awaitingPayment) return <Loading />;
 
   function column(key, label, hint, orders, emptyText, actionLabel, onAction) {
     return (

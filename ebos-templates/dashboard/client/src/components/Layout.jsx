@@ -9,12 +9,18 @@ import { api } from '../api.js';
 // activity log-settings". Delivery/Voice aren't listed here since they're
 // add-ons spliced in conditionally below (right after Conversations, so
 // they land in the same spot the requested order puts Delivery).
+//
+// Branches removed from here entirely, 2026-09-16 -- Chidera: "remove that
+// branches tab i should be the one able to add a branch not them." Adding a
+// branch is ERA's own call (server routing, WhatsApp numbers, staff
+// assignment all follow from it), never a client self-service action -- the
+// /branches route/page itself still exists for ERA's own use, it's just not
+// reachable from a client's own nav.
 const BASE_NAV = [
   { to: '/', label: 'Orders', end: true },
   { to: '/conversations', label: 'Conversations' },
   { to: '/catalogue', label: 'Catalogue' },
   { to: '/knowledge-base', label: 'Knowledge base' },
-  { to: '/branches', label: 'Branches' },
   { to: '/documents', label: 'Documents' },
   { to: '/feedback', label: 'Feedback' },
   { to: '/staff', label: 'Roles and numbers' },
@@ -90,13 +96,10 @@ export default function Layout() {
     ...(crmEnabled ? [{ to: '/customers', label: 'Customers' }] : []),
     ...(posEnabled ? [{ to: '/pos', label: 'POS' }] : []),
   ];
-  // Branches is hidden (not just filtered) for a branch-locked manager --
-  // closes a real gap that used to exist: the page itself used to show
-  // every branch to anyone who could reach it, not just the one they're
-  // locked to. Staff/Settings/Activity log stay owner-or-manager-visible
-  // in the nav; requireEditorApi on their write routes already governs
-  // who can actually change anything once there.
-  const baseNav = locked ? BASE_NAV.filter((item) => item.to !== '/branches') : BASE_NAV;
+  // Staff/Settings/Activity log stay owner-or-manager-visible in the nav
+  // even when branch-locked; requireEditorApi on their write routes already
+  // governs who can actually change anything once there.
+  const baseNav = BASE_NAV;
   const workArea = workAreaOf(staff);
   // The /in-house URL is deliberately handed out as its own link (Chidera
   // 2026-09-11: "i need a era-demo.erasystems.com.ng/in-house link that

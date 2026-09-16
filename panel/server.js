@@ -532,6 +532,12 @@ async function ebosBusinessStatus(client, hetznerToken) {
     crmEnabled: Boolean(crmConfig?.enabled),
     posSyncEnabled: Boolean(posSyncConfig?.enabled),
     posSyncConnected: Boolean(posSyncConfig?.hasWebhookCredentials),
+    // Already on the registry (add-payment.mjs sets it, same field the
+    // generic/default client table already shows) -- no extra fetch
+    // needed, unlike the add-ons above which live in each business's own
+    // database. Chidera, 2026-09-16: "theres no toggle for pay stack" --
+    // the EBOS table never surfaced this at all, only the generic one did.
+    paymentProvider: client.paymentProvider || null,
     offboarded: Boolean(client.offboarded),
     concernCount1h,
     concernBreakdown1h: monitor,
@@ -599,8 +605,8 @@ function businessesSection(ebosClients) {
   <div id="ebosTotals" style="margin:10px 0;font-size:14px;">Loading totals...</div>
   <button onclick="pushUpdate(null, true)" title="Rolls out the current template/dashboard code to every EBOS business at once -- secrets are read back from each server and reused, never regenerated.">Push code update to all EBOS businesses</button>
   <table>
-    <tr><th>Name</th><th>Status</th><th>AI cost (this month)</th><th>Server cost (monthly)</th><th title="Real bot errors and AI/API failures in the last hour -- not handovers or normal business activity, just signs the engine itself is broken.">Code errors (1h)</th><th>Chowdeck delivery</th><th>Own-rider delivery</th><th>Voice ordering</th><th>Dine-in</th><th>Customers</th><th>POS</th><th>Last code push</th></tr>
-    <tbody id="ebosStatusRows"><tr><td colspan="12">Loading...</td></tr></tbody>
+    <tr><th>Name</th><th>Status</th><th>AI cost (this month)</th><th>Server cost (monthly)</th><th title="Real bot errors and AI/API failures in the last hour -- not handovers or normal business activity, just signs the engine itself is broken.">Code errors (1h)</th><th>Chowdeck delivery</th><th>Own-rider delivery</th><th>Voice ordering</th><th>Dine-in</th><th>Customers</th><th>POS</th><th>Payment</th><th>Last code push</th></tr>
+    <tbody id="ebosStatusRows"><tr><td colspan="13">Loading...</td></tr></tbody>
   </table>
 
   <p><a href="/monitoring">Open Bot Monitoring &rarr;</a> &mdash; the full live feed across every business, on its own page so this one stays fast as you add more businesses. "Code errors (1h)" above is still the quick at-a-glance number.</p>
@@ -1227,14 +1233,15 @@ async function loadEbosStatus() {
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.dineinEnabled ? 'checked' : '') + ' onchange="toggleDineinMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.dineinEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.crmEnabled ? 'checked' : '') + ' onchange="toggleCrmMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.crmEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.posSyncEnabled ? 'checked' : '') + ' onchange="togglePosSyncMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.posSyncEnabled ? 'on' : 'off') + '</label>' + (b.posSyncEnabled && !b.posSyncConnected ? ' <span class="danger" title="No Moniepoint webhook credentials set yet -- run scripts/add-pos-sync.mjs once the client has real API access.">(not connected)</span>' : '') + '</td>'
+          + '<td>' + (b.paymentProvider ? escClient(b.paymentProvider) : 'no') + '</td>'
           + '<td>' + (b.lastPushedAt ? new Date(b.lastPushedAt).toLocaleString() : 'never') + '</td>'
           + '</tr>'
         ).join('')
-      : '<tr><td colspan="12">No businesses yet.</td></tr>';
+      : '<tr><td colspan="13">No businesses yet.</td></tr>';
   } catch (err) {
     const totalsEl = document.getElementById('ebosTotals');
     if (totalsEl) totalsEl.textContent = '';
-    el.innerHTML = '<tr><td colspan="12">Error: ' + escClient(err.message) + '</td></tr>';
+    el.innerHTML = '<tr><td colspan="13">Error: ' + escClient(err.message) + '</td></tr>';
   }
 }
 loadEbosStatus();

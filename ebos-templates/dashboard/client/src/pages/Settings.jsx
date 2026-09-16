@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 import { compressImageToDataUrl } from '../imageUpload.js';
+import Loading from '../components/Loading.jsx';
 
 export default function Settings() {
   const { staff } = useStaff();
@@ -37,7 +38,7 @@ export default function Settings() {
     });
   }, []);
 
-  if (!business) return null;
+  if (!business) return <Loading />;
 
   async function save(e) {
     e.preventDefault();

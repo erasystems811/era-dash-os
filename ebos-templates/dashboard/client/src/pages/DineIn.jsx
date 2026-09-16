@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
+import Loading from '../components/Loading.jsx';
 
 const EMPTY = { branch_id: '', label: '', seats: '' };
 
@@ -92,7 +93,7 @@ export default function DineIn() {
     }
   }
 
-  if (!config || !tables) return null;
+  if (!config || !tables) return <Loading />;
 
   if (printMode) {
     const printTables = printMode === 'all' ? tables : tables.filter((t) => t.id === printMode);

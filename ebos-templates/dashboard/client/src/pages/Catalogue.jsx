@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { compressImageToDataUrl } from '../imageUpload.js';
+import Loading from '../components/Loading.jsx';
 
 const EMPTY = { name: '', description: '', price: '', availability_type: 'stock', duration_minutes: '', category: '', image_data_url: '' };
 const UNCATEGORIZED = 'Uncategorized';
@@ -259,7 +260,7 @@ export default function Catalogue() {
     }
   }
 
-  if (!items) return null;
+  if (!items) return <Loading />;
 
   return (
     <div>

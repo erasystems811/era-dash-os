@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 import { useScope } from '../ScopeContext.jsx';
+import Loading from '../components/Loading.jsx';
 
 const EMPTY = {
   name: '',
@@ -82,7 +83,7 @@ export default function Branches() {
     load();
   }
 
-  if (!branches) return null;
+  if (!branches) return <Loading />;
 
   return (
     <div>

@@ -1077,3 +1077,21 @@ label {
     width: 100%;
   }
 }
+
+/* Loading.jsx -- shown wherever a page used to just return null while its
+   own data fetch was in flight. */
+.loading-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: loading-spin 0.7s linear infinite;
+  display: inline-block;
+}
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+

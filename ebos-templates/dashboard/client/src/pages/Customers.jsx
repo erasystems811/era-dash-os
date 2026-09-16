@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell } from 'recharts';
 import { api } from '../api.js';
+import Loading from '../components/Loading.jsx';
 
 function formatMoney(n) {
   return `NGN ${Number(n || 0).toLocaleString()}`;
@@ -68,7 +69,7 @@ export default function Customers() {
     api.get('/customers/stats').then(setStats);
   }, []);
 
-  if (!customers || !stats) return null;
+  if (!customers || !stats) return <Loading />;
 
   const filtered = search.trim()
     ? customers.filter((c) => (c.name || '').toLowerCase().includes(search.toLowerCase()) || (c.phone_number || '').includes(search.trim()))

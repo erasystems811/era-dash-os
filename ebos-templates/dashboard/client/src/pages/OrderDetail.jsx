@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 import { nextStageFor } from '../orderStages.js';
+import Loading from '../components/Loading.jsx';
 
 export default function OrderDetail() {
   const { id } = useParams();
@@ -26,7 +27,7 @@ export default function OrderDetail() {
   const [overrideBusy, setOverrideBusy] = useState(false);
   const [overrideError, setOverrideError] = useState(null);
 
-  if (!data) return null;
+  if (!data) return <Loading />;
   const { order, items, customer, topups = [], paymentProofs = [], delivery, deliveryAssignment } = data;
 
   // Chidera, 2026-09-16: "can it be a pop up when taking orders...for

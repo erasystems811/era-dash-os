@@ -3,6 +3,7 @@ import { ReactFlow, Background, Controls, addEdge, applyNodeChanges } from '@xyf
 import '@xyflow/react/dist/style.css';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
+import Loading from '../components/Loading.jsx';
 
 const EMPTY_FIELD = { key: '', label: '', question: '', type: 'text', choices: '', examples: '', required_for_state: '' };
 
@@ -128,7 +129,7 @@ export default function TrainTheBot() {
     load();
   }
 
-  if (!states || !fields) return null;
+  if (!states || !fields) return <Loading />;
 
   return (
     <div>

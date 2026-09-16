@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
+import Loading from '../components/Loading.jsx';
 
 // Human-readable time-since, for how long a handover has been waiting --
 // staff scanning the attention queue care about "how stale is this", not
@@ -79,7 +80,7 @@ function AllConversations() {
     return () => clearTimeout(timer);
   }, [query]);
 
-  if (!conversations) return null;
+  if (!conversations) return <Loading />;
 
   const rows = searchResults ?? conversations;
 
@@ -169,7 +170,7 @@ function NeedsAttention() {
     load();
   }
 
-  if (!rows) return null;
+  if (!rows) return <Loading />;
 
   return (
     <div className="card">
@@ -249,7 +250,7 @@ function ActiveConversations() {
     api.get('/conversations').then(setConversations);
   }, []);
 
-  if (!conversations) return null;
+  if (!conversations) return <Loading />;
   // A completed order isn't ongoing work any more -- Chidera's call,
   // 2026-09-03: "if an order is completed it goes to all conversations
   // back". Doesn't touch AllConversations at all, so it's still there,

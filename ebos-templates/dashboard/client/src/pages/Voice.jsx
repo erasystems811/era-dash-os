@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
+import Loading from '../components/Loading.jsx';
 
 function VoiceSettings({ config, setConfig }) {
   const { staff } = useStaff();
@@ -159,7 +160,7 @@ function CallDetail({ callId, onClose }) {
     api.get(`/voice/calls/${callId}`).then(setData);
   }, [callId]);
 
-  if (!data) return null;
+  if (!data) return <Loading />;
   const { call, turns } = data;
 
   return (
@@ -217,7 +218,7 @@ function Calls() {
   }
   useEffect(load, []);
 
-  if (!calls) return null;
+  if (!calls) return <Loading />;
 
   return (
     <div>
@@ -262,7 +263,7 @@ function Usage() {
     api.get('/voice/usage').then(setUsage);
   }, []);
 
-  if (!usage) return null;
+  if (!usage) return <Loading />;
 
   const trend = usage.minutesThisMonth - usage.minutesLastMonth;
 
@@ -310,7 +311,7 @@ export default function Voice() {
     api.get('/voice-config').then(setConfig);
   }, []);
 
-  if (!config) return null;
+  if (!config) return <Loading />;
 
   return (
     <div>
