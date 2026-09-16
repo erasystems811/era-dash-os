@@ -40,7 +40,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { loadSecrets, requireSecrets } from './lib/secrets.mjs';
-import { loadRegistry, saveRegistry, upsertClient, findClient, findServer, upsertServer } from './lib/registry.mjs';
+import { loadRegistry, saveRegistry, upsertClient, findClient, findServer, upsertServer, removeServer } from './lib/registry.mjs';
 import { randomSecret, randomPassword, randomEncryptionKey, slugify } from './lib/random.mjs';
 import { buildEbosSeedSql } from './lib/ebos-seed.mjs';
 import { buildEsfSeedSql } from './lib/esf-seed.mjs';
@@ -258,8 +258,25 @@ async function main() {
   const envReal = render(readFileSync(path.join(TEMPLATES_DIR, '.env.template'), 'utf8'), vars);
   const schema = readFileSync(path.join(TEMPLATES_DIR, 'schema.sql'), 'utf8');
 
-  // 1. GitHub repo (code only — no real secrets ever get committed)
+  // Chidera, 2026-09-16: "anytime there is a tear down let it actally be
+  // tearing down not just leaving dash" -- said about teardown-client.mjs,
+  // but the real recurring pain was here: a failed build (Oracle's known
+  // flakiness, a bad payload, anything) left a stray GitHub repo and/or a
+  // real running server behind every single time, because nothing before
+  // this cleaned up its own partial work. Steps 1-4 below are now wrapped
+  // in a rollback: on any failure, whatever THIS run created (repo, and a
+  // server if we created one -- never a --shared-server=ip we only joined)
+  // gets deleted again before the error propagates, so a failed attempt
+  // costs nothing and leaves nothing to hand-clean before retrying.
   let repo = null;
+  let serverId, ip;
+  let actualProvider = args.provider;
+  let createdServerThisRun = false;
+  let dnsOk = true;
+  let dnsInstructions = null;
+  let ownerPassword;
+  try {
+  // 1. GitHub repo (code only — no real secrets ever get committed)
   if (!args.skipGithub) {
     console.log('Creating GitHub repo...');
     const owner = await github.getAuthenticatedUser(secrets.GITHUB_TOKEN);
@@ -283,12 +300,6 @@ async function main() {
   }
 
   // 2. Server
-  let serverId, ip;
-  // Tracks the provider actually used -- differs from args.provider only
-  // when the Oracle->Hetzner fallback below fires. The registry entry
-  // must record this, not args.provider, or teardown-client.mjs would
-  // later try to delete the server from the wrong provider's API.
-  let actualProvider = args.provider;
   if (sharedMode === 'join') {
     // Already exists and is already running Docker + the shared Caddy --
     // that's what makes it "a registered shared server" (validated above).
@@ -327,6 +338,9 @@ async function main() {
       serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
       ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
     }
+    // From here on a real, billable server exists -- the rollback below
+    // knows to delete it on any later failure in this same run.
+    createdServerThisRun = true;
     console.log(`  Server IP: ${ip}, waiting for it to finish booting + installing Docker...`);
     await waitForSsh(ip);
     await waitForCloudInit(ip);
@@ -334,6 +348,11 @@ async function main() {
       console.log('Setting up the shared Caddy for this server...');
       await bootstrapSharedHost(ip);
       upsertServer(registry, { ip, provider: actualProvider, serverId, mode: 'shared', createdAt: new Date().toISOString() });
+      // Saved immediately, not deferred to the final saveRegistry below --
+      // if anything after this point fails, the rollback (or a future
+      // manual cleanup) needs this server to actually be findable in
+      // registry.json, not lost because the run never reached the end.
+      saveRegistry(registry);
     }
   }
 
@@ -348,7 +367,7 @@ async function main() {
   // schema.sql template since the password is per-client.
   // Generated even when --ebos-seed isn't used, since it's cheap and keeps
   // the variable available unconditionally for the final summary below.
-  const ownerPassword = randomPassword(12);
+  ownerPassword = randomPassword(12);
   let ebosSeedSql = '';
   if (args.ebosSeed) {
     const seedConfig = JSON.parse(readFileSync(args.ebosSeed, 'utf8'));
@@ -427,8 +446,6 @@ async function main() {
   }
 
   // 4. DNS
-  let dnsOk = true;
-  let dnsInstructions = null;
   if (args.customDomain) {
     // Never automatable — it's not on the DirectAdmin account this script
     // controls. Always print what to hand the client, not just on failure.
@@ -446,6 +463,36 @@ async function main() {
       console.log(`  ${dnsInstructions}`);
       console.log(`  (Automatic DNS error, for debugging: ${err.message})`);
     }
+  }
+  } catch (err) {
+    console.log(`\nBuild failed (${err.message}) -- cleaning up what this run created...`);
+    if (repo) {
+      try {
+        console.log(`  Deleting GitHub repo ${repo.owner}/${repo.repo}...`);
+        await github.deleteRepo(secrets.GITHUB_TOKEN, repo.owner, repo.repo);
+      } catch (cleanupErr) {
+        console.log(`  NOTE: couldn't delete the repo (${cleanupErr.message}) -- delete "${repo.htmlUrl}" by hand.`);
+      }
+    }
+    // sharedMode === 'join' never created a server -- it's an existing one
+    // other clients may still depend on, so it's never touched here.
+    if (createdServerThisRun && sharedMode !== 'join') {
+      try {
+        console.log(`  Deleting ${actualProvider} server ${serverId} (${ip})...`);
+        if (actualProvider === 'hetzner') await hetzner.deleteServer(secrets.HETZNER_TOKEN, serverId);
+        else if (actualProvider === 'oracle') await oracle.deleteServer(oracleConfig, serverId);
+        else if (actualProvider === 'ovh') await ovh.deleteServer(ovhConfig, serverId);
+        else await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, serverId);
+        if (sharedMode === 'new') {
+          const freshRegistry = loadRegistry();
+          removeServer(freshRegistry, ip);
+          saveRegistry(freshRegistry);
+        }
+      } catch (cleanupErr) {
+        console.log(`  NOTE: couldn't delete the server (${cleanupErr.message}) -- delete ${ip} by hand (${actualProvider} console, or that provider's deleteServer with server id ${serverId}).`);
+      }
+    }
+    throw err;
   }
 
   // 5. Registry
