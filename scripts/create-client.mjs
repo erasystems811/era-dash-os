@@ -284,6 +284,11 @@ async function main() {
 
   // 2. Server
   let serverId, ip;
+  // Tracks the provider actually used -- differs from args.provider only
+  // when the Oracle->Hetzner fallback below fires. The registry entry
+  // must record this, not args.provider, or teardown-client.mjs would
+  // later try to delete the server from the wrong provider's API.
+  let actualProvider = args.provider;
   if (sharedMode === 'join') {
     // Already exists and is already running Docker + the shared Caddy --
     // that's what makes it "a registered shared server" (validated above).
@@ -293,8 +298,24 @@ async function main() {
   } else {
     console.log(`Creating ${args.provider} server (this takes a few minutes)...`);
     if (args.provider === 'oracle') {
-      serverId = await oracle.createServer(oracleConfig, { name: dropletName, size: args.size });
-      ip = await oracle.waitForServerActive(oracleConfig, serverId);
+      try {
+        serverId = await oracle.createServer(oracleConfig, { name: dropletName, size: args.size });
+        ip = await oracle.waitForServerActive(oracleConfig, serverId);
+      } catch (err) {
+        // Automatic Oracle -> Hetzner fallback -- Chidera's call, 2026-09-16:
+        // Oracle's own account is right at its Always Free capacity ceiling
+        // (real risk of a create failing on quota/capacity), and Hetzner's
+        // provider code is proven, tested, and ready. Only fires for the
+        // 'oracle' provider specifically (not ovh/digitalocean) and only
+        // when a Hetzner token is actually configured -- otherwise the
+        // real Oracle error surfaces as before, rather than a confusing
+        // "HETZNER_TOKEN missing" error masking what actually failed.
+        if (!secrets.HETZNER_TOKEN) throw err;
+        console.log(`Oracle server creation failed (${err.message}) -- falling back to Hetzner...`);
+        actualProvider = 'hetzner';
+        serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
+        ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
+      }
     } else if (args.provider === 'ovh') {
       serverId = await ovh.createServer(ovhConfig, { name: dropletName, size: args.size });
       ip = await ovh.waitForServerActive(ovhConfig, serverId);
@@ -312,7 +333,7 @@ async function main() {
     if (sharedMode === 'new') {
       console.log('Setting up the shared Caddy for this server...');
       await bootstrapSharedHost(ip);
-      upsertServer(registry, { ip, provider: args.provider, serverId, mode: 'shared', createdAt: new Date().toISOString() });
+      upsertServer(registry, { ip, provider: actualProvider, serverId, mode: 'shared', createdAt: new Date().toISOString() });
     }
   }
 
@@ -443,8 +464,10 @@ async function main() {
     // For a joined shared server, the real provider is whatever that
     // server was actually created as (recorded on it, not on args.provider
     // -- --shared-server mode doesn't require --provider to be meaningful
-    // at all, since it never calls a provider API).
-    provider: sharedMode === 'join' ? findServer(registry, ip).provider : args.provider,
+    // at all, since it never calls a provider API). Otherwise actualProvider,
+    // not args.provider -- differs from it exactly when the Oracle->Hetzner
+    // fallback above fired.
+    provider: sharedMode === 'join' ? findServer(registry, ip).provider : actualProvider,
     serverId,
     ip,
     repo: repo ? repo.htmlUrl : null,
@@ -485,7 +508,8 @@ async function main() {
   console.log(`  Repo:     ${repo ? repo.htmlUrl : '(skipped, --skip-github)'}`);
   const serverModeNote =
     sharedMode === 'none' ? '(dedicated)' : sharedMode === 'new' ? `(shared, just set up -- pass --shared-server=${ip} to add more clients to it)` : '(shared)';
-  console.log(`  Server:   ${ip} ${serverModeNote}`);
+  const fallbackNote = actualProvider !== args.provider ? ` -- FELL BACK from ${args.provider} to ${actualProvider}, see the log above for why` : '';
+  console.log(`  Server:   ${ip} ${serverModeNote} [${actualProvider}]${fallbackNote}`);
   if (args.ebosSeed || args.esfSeed) {
     // The generic DASHBOARD_USER/DASHBOARD_PASSWORD Basic Auth login this
     // template set doesn't use -- both EBOS and ESF have real per-owner
