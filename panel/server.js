@@ -692,12 +692,7 @@ function page(clients, ebosClients) {
     <form id="createForm">
       <label>Client name</label>
       <input name="name" required placeholder="e.g. Sunset Catering">
-      <label>Business type</label>
-      <select name="template">
-        <option value="ebos">Ordering/booking bot (EBOS -- Orders, Catalogue, Delivery, Payment, etc.)</option>
-        <option value="esf">Staff workflow bot (ESF)</option>
-        <option value="default">Plain WhatsApp bot only, no dashboard app</option>
-      </select>
+      <p class="muted" style="margin-top:-4px;">For an EBOS ordering/booking business, use the <a href="/workstation/">Workstation</a> instead -- this plain form only ever builds the simple, no-dashboard WhatsApp bot template (ESF staff-workflow businesses have their own <a href="/workstation-esf/">workstation</a> too). Chidera, 2026-09-16: "ebos has its create workflow the form is for seperate businesses that are not ebos."</p>
       <label>Subdomain (optional, auto-generated from name if blank)</label>
       <input name="subdomain" placeholder="e.g. sunset-catering">
       <label>Custom domain instead (they own their own domain -- leave Subdomain blank if using this)</label>
@@ -994,7 +989,6 @@ document.getElementById('createForm').addEventListener('submit', (e) => {
   const f = new FormData(e.target);
   submitJson('/api/create', {
     name: f.get('name'),
-    template: f.get('template') || undefined,
     subdomain: f.get('subdomain') || undefined,
     customDomain: f.get('customDomain') || undefined,
     whatsapp: f.get('whatsapp') === 'on',
@@ -2003,19 +1997,19 @@ app.get('/api/clients', (req, res) => {
   res.json(loadRegistry().clients);
 });
 
+// Deliberately always create-client.mjs's own default template ('default'
+// -- a plain WhatsApp bot, no dashboard app), never --template=ebos/esf.
+// EBOS and ESF businesses each have their own dedicated build flow (the
+// Workstation/Workstation-ESF wizards below, which collect the owner info,
+// catalogue, bot fields etc. those templates actually need) -- this plain
+// form was briefly changed to default to EBOS (2026-09-16), which was
+// wrong: "ebos has its create workflow the form is for seperate businesses
+// that are not ebos." Reverted.
 app.post('/api/create', (req, res) => {
-  const { name, template, subdomain, customDomain, whatsapp, pdf, payment, size, provider } = req.body;
+  const { name, subdomain, customDomain, whatsapp, pdf, payment, size, provider } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
-  if (template && !['default', 'ebos', 'esf'].includes(template)) return res.status(400).json({ error: 'template must be "default", "ebos", or "esf"' });
   if (subdomain && customDomain) return res.status(400).json({ error: 'Use either Subdomain or Custom domain, not both.' });
   const args = [`--name=${name}`];
-  // create-client.mjs itself defaults to 'default' when this is omitted --
-  // this form's own dropdown defaults to 'ebos' instead (Chidera, 2026-09-
-  // 16, after finding every client this form had created was silently the
-  // plain template, never actually the real EBOS ordering/booking app: "the
-  // paystack account has to be an ebos business not just created on my
-  // dash"), so pass it explicitly rather than leaving that gap again.
-  args.push(`--template=${template || 'ebos'}`);
   if (customDomain) args.push(`--custom-domain=${customDomain}`);
   else if (subdomain) args.push(`--subdomain=${subdomain}`);
   if (whatsapp) args.push('--whatsapp');
