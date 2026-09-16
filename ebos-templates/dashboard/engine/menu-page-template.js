@@ -104,7 +104,15 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoV
   .grid{padding:8px 14px 20px}
   .item{border-bottom:1px solid #F0EBE2;padding-bottom:16px;margin-bottom:16px}
   .item:last-child{border-bottom:0}
-  .shot{width:100%;height:168px;border-radius:10px;position:relative;overflow:hidden;display:grid;place-items:center;margin-bottom:10px;background-color:#8E5220}
+  /* Chidera, 2026-09-16: "make photo size square" -- was a fixed 168px-tall
+     WIDE box (roughly 2.4:1 on a phone), nowhere close to a typical food
+     photo's own shape, so object-fit:cover had to crop away most of the
+     frame to fill it -- a square source photo lost most of its top/bottom
+     to fit. aspect-ratio:1/1 (a real square, matching what product photo
+     uploads now crop to in imageUpload.js) instead of a fixed height means
+     the box's actual size still scales with the card width, but the SHAPE
+     always matches the shape the photo was actually cropped to. */
+  .shot{width:100%;aspect-ratio:1/1;border-radius:10px;position:relative;overflow:hidden;display:grid;place-items:center;margin-bottom:10px;background-color:#8E5220}
   .shot img{width:100%;height:100%;object-fit:cover;display:block}
   .shot span{color:rgba(255,255,255,.75);font-size:10.5px;letter-spacing:.16em;border:1px solid rgba(255,255,255,.35);padding:4px 10px;border-radius:999px}
   .item h3{font-family:"Fraunces",serif;font-size:17px;font-weight:600;margin-bottom:3px}

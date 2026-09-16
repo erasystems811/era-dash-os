@@ -3218,7 +3218,17 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
   const token = await ensureMenuToken(customer);
   const url = `${process.env.PUBLIC_URL}/m/${token}${category ? `?cat=${encodeURIComponent(category)}` : ''}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, url, credentials, headerImageUrl);
+  // Chidera, 2026-09-16: "ensure image appear on chat cause its not still
+  // appearing" -- handleGreeting (this file, ~line 839) already resolved
+  // and passed businessCoverPhotoUrl() correctly, but every OTHER call
+  // site of this function (four of them) left headerImageUrl at its
+  // default of null, so a conversation that skips straight past the plain
+  // greeting -- e.g. the customer's first message already says "I want to
+  // order" -- never saw the cover photo at all. Resolving it here, once,
+  // as the fallback means every caller gets the photo without having to
+  // remember to ask for it.
+  const resolvedHeaderImageUrl = headerImageUrl || (await businessCoverPhotoUrl());
+  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, url, credentials, resolvedHeaderImageUrl);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'menu_shown', processed: true });
   return true;
 }

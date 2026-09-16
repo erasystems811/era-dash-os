@@ -247,7 +247,7 @@ export default function Catalogue() {
     // Compressed client-side (same fix as Settings.jsx's logo/cover photo)
     // -- a raw phone photo here hit the exact same "too large" failure,
     // just for a product photo instead of the business's own branding.
-    const { dataUrl, isLowRes } = await compressImageToDataUrl(file);
+    const { dataUrl, isLowRes } = await compressImageToDataUrl(file, { squareCrop: true });
     setter((f) => ({ ...f, image_data_url: dataUrl }));
     if (isLowRes) {
       setPhotoWarning('This photo is quite small -- it may look blurry on the menu. A closer, higher-resolution photo of the dish will look sharper.');
