@@ -28,14 +28,21 @@ export const SHARED_CADDY_DIR = '/opt/shared-caddy';
 const PORT_BASE = 20000;
 const PORT_BLOCK = 10;
 
+// network_mode: host -- without it, Caddy's own "127.0.0.1:<port>" (what
+// every per-client site block below reverse-proxies to) means Caddy's own
+// container loopback, not the host's, so it can never reach a sibling
+// client stack's host-published port. Found live, 2026-09-16, on the first
+// real shared-mode client ever deployed (Pomodoro): every request 502'd
+// with "connection refused" even though the dashboard container itself was
+// healthy and answered fine on a direct host-level curl. Host networking
+// also means the ports: block below is unnecessary (host networking binds
+// 80/443 directly) and Compose disallows combining the two anyway.
 const SHARED_CADDY_COMPOSE = `services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     mem_limit: 150m
-    ports:
-      - "80:80"
-      - "443:443"
+    network_mode: host
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
