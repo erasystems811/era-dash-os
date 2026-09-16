@@ -1,9 +1,18 @@
 {{SUBDOMAIN}} {
+    # Same fix as Caddyfile.template (see its own comment) -- compression
+    # and long-lived caching for hashed static assets, applied here too
+    # since shared-hosting clients go through this template instead.
+    encode gzip zstd
+
     handle_path /rest/v1/* {
         reverse_proxy 127.0.0.1:{{POSTGREST_PORT}}
     }
     handle_path /n8n/* {
         reverse_proxy 127.0.0.1:{{N8N_PORT}}
+    }
+    handle /assets/* {
+        header Cache-Control "public, max-age=31536000, immutable"
+        reverse_proxy 127.0.0.1:{{DASHBOARD_PORT}}
     }
     handle {
         reverse_proxy 127.0.0.1:{{DASHBOARD_PORT}}

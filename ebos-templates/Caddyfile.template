@@ -1,9 +1,26 @@
 {{SUBDOMAIN}} {
+    # Chidera, 2026-09-16: "my dashboard is loading very very slow i hate
+    # it" -- neither Caddy nor Express (server.js's plain express.static)
+    # was compressing anything, so every page load shipped the full ~180KB
+    # main JS bundle uncompressed (the same file gzips to ~58KB) with no
+    # caching either (max-age=0 on a content-hashed filename that's safe to
+    # cache forever), meaning a repeat visit re-downloaded the same bytes
+    # from scratch every time. Both fixed here, not in Express, since Caddy
+    # already sits in front of every request and does this in one line.
+    encode gzip zstd
+
     handle_path /rest/v1/* {
         reverse_proxy postgrest:3000
     }
     handle_path /n8n/* {
         reverse_proxy n8n:5678
+    }
+    # Vite's own content-hash naming (index-<hash>.js) means a changed file
+    # is always a new filename -- there's no staleness risk in caching
+    # these forever, and doing so is most of the actual fix above.
+    handle /assets/* {
+        header Cache-Control "public, max-age=31536000, immutable"
+        reverse_proxy dashboard:3000
     }
     handle {
         reverse_proxy dashboard:3000
