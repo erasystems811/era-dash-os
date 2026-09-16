@@ -76,7 +76,7 @@ router.get('/:token', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
   const [branding, products, pendingOrder, waNumber] = await Promise.all([
-    resolveMenuBranding(customer.branch_id),
+    resolveMenuBranding(),
     menuForBranch(customer.branch_id),
     pendingOrderPayload(customer.id),
     resolveWaNumber(customer.branch_id),

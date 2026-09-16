@@ -35,12 +35,22 @@ async function resolveTable(qrToken) {
 // genuinely different URL, so it can't collide with a stale cache entry
 // for the old one. Shared with routes/menu-page.js, which has no table
 // row to piggyback this onto the way resolveTable above does.
-export async function resolveMenuBranding(branchId) {
+// Chidera, 2026-09-16: "my pomodoro doesnt have that cover photo on
+// hearder with business name" -- the actual root cause: business name and
+// cover photo are BUSINESS-level facts (business is a hard singleton, see
+// schema.sql's business_singleton_idx), they never depended on branch at
+// all. The old query joined through `branch` anyway (`from branch b,
+// business biz where b.id = $1`) with no real relationship between the two
+// tables -- worked by accident whenever a customer happened to have a real
+// branch_id, but pomodoro (like most single-location businesses -- branch
+// rows are largely unused outside real multi-branch setups, see
+// hazy-hugging-seahorse.md) has ZERO rows in `branch` and a null
+// customer.branch_id, so `where b.id = $1` matched nothing, this returned
+// {}, and the page silently fell back to its plain no-photo header with no
+// business name -- not a missing photo, a query that could never find one.
+export async function resolveMenuBranding() {
   const { rows } = await pool.query(
-    `select biz.name as business_name, md5(biz.cover_photo_data_url) as cover_photo_version
-     from branch b, business biz
-     where b.id = $1`,
-    [branchId]
+    `select name as business_name, md5(cover_photo_data_url) as cover_photo_version from business limit 1`
   );
   return rows[0] || {};
 }

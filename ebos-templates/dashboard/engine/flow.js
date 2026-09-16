@@ -1048,15 +1048,23 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
               return false;
             });
           }
-          // Found live: this used to call fieldPrompt('items', ...)
-          // unconditionally, which -- whenever there's no menu photo either
-          // -- falls back to naming every item as text. That ran even when
-          // the button above had just succeeded, so a customer got the
-          // button AND a full text list of the same items in the same
-          // turn. The button already covers "here's what's available"
-          // once it's actually sent; only fall back to fieldPrompt's own
-          // text-list behaviour when it didn't.
-          await send(catalogShown ? 'What would you like to order?' : await fieldPrompt('items', 'What would you like to order?', order.branch_id), 'items_menu_shown');
+          // Found live, 2026-09-16: "why is bot sending me 2 text? the text
+          // with menu is meant to contain the whole text" -- the fix above
+          // (only 2026-09-10's note) stopped the full text ITEM LIST from
+          // duplicating the button, but still sent a second, shorter
+          // message ("What would you like to order?") right after every
+          // time the button itself succeeded -- genuinely redundant, since
+          // sendWebMenuLink's own body text ("Here's our menu, take a look
+          // and let me know what you'd like.") already asks exactly that.
+          // Only send anything more when the button DIDN'T go out --
+          // Instagram (no CTA-URL button type) or a real send failure --
+          // where fieldPrompt's text listing is the only way the customer
+          // gets to see the menu at all.
+          if (!catalogShown) {
+            await send(await fieldPrompt('items', 'What would you like to order?', order.branch_id), 'items_menu_shown');
+          } else {
+            await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[covered by menu button above, no separate text sent]', trigger: 'items_menu_shown', processed: true });
+          }
         }
         return;
       }
