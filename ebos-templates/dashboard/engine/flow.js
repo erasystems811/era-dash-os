@@ -2199,8 +2199,16 @@ async function handleFulfilmentChange(customer, order, newType) {
   // confirm_payment -- payment instructions already went out once for the
   // old fulfilment/total, so this has to redo the fee estimate and re-send
   // fresh instructions, not just silently update a number nobody sees.
+  //
+  // Chidera, 2026-09-16: "when i switch to delivery why did it send me 2
+  // messages of what is your delivery address" -- this used to ask for the
+  // address itself right here, then immediately call handleCollectFulfilment
+  // below, which asks for it AGAIN on its own (same as the confirm_order
+  // branch above already relies on it doing). One plain "switching"
+  // acknowledgement, same shape as that branch, and let
+  // handleCollectFulfilment ask exactly once.
   if (newType === 'delivery' && !customer.address) {
-    await reply(customer, `Got it, switching to delivery. What's the delivery address?`);
+    await reply(customer, `Got it, switching to delivery.`);
     await handleCollectFulfilment(customer, order, null);
     return;
   }
