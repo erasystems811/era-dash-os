@@ -206,13 +206,45 @@ a:hover {
   font-size: 12px;
   font-weight: 700;
 }
-.sidebar .brand small {
+/* The business name is the headline here, EBOS is just the mark next to
+   it (Chidera's call, 2026-09-16: "write the name in a designed fine way
+   na. not like a text") -- plain inherited bold-16px read as an
+   afterthought label, not a wordmark. Bumped weight/size/tracking for
+   real presence, capped to a max-width with an ellipsis since a business
+   name is arbitrary-length client data, not a fixed short word like
+   "EBOS" was. */
+.sidebar .brand-name {
   display: block;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+.sidebar .brand small {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-family: var(--font-body);
   font-weight: 400;
   color: #94a3b8;
   font-size: 12px;
-  margin-top: 2px;
+  margin-top: 3px;
+}
+/* A small gold dot ties the tagline back to the brand-mark's own gold
+   fill, instead of the small print just floating there as plain grey
+   text with nothing connecting it to the rest of the mark. */
+.sidebar .brand small::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--gold);
+  flex-shrink: 0;
 }
 
 .sidebar .scope-switcher {
@@ -947,8 +979,17 @@ label {
     border-radius: 8px;
   }
   .mobile-header-brand {
-    font-weight: 700;
-    font-size: 15px;
+    font-weight: 800;
+    font-size: 16px;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* flex-shrink alone won't let ellipsis kick in -- a flex item's
+       default min-width is auto (its content's natural width), so it
+       never actually shrinks below that without this. */
+    flex: 1;
+    min-width: 0;
   }
 
   .nav-backdrop {

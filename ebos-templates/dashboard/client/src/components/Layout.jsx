@@ -160,7 +160,9 @@ export default function Layout() {
         <div className="brand">
           <span className="brand-mark">EB</span>
           <div>
-            {businessName || 'EBOS'}
+            <span className="brand-name" title={businessName || 'EBOS'}>
+              {businessName || 'EBOS'}
+            </span>
             <small>Powered by ERA Systems</small>
           </div>
         </div>
