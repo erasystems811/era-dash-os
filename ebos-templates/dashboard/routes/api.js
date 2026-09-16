@@ -640,6 +640,34 @@ router.post('/change-password', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Same security bar as change-password above (current password required) --
+// added 2026-09-16 because there was previously no way to change a login
+// email at all after a business was created (only set once, at build time,
+// via the workstation's owner-email field). Real need: a business is
+// sometimes onboarded before the real owner's email is known (a
+// placeholder used at build time), or ownership changes hands later.
+router.post('/change-email', async (req, res) => {
+  const { currentPassword, newEmail } = req.body;
+  if (!currentPassword || !newEmail) return res.status(400).json({ error: 'Current password and new email are required.' });
+
+  const { rows } = await pool.query('select * from staff where id = $1', [req.staff.id]);
+  const staff = rows[0];
+  if (!staff || !(await verifyPassword(staff, currentPassword))) {
+    return res.status(401).json({ error: 'Current password is incorrect.' });
+  }
+
+  try {
+    await pool.query('update staff set email = $1 where id = $2', [newEmail, staff.id]);
+  } catch (err) {
+    // staff.email has a unique constraint -- the only realistic way this
+    // update fails is another account on this same business already using
+    // it, not a generic DB error worth a 500.
+    if (err.code === '23505') return res.status(409).json({ error: 'Another account already uses that email.' });
+    throw err;
+  }
+  res.json({ ok: true });
+});
+
 // --- Orders ---------------------------------------------------------------
 
 router.get('/orders', async (req, res) => {

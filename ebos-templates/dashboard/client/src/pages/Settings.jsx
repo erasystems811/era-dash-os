@@ -13,6 +13,10 @@ export default function Settings() {
   const [newPassword, setNewPassword] = useState('');
   const [passwordError, setPasswordError] = useState(null);
   const [passwordSaved, setPasswordSaved] = useState(false);
+  const [currentPasswordForEmail, setCurrentPasswordForEmail] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [emailError, setEmailError] = useState(null);
+  const [emailSaved, setEmailSaved] = useState(false);
   const [instagramStatus, setInstagramStatus] = useState(null);
   const [waProfile, setWaProfile] = useState(null);
   const [waSaved, setWaSaved] = useState(false);
@@ -154,6 +158,20 @@ export default function Settings() {
       setPasswordSaved(true);
     } catch (err) {
       setPasswordError(err.message);
+    }
+  }
+
+  async function changeEmail(e) {
+    e.preventDefault();
+    setEmailError(null);
+    setEmailSaved(false);
+    try {
+      await api.post('/change-email', { currentPassword: currentPasswordForEmail, newEmail });
+      setCurrentPasswordForEmail('');
+      setNewEmail('');
+      setEmailSaved(true);
+    } catch (err) {
+      setEmailError(err.message);
     }
   }
 
@@ -390,6 +408,26 @@ export default function Settings() {
             </div>
           </div>
           <button type="submit">Change password</button>
+        </form>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Change your login email</h3>
+        <p className="hint">Useful if the account was set up with a placeholder email, or ownership is handing over to someone else.</p>
+        {emailError && <div className="error-banner">{emailError}</div>}
+        {emailSaved && <div className="success-banner">Email changed. Use the new email next time you log in.</div>}
+        <form onSubmit={changeEmail}>
+          <div className="form-row">
+            <div className="field">
+              <label>Current password</label>
+              <input type="password" value={currentPasswordForEmail} onChange={(e) => setCurrentPasswordForEmail(e.target.value)} required />
+            </div>
+            <div className="field">
+              <label>New email</label>
+              <input type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} required />
+            </div>
+          </div>
+          <button type="submit">Change email</button>
         </form>
       </div>
 
