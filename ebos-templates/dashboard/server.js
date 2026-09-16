@@ -23,6 +23,7 @@ import { router as riderApiRoutes } from './routes/rider.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
+import { router as moniepointWebhook } from './engine/webhook-moniepoint.js';
 import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
@@ -51,6 +52,10 @@ app.use(express.urlencoded({ extended: false, limit: '20mb' }));
 // Public webhooks -- Meta and Paystack call these directly, no session.
 app.use('/webhook/whatsapp', whatsappWebhook);
 app.use('/webhook/instagram', instagramWebhook);
+// Moniepoint calls this directly too -- authenticated with Basic auth
+// checked inside the route itself, not a raw-body signature, so it's fine
+// below the global express.json() parser.
+app.use('/webhook/moniepoint', moniepointWebhook);
 // Public documents -- the invoice/receipt link sent to a customer over
 // WhatsApp has to open without a dashboard login.
 app.use('/documents', documentRoutes);

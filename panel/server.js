@@ -439,7 +439,7 @@ function getEbosClients(registry) {
 // exactly the thing this is supposed to surface, not something to hide
 // behind a failed Promise.all.
 async function ebosBusinessStatus(client, hetznerToken) {
-  const [up, usage, serverCost, monitor, deliveryConfig, voiceConfig, dineinConfig, crmConfig] = await Promise.all([
+  const [up, usage, serverCost, monitor, deliveryConfig, voiceConfig, dineinConfig, crmConfig, posSyncConfig] = await Promise.all([
     fetch(`https://${client.subdomain}/healthz`, { signal: AbortSignal.timeout(6000) })
       .then((res) => res.ok)
       .catch(() => false),
@@ -501,6 +501,14 @@ async function ebosBusinessStatus(client, hetznerToken) {
     })
       .then((res) => (res.ok ? res.json() : null))
       .catch(() => null),
+    // POS sync add-on (real Moniepoint terminal transactions) -- same shape
+    // as crmConfig above. Added 2026-09-16.
+    fetch(`https://${client.subdomain}/api/pos-sync-config`, {
+      headers: { 'x-era-admin-token': client.ebosAdminToken || '' },
+      signal: AbortSignal.timeout(6000),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .catch(() => null),
   ]);
   // codeErrorCount only -- real bot exceptions + AI/API failures, not
   // ordinary business activity (handovers, kb misses, unparsed answers).
@@ -522,6 +530,8 @@ async function ebosBusinessStatus(client, hetznerToken) {
     voiceEnabled: Boolean(voiceConfig?.enabled),
     dineinEnabled: Boolean(dineinConfig?.enabled),
     crmEnabled: Boolean(crmConfig?.enabled),
+    posSyncEnabled: Boolean(posSyncConfig?.enabled),
+    posSyncConnected: Boolean(posSyncConfig?.hasWebhookCredentials),
     offboarded: Boolean(client.offboarded),
     concernCount1h,
     concernBreakdown1h: monitor,
@@ -589,8 +599,8 @@ function businessesSection(ebosClients) {
   <div id="ebosTotals" style="margin:10px 0;font-size:14px;">Loading totals...</div>
   <button onclick="pushUpdate(null, true)" title="Rolls out the current template/dashboard code to every EBOS business at once -- secrets are read back from each server and reused, never regenerated.">Push code update to all EBOS businesses</button>
   <table>
-    <tr><th>Name</th><th>Status</th><th>AI cost (this month)</th><th>Server cost (monthly)</th><th title="Real bot errors and AI/API failures in the last hour -- not handovers or normal business activity, just signs the engine itself is broken.">Code errors (1h)</th><th>Chowdeck delivery</th><th>Own-rider delivery</th><th>Voice ordering</th><th>Dine-in</th><th>Customers</th><th>Last code push</th></tr>
-    <tbody id="ebosStatusRows"><tr><td colspan="11">Loading...</td></tr></tbody>
+    <tr><th>Name</th><th>Status</th><th>AI cost (this month)</th><th>Server cost (monthly)</th><th title="Real bot errors and AI/API failures in the last hour -- not handovers or normal business activity, just signs the engine itself is broken.">Code errors (1h)</th><th>Chowdeck delivery</th><th>Own-rider delivery</th><th>Voice ordering</th><th>Dine-in</th><th>Customers</th><th>POS</th><th>Last code push</th></tr>
+    <tbody id="ebosStatusRows"><tr><td colspan="12">Loading...</td></tr></tbody>
   </table>
 
   <p><a href="/monitoring">Open Bot Monitoring &rarr;</a> &mdash; the full live feed across every business, on its own page so this one stays fast as you add more businesses. "Code errors (1h)" above is still the quick at-a-glance number.</p>
@@ -1171,6 +1181,17 @@ async function toggleCrmMode(name, enabled) {
   loadEbosStatus();
 }
 
+async function togglePosSyncMode(name, enabled) {
+  if (!confirm((enabled ? 'Enable' : 'Disable') + ' POS sync for ' + name + '?')) {
+    loadEbosStatus();
+    return;
+  }
+  const res = await fetch('/api/ebos/pos-sync-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name, enabled }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); loadEbosStatus(); return; }
+  loadEbosStatus();
+}
+
 async function loadEbosStatus() {
   const el = document.getElementById('ebosStatusRows');
   if (!el) return;
@@ -1194,14 +1215,15 @@ async function loadEbosStatus() {
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.voiceEnabled ? 'checked' : '') + ' onchange="toggleVoiceMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.voiceEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.dineinEnabled ? 'checked' : '') + ' onchange="toggleDineinMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.dineinEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.crmEnabled ? 'checked' : '') + ' onchange="toggleCrmMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.crmEnabled ? 'on' : 'off') + '</label></td>'
+          + '<td><label><input type="checkbox" style="width:auto" ' + (b.posSyncEnabled ? 'checked' : '') + ' onchange="togglePosSyncMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.posSyncEnabled ? 'on' : 'off') + '</label>' + (b.posSyncEnabled && !b.posSyncConnected ? ' <span class="danger" title="No Moniepoint webhook credentials set yet -- run scripts/add-pos-sync.mjs once the client has real API access.">(not connected)</span>' : '') + '</td>'
           + '<td>' + (b.lastPushedAt ? new Date(b.lastPushedAt).toLocaleString() : 'never') + '</td>'
           + '</tr>'
         ).join('')
-      : '<tr><td colspan="11">No businesses yet.</td></tr>';
+      : '<tr><td colspan="12">No businesses yet.</td></tr>';
   } catch (err) {
     const totalsEl = document.getElementById('ebosTotals');
     if (totalsEl) totalsEl.textContent = '';
-    el.innerHTML = '<tr><td colspan="11">Error: ' + escClient(err.message) + '</td></tr>';
+    el.innerHTML = '<tr><td colspan="12">Error: ' + escClient(err.message) + '</td></tr>';
   }
 }
 loadEbosStatus();
@@ -1723,6 +1745,20 @@ app.post('/api/ebos/crm-mode', async (req, res) => {
     const { client: name, enabled } = req.body;
     const client = ebosClientOrThrow(name);
     res.json(await callBusinessApi(client, '/api/crm-config', 'POST', { enabled: Boolean(enabled) }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// POS sync add-on -- same shape as crm-mode just above. Turning this on
+// before scripts/add-pos-sync.mjs has actually registered real Moniepoint
+// webhook credentials just leaves the tab empty (no transactions synced
+// yet) -- see loadEbosStatus's "(not connected)" flag for that case.
+app.post('/api/ebos/pos-sync-mode', async (req, res) => {
+  try {
+    const { client: name, enabled } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/pos-sync-config', 'POST', { enabled: Boolean(enabled) }));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }

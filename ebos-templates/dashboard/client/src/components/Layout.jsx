@@ -71,6 +71,9 @@ export default function Layout() {
   // Customer database (CRM) add-on -- same "genuinely inert while off"
   // rule as the other add-ons above.
   const [crmEnabled, setCrmEnabled] = useState(false);
+  // POS sync add-on (real Moniepoint terminal transactions) -- same
+  // "genuinely inert while off" rule as the other add-ons above.
+  const [posEnabled, setPosEnabled] = useState(false);
   const location = useLocation();
   // Zero DOM below one branch, not just hidden -- a single-location
   // business must not be able to tell this feature exists at all. Also
@@ -85,6 +88,7 @@ export default function Layout() {
     ...(voiceEnabled ? [{ to: '/voice', label: 'Voice' }] : []),
     ...(dineinEnabled ? [{ to: '/dinein', label: 'Dine-in' }] : []),
     ...(crmEnabled ? [{ to: '/customers', label: 'Customers' }] : []),
+    ...(posEnabled ? [{ to: '/pos', label: 'POS' }] : []),
   ];
   // Branches is hidden (not just filtered) for a branch-locked manager --
   // closes a real gap that used to exist: the page itself used to show
@@ -119,6 +123,7 @@ export default function Layout() {
     api.get('/voice-config').then((c) => setVoiceEnabled(Boolean(c?.enabled)));
     api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
     api.get('/crm-config').then((c) => setCrmEnabled(Boolean(c?.enabled)));
+    api.get('/pos-sync-config').then((c) => setPosEnabled(Boolean(c?.enabled)));
   }, []);
 
   // A route change is the clearest signal the user picked something on

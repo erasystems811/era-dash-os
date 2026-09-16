@@ -483,6 +483,53 @@ router.post('/crm-config', requireEraAdmin, async (req, res) => {
   res.json(rows[0]);
 });
 
+// POS sync add-on (Chidera, 2026-09-16): pulls a client's own Moniepoint POS
+// terminal sales into the dashboard as a real transaction list -- separate
+// concern from crm-config just above, same dual-auth/ERA-switches-it shape.
+// Credentials (webhook_username/password) are only ever set by
+// scripts/add-pos-sync.mjs, never echoed back here.
+router.get('/pos-sync-config', async (req, res) => {
+  const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
+  if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
+  const { rows } = await pool.query(
+    `select business_id, enabled, provider, webhook_username is not null as "hasWebhookCredentials", connected_at
+     from pos_sync_config limit 1`
+  );
+  res.json(rows[0] || { enabled: false, provider: 'moniepoint', hasWebhookCredentials: false, connected_at: null });
+});
+
+router.post('/pos-sync-config', requireEraAdmin, async (req, res) => {
+  const { enabled } = req.body;
+  const { rows } = await pool.query(
+    `insert into pos_sync_config (business_id, enabled) values ((select id from business limit 1), $1)
+     on conflict (business_id) do update set enabled = excluded.enabled returning *`,
+    [enabled]
+  );
+  res.json(rows[0]);
+});
+
+// Separate from the toggle above on purpose -- only scripts/add-pos-sync.mjs
+// (run once a client's real Moniepoint API access is in hand) ever calls
+// this, so a plain enable/disable click through the panel can never
+// accidentally wipe stored credentials by omitting them from the body.
+router.post('/pos-sync-config/credentials', requireEraAdmin, async (req, res) => {
+  const { provider, apiKey, webhookUsername, webhookPassword } = req.body;
+  if (!webhookUsername || !webhookPassword) return res.status(400).json({ error: 'webhookUsername and webhookPassword are required.' });
+  const { rows } = await pool.query(
+    `insert into pos_sync_config (business_id, enabled, provider, api_key, webhook_username, webhook_password, connected_at)
+     values ((select id from business limit 1), true, $1, $2, $3, $4, now())
+     on conflict (business_id) do update set
+       provider = excluded.provider, api_key = excluded.api_key,
+       webhook_username = excluded.webhook_username, webhook_password = excluded.webhook_password,
+       enabled = true, connected_at = now()
+     returning business_id, enabled, provider, connected_at`,
+    [provider || 'moniepoint', apiKey || null, webhookUsername, webhookPassword]
+  );
+  res.json(rows[0]);
+});
+
+
 // Both below are ERA control-plane calls, same requireEraAdmin gate as
 // delivery-config/voice-config/dinein-config just above -- and both must
 // stay above the router.use(requireStaffApi) line for the same reason
@@ -1671,6 +1718,32 @@ router.get('/customers/export', requireFullAccessApi, async (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="customers.csv"');
   res.send(header + body);
+});
+
+// POS sync add-on's own data (see pos-sync-config above) -- every row
+// engine/webhook-moniepoint.js has stored from a client's real Moniepoint
+// terminal, newest first. Not joined to customers: Moniepoint's docs never
+// confirmed a transaction carries customer identity, only amount/reference.
+router.get('/pos-transactions', requireFullAccessApi, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  const { rows } = await pool.query(
+    `select id, provider, provider_reference, amount, occurred_at from pos_transaction
+     order by occurred_at desc limit $1`,
+    [limit]
+  );
+  res.json(rows);
+});
+
+router.get('/pos-transactions/stats', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(`
+    select
+      coalesce(sum(amount), 0) as "totalRevenue",
+      count(*)::int as "totalTransactions",
+      coalesce(sum(amount) filter (where occurred_at >= date_trunc('day', now())), 0) as "todayRevenue",
+      count(*) filter (where occurred_at >= date_trunc('day', now()))::int as "todayTransactions"
+    from pos_transaction
+  `);
+  res.json(rows[0]);
 });
 
 // Staff reaching a phone number with no existing thread yet -- just opens
