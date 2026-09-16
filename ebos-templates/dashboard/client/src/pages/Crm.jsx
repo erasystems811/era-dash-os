@@ -84,7 +84,7 @@ export default function Crm() {
         </select>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 20 }}>
+      <div className="crm-stats-grid">
         <StatCard
           iconBg="var(--success-soft)"
           iconColor="var(--success)"
@@ -142,7 +142,7 @@ export default function Crm() {
         />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, alignItems: 'stretch', marginBottom: 20 }}>
+      <div className="crm-charts-grid">
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Customer Overview</h3>
           <p className="hint" style={{ marginTop: -8 }}>{chartSubtitle}</p>

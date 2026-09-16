@@ -343,6 +343,45 @@ a:hover {
   margin-bottom: 20px;
 }
 
+/* Shared by CRM's own stat row and Feedback's (StatCard.jsx, extracted
+   2026-09-16 specifically so both stay identical). Base sizing lives here
+   now instead of inline styles so the mobile block below can actually
+   shrink it -- an inline style attribute always wins over a class, so a
+   media query could never have overridden width/height/font-size while
+   they stayed inline. */
+.stat-card {
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.stat-card-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.stat-card-value {
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.crm-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.crm-charts-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+  align-items: stretch;
+  margin-bottom: 20px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1129,6 +1168,36 @@ label {
 @keyframes loading-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* CRM's own mobile layout (Chidera, 2026-09-16: "on mobile you can reduce
+   the 4 cards and make customer overview and customer segment sit well
+   and take space since they show something"). The 4 stat cards were each
+   going full-width (auto-fit's 200px minimum doesn't leave room for 2 on
+   a phone), stacking into a tall, mostly-whitespace column before a
+   visitor ever reaches the actual charts -- 2-up plus a more compact card
+   fixes that. The charts, meanwhile, were stuck at a fixed 2fr/1fr split
+   even on a narrow screen, squeezing two real charts into slivers instead
+   of letting each have the full width it actually needs to be readable. */
+@media (max-width: 860px) {
+  .crm-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 14px;
+    gap: 6px;
+  }
+  .stat-card-icon {
+    width: 30px;
+    height: 30px;
+  }
+  .stat-card-value {
+    font-size: 20px;
+  }
+  .crm-charts-grid {
+    grid-template-columns: 1fr;
   }
 }
 

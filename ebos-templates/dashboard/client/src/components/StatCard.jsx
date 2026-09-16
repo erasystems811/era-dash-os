@@ -16,12 +16,12 @@ export function Delta({ pct }) {
 
 export default function StatCard({ iconBg, iconColor, icon, label, value, delta }) {
   return (
-    <div className="card" style={{ marginBottom: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ width: 40, height: 40, borderRadius: '50%', background: iconBg, color: iconColor, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+    <div className="card stat-card">
+      <div className="stat-card-icon" style={{ background: iconBg, color: iconColor }}>
         {icon}
       </div>
       <div className="hint" style={{ margin: 0 }}>{label}</div>
-      <div style={{ fontSize: 26, fontWeight: 700 }}>{value}</div>
+      <div className="stat-card-value">{value}</div>
       {delta}
     </div>
   );
