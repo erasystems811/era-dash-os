@@ -24,33 +24,17 @@ export default function Branches() {
   const editable = canEdit(staff);
   const scopeCtx = useScope();
   const [branches, setBranches] = useState(null);
-  const [form, setForm] = useState(EMPTY);
-  const [error, setError] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(EMPTY);
 
   function load() {
     api.get('/branches').then(setBranches);
     // The sidebar's scope switcher (Layout.jsx) has its own copy of this
-    // same list -- without this, adding a business's first or second
-    // branch here would need a hard page reload before the switcher
-    // appeared, which is exactly the "no downtime" this page exists to
-    // guarantee for everything else.
+    // same list -- kept in sync here so an ERA-added branch (or an edit to
+    // an existing one) shows up without a hard reload.
     scopeCtx?.refreshBranches();
   }
   useEffect(load, []);
-
-  async function add(e) {
-    e.preventDefault();
-    setError(null);
-    try {
-      await api.post('/branches', form);
-      setForm(EMPTY);
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
-  }
 
   async function remove(id) {
     await api.delete(`/branches/${id}`);
@@ -204,43 +188,12 @@ export default function Branches() {
         {!branches.length && <div className="empty-state">No branches added -- this business is treated as a single location.</div>}
       </div>
 
-      {editable && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>Add branch</h3>
-          {error && <div className="error-banner">{error}</div>}
-          <form onSubmit={add}>
-            <div className="form-row">
-              <div className="field">
-                <label>Name</label>
-                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Lugbe branch" required />
-              </div>
-              <div className="field">
-                <label>Phone number</label>
-                <input value={form.phone_number} onChange={(e) => setForm({ ...form, phone_number: e.target.value })} />
-              </div>
-            </div>
-            <div className="field">
-              <label>Address</label>
-              <input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} required />
-            </div>
-            <div className="form-row">
-              <div className="field">
-                <label>Area</label>
-                <input
-                  value={form.area}
-                  onChange={(e) => setForm({ ...form, area: e.target.value })}
-                  placeholder="Used as the delivery-distance starting point"
-                />
-              </div>
-              <div className="field">
-                <label>Operating hours</label>
-                <input value={form.operating_hours} onChange={(e) => setForm({ ...form, operating_hours: e.target.value })} />
-              </div>
-            </div>
-            <button type="submit">Add branch</button>
-          </form>
-        </div>
-      )}
+      <div className="card">
+        <p className="hint">
+          Need a new branch added? Reach out to ERA Systems -- adding a location involves server routing and staff
+          setup on our side, so it isn't a self-service form here.
+        </p>
+      </div>
     </div>
   );
 }

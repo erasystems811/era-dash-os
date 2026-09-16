@@ -71,11 +71,17 @@ async function openSessionFor(table) {
 // routes/menu-page.js (the non-table, regular-ordering version of this
 // same page) uses the exact same query.
 export async function menuForBranch(branchId) {
+  // position preserves the real menu's own layout (see routes/api.js's
+  // /catalogue and engine/fields.js's resolveMenu, both fixed the same
+  // way, 2026-09-16) -- this is a third, separate query that had the same
+  // alphabetical-fallback bug: Chidera, testing pomodoro's real web menu,
+  // "why is drinks frist on the website tabs" -- category name order
+  // wouldn't put Drinks first anywhere but alphabetically.
   const { rows } = await pool.query(
     `select id, name, description, price, category, image_data_url, availability
      from product
      where (branch_id = $1 or branch_id is null) and import_status is distinct from 'new'
-     order by category nulls last, name`,
+     order by position asc nulls last, category nulls last, name`,
     [branchId]
   );
   return rows;
