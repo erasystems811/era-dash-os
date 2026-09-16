@@ -2094,6 +2094,18 @@ app.post('/api/add-whatsapp', (req, res) => {
   res.json({ jobId });
 });
 
+// Self-service fix for "connected WhatsApp but no messages ever arrive" --
+// re-runs just the Meta app subscription (resubscribe-whatsapp.mjs), safe
+// to click any time without touching the client's existing phone
+// number/verify-token config. See that script's own comment for why this
+// exists as its own button instead of re-running add-whatsapp.mjs.
+app.post('/api/resubscribe-whatsapp', (req, res) => {
+  const { client } = req.body;
+  if (!client) return res.status(400).json({ error: 'client is required' });
+  const jobId = startJob('resubscribe-whatsapp.mjs', [`--client=${client}`]);
+  res.json({ jobId });
+});
+
 app.post('/api/add-instagram', (req, res) => {
   const { client, userId, token, verifyToken } = req.body;
   if (!client || !userId || !token || !verifyToken) return res.status(400).json({ error: 'missing fields' });
