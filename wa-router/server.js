@@ -76,7 +76,16 @@ app.post('/webhook/whatsapp', async (req, res) => {
       for (const change of entry.changes || []) {
         const phoneNumberId = change.value?.metadata?.phone_number_id;
         if (!phoneNumberId) continue;
-        const client = registry.clients.find((c) => c.whatsappPhoneNumberId === phoneNumberId);
+        // A branch's own dedicated number lives in a per-client array
+        // (whatsappBranchPhoneNumberIds, set by the panel's branch-aware
+        // connect flow) since one client can have several -- unlike the
+        // single shared business-level number above. Same client either
+        // way: this router only ever needs to know which SERVER to
+        // forward to, not which branch inside it, so no branchId travels
+        // any further than this lookup.
+        const client = registry.clients.find(
+          (c) => c.whatsappPhoneNumberId === phoneNumberId || (c.whatsappBranchPhoneNumberIds || []).includes(phoneNumberId)
+        );
         if (!client) {
           console.error(`WhatsApp router: no client registered for phone_number_id ${phoneNumberId}`);
           continue;

@@ -75,7 +75,7 @@ router.post('/parse-menu', async (req, res) => {
 });
 
 router.post('/build', (req, res) => {
-  const { businessName, subdomain, size, provider, sharedServerMode, sharedServerIp, business, owner, catalogue, botFields, botStates, knowledgeBase } = req.body;
+  const { businessName, subdomain, size, provider, sharedServerMode, sharedServerIp, business, owner, branches, catalogue, botFields, botStates, knowledgeBase } = req.body;
 
   if (!businessName || !business?.type || !owner?.name || !owner?.email) {
     return res.status(400).json({ error: 'Business name, business type, owner name and owner email are all required before building.' });
@@ -87,7 +87,7 @@ router.post('/build', (req, res) => {
   const seedDir = path.join(os.tmpdir(), 'era-workstation-seeds');
   mkdirSync(seedDir, { recursive: true });
   const seedPath = path.join(seedDir, `${randomUUID()}.json`);
-  writeFileSync(seedPath, JSON.stringify({ business, owner, catalogue, botFields, botStates, knowledgeBase }));
+  writeFileSync(seedPath, JSON.stringify({ business, owner, branches, catalogue, botFields, botStates, knowledgeBase }));
 
   const args = [`--name=${businessName}`, '--template=ebos', `--ebos-seed=${seedPath}`];
   if (subdomain) args.push(`--subdomain=${subdomain}`);

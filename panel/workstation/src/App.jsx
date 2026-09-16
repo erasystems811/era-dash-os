@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import BusinessDetails from './tabs/BusinessDetails.jsx';
+import Branches from './tabs/Branches.jsx';
 import Catalogue from './tabs/Catalogue.jsx';
 import TrainTheBot from './tabs/TrainTheBot.jsx';
 import ConversationFlow from './tabs/ConversationFlow.jsx';
@@ -9,6 +10,7 @@ import { DEFAULT_BOT_STATES, DEFAULT_BOT_FIELDS } from './defaults.js';
 
 const TABS = [
   { key: 'business', label: 'Business details' },
+  { key: 'branches', label: 'Branches' },
   { key: 'catalogue', label: 'Catalogue' },
   { key: 'train', label: 'Train the bot' },
   { key: 'flow', label: 'Conversation flow' },
@@ -42,6 +44,7 @@ export default function App() {
     brand_color: '#111827',
   });
   const [owner, setOwner] = useState({ name: '', email: '' });
+  const [branches, setBranches] = useState([]);
   const [catalogue, setCatalogue] = useState([]);
   // Seeded from the default type (restaurant) up front -- picking a type on
   // the Business details tab only re-seeds on an actual change event, which
@@ -59,6 +62,7 @@ export default function App() {
     sharedServerIp,
     business,
     owner,
+    branches,
     catalogue,
     botFields,
     botStates,
@@ -115,6 +119,7 @@ export default function App() {
             setBotFields={setBotFields}
           />
         )}
+        {tab === 'branches' && <Branches branches={branches} setBranches={setBranches} />}
         {tab === 'catalogue' && <Catalogue catalogue={catalogue} setCatalogue={setCatalogue} businessType={business.type} />}
         {tab === 'train' && (
           <TrainTheBot botFields={botFields} setBotFields={setBotFields} botStates={botStates} knowledgeBase={knowledgeBase} setKnowledgeBase={setKnowledgeBase} />

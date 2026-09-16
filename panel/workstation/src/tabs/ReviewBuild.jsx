@@ -8,6 +8,14 @@ function validate(draft) {
   if (!draft.owner.email) problems.push('Owner email is required (Business details tab).');
   if (!draft.catalogue.length) problems.push('Add at least one catalogue item (Catalogue tab).');
   if (!draft.botFields.length) problems.push('Add at least one question for the bot to ask (Train the bot tab).');
+  // Mirrors branch.name/branch.address's own "not null" constraints in
+  // schema.sql -- catching a blank one here means a bad build fails fast
+  // in the UI, not with a much less legible raw Postgres error deep
+  // inside create-client.mjs's SQL apply step.
+  (draft.branches || []).forEach((b, i) => {
+    if (!b.name) problems.push(`Branch ${i + 1} needs a name (Branches tab).`);
+    if (!b.address) problems.push(`Branch ${i + 1} needs an address (Branches tab).`);
+  });
   return problems;
 }
 
@@ -66,7 +74,15 @@ export default function ReviewBuild({ draft }) {
           <p>
             Owner: {draft.owner.name || '—'} ({draft.owner.email || '—'})
           </p>
-          <p>{draft.catalogue.length} catalogue item(s), {draft.botFields.length} question(s) trained, {draft.knowledgeBase?.length || 0} knowledge base entries.</p>
+          <p>
+            {draft.catalogue.length} catalogue item(s), {draft.botFields.length} question(s) trained, {draft.knowledgeBase?.length || 0}{' '}
+            knowledge base entries.
+          </p>
+          <p>
+            {draft.branches?.length
+              ? `${draft.branches.length} branch(es), primary: ${draft.branches[0].name}.`
+              : 'No extra branches -- single-location business.'}
+          </p>
         </div>
       )}
 

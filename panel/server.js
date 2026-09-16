@@ -52,7 +52,7 @@ function findClientByConnectToken(registry, token) {
   return client;
 }
 
-app.get('/connect/:token', (req, res) => {
+app.get('/connect/:token', async (req, res) => {
   const client = findClientByConnectToken(loadRegistry(), req.params.token);
   if (!client) return res.status(404).send('This connection link is invalid or has expired. Ask ERA Systems for a new one.');
   let secrets;
@@ -64,7 +64,20 @@ app.get('/connect/:token', (req, res) => {
   if (!secrets.META_APP_ID || !secrets.META_LOGIN_CONFIG_ID) {
     return res.status(500).send('WhatsApp connect is not configured yet on this server. Ask ERA Systems.');
   }
-  res.send(connectPage(client, req.params.token, secrets.META_APP_ID, secrets.META_LOGIN_CONFIG_ID));
+  // A business with real branch rows gets a picker so the person
+  // connecting can attach this number to one specific location instead
+  // of the whole business (Chidera's ask, 2026-09-16). Swallowed to []
+  // rather than surfaced as an error: a business built before the
+  // Branches tab existed, or one this call can't reach for any reason,
+  // should just fall back to today's exact single-number flow, not block
+  // the connect page from loading at all.
+  let branches = [];
+  try {
+    branches = await callBusinessApi(client, '/api/branches/for-connect');
+  } catch {
+    branches = [];
+  }
+  res.send(connectPage(client, req.params.token, secrets.META_APP_ID, secrets.META_LOGIN_CONFIG_ID, branches));
 });
 
 // Everything Embedded Signup hands back arrives as a message event in the
@@ -77,7 +90,7 @@ app.post('/api/connect/:token/complete', async (req, res) => {
   const client = findClientByConnectToken(registry, req.params.token);
   if (!client) return res.status(404).json({ error: 'This connection link is invalid or has expired.' });
 
-  const { code, wabaId, phoneNumberId } = req.body || {};
+  const { code, wabaId, phoneNumberId, branchId } = req.body || {};
   if (!code || !wabaId || !phoneNumberId) return res.status(400).json({ error: 'code, wabaId and phoneNumberId are required.' });
 
   let secrets;
@@ -115,6 +128,36 @@ app.post('/api/connect/:token/complete', async (req, res) => {
       throw new Error(subData.error?.message || `WABA subscription failed (${subRes.status})`);
     }
 
+    const verifyToken = crypto.randomBytes(16).toString('hex');
+
+    // A specific branch was picked on the connect page -- write straight
+    // into that business's own branch_channel table (a plain, synchronous
+    // Postgres call, no SSH/.env/docker restart involved) instead of
+    // running add-whatsapp.mjs at all, which only ever knows how to patch
+    // ONE shared number for a whole deployment. Chidera's ask, 2026-09-16.
+    if (branchId) {
+      try {
+        await callBusinessApi(client, '/api/branch-channels/whatsapp', 'POST', { branchId, phoneNumberId, accessToken, verifyToken });
+      } catch (err) {
+        return res.status(502).json({ error: err.message });
+      }
+      // upsertClient does a shallow merge (scripts/lib/registry.mjs) --
+      // passing only the new id would silently drop every branch number
+      // connected before this one, so the existing array has to be read
+      // and appended to, never replaced.
+      const r = loadRegistry();
+      const existing = findClient(r, client.name);
+      const ids = new Set(existing?.whatsappBranchPhoneNumberIds || []);
+      ids.add(phoneNumberId);
+      upsertClient(r, { name: client.name, whatsappBranchPhoneNumberIds: [...ids] });
+      saveRegistry(r);
+      // The connect token is deliberately NOT cleared here (unlike the
+      // business-level path below) -- a multi-branch client legitimately
+      // reuses this same link once per branch, so it should stay valid
+      // until its own 24h TTL, not die after the first branch connects.
+      return res.json({ ok: true });
+    }
+
     // Reuses the exact same provisioning add-whatsapp.mjs already does for
     // a manually-typed number (client .env + restart + registry + outreach
     // template) -- this flow only changes where the three Meta values come
@@ -123,7 +166,6 @@ app.post('/api/connect/:token/complete', async (req, res) => {
     // above (WEBHOOK_VERIFY_TOKEN), never a per-client one, so this value
     // only fills add-whatsapp.mjs's required arg / a client .env field kept
     // for backward compatibility with the pre-router architecture.
-    const verifyToken = crypto.randomBytes(16).toString('hex');
     const jobId = startJob(
       'add-whatsapp.mjs',
       [`--client=${client.name}`, `--token=${accessToken}`, `--phone-id=${phoneNumberId}`, `--verify-token=${verifyToken}`, `--waba-id=${wabaId}`],
@@ -190,7 +232,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
       for (const change of entry.changes || []) {
         const phoneNumberId = change.value?.metadata?.phone_number_id;
         if (!phoneNumberId) continue;
-        const client = registry.clients.find((c) => c.whatsappPhoneNumberId === phoneNumberId);
+        // A branch's own dedicated number lives in a per-client array
+        // (whatsappBranchPhoneNumberIds, set by the branch-aware connect
+        // flow below) since one client can have several -- unlike the
+        // single shared business-level number above. Kept in sync with
+        // wa-router/server.js's own copy of this same match, which is the
+        // one actually load-bearing for live traffic (see that file's own
+        // header comment) -- this copy exists for whatever still reaches
+        // this box directly.
+        const client = registry.clients.find(
+          (c) => c.whatsappPhoneNumberId === phoneNumberId || (c.whatsappBranchPhoneNumberIds || []).includes(phoneNumberId)
+        );
         if (!client) {
           console.error(`WhatsApp router: no client registered for phone_number_id ${phoneNumberId}`);
           continue;
@@ -237,8 +289,18 @@ function esc(value) {
 // purpose, to stay out of that trap entirely rather than relying on
 // getting every escape right -- see scripts/verify-panel-script.mjs, which
 // checks this function's rendered output too.
-function connectPage(client, token, appId, configId) {
+function connectPage(client, token, appId, configId, branches = []) {
   const name = esc(client.displayName || client.name);
+  // A single-location business (or one built before the Branches tab
+  // existed) sees exactly today's page, no dropdown at all -- zero
+  // behavior change for the common case.
+  const branchPicker = branches.length
+    ? `<label for="branchSelect" style="display:block; font-size:14px; color:#444; margin-top:16px;">Which location is this number for?</label>
+  <select id="branchSelect" style="width:100%; padding:10px; font-size:15px; border-radius:8px; border:1px solid #ccc; margin-top:6px;">
+    <option value="">Whole business (shared number)</option>
+    ${branches.map((b) => `<option value="${esc(b.id)}">${esc(b.name)}${b.is_primary ? ' (primary)' : ''}${b.area ? ' -- ' + esc(b.area) : ''}</option>`).join('\n    ')}
+  </select>`
+    : '';
   return `<!doctype html>
 <html>
 <head>
@@ -259,6 +321,7 @@ function connectPage(client, token, appId, configId) {
 <div class="card">
   <h1>Connect WhatsApp for ${name}</h1>
   <p>Sign in below with the Facebook account that manages this business WhatsApp. You will keep using your WhatsApp Business App exactly as it is today -- this only connects it to ERA Systems, it does not take it over or replace it.</p>
+  ${branchPicker}
   <button id="connectBtn">Connect WhatsApp</button>
   <div id="status"></div>
 </div>
@@ -316,10 +379,12 @@ function connectPage(client, token, appId, configId) {
         return;
       }
       statusEl.textContent = "Connecting your WhatsApp, this can take a minute, please keep this page open...";
+      var branchSelect = document.getElementById("branchSelect");
+      var branchId = branchSelect && branchSelect.value ? branchSelect.value : null;
       fetch("/api/connect/${token}/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: response.authResponse.code, wabaId: sessionInfo.waba_id, phoneNumberId: sessionInfo.phone_number_id }),
+        body: JSON.stringify({ code: response.authResponse.code, wabaId: sessionInfo.waba_id, phoneNumberId: sessionInfo.phone_number_id, branchId: branchId }),
       })
         .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
         .then(function (result) {
@@ -328,7 +393,14 @@ function connectPage(client, token, appId, configId) {
             connectBtn.disabled = false;
             return;
           }
-          pollJob(result.data.jobId);
+          // The branch-scoped path is a plain, synchronous Postgres write
+          // (no SSH/docker restart involved), so it returns { ok: true }
+          // straight away with no background job to poll for.
+          if (result.data.jobId) {
+            pollJob(result.data.jobId);
+          } else {
+            statusEl.textContent = "WhatsApp connected for this branch. You can close this page now.";
+          }
         })
         .catch(function () {
           statusEl.textContent = "Network error, check your connection and try again.";

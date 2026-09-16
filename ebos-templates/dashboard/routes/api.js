@@ -459,6 +459,60 @@ router.post('/dinein-config', requireEraAdmin, async (req, res) => {
   res.json(rows[0]);
 });
 
+// Both below are ERA control-plane calls, same requireEraAdmin gate as
+// delivery-config/voice-config/dinein-config just above -- and both must
+// stay above the router.use(requireStaffApi) line for the same reason
+// those do. Deliberately NOT the existing GET /branches further down
+// (staff-session-gated with requireFullAccessApi, for a real, unrelated
+// reason) -- this is a narrower, control-plane-only surface for Dash
+// OS's own "connect a branch's WhatsApp number" flow (Chidera's ask,
+// 2026-09-16).
+
+// Powers the picker on Dash OS's /connect/:token page -- just enough to
+// render a dropdown, nothing sensitive.
+router.get('/branches/for-connect', requireEraAdmin, async (req, res) => {
+  const { rows } = await pool.query(
+    `select id, name, area, is_primary from branch where status != 'closed' order by is_primary desc, name`
+  );
+  res.json(rows);
+});
+
+// The actual connect/reconnect write. branch_channel's own unique index
+// on (branch_id, channel) means this MUST be an upsert, never a plain
+// insert -- a branch reconnecting (rotated token, phone swapped) updates
+// its one existing row instead of erroring. The second
+// unique index (phone_number_id, where not null) catches a real mistake
+// -- the same Meta number accidentally pointed at two different branches
+// -- as a clean 409 instead of a raw 500. No encryption on these columns,
+// on purpose: branch_channel's own schema comment already says this
+// matches secrets.env's plaintext trust boundary, and introducing
+// encryption just here would be inconsistent with everything else in
+// this codebase, not more secure.
+router.post('/branch-channels/whatsapp', requireEraAdmin, async (req, res) => {
+  const { branchId, phoneNumberId, accessToken, verifyToken } = req.body || {};
+  if (!branchId || !phoneNumberId || !accessToken || !verifyToken) {
+    return res.status(400).json({ error: 'branchId, phoneNumberId, accessToken and verifyToken are all required.' });
+  }
+  const { rows: branchRows } = await pool.query('select id from branch where id = $1', [branchId]);
+  if (!branchRows.length) return res.status(404).json({ error: 'No branch with that id.' });
+  try {
+    const { rows } = await pool.query(
+      `insert into branch_channel (branch_id, channel, phone_number_id, access_token, verify_token)
+       values ($1, 'whatsapp', $2, $3, $4)
+       on conflict (branch_id, channel)
+       do update set phone_number_id = excluded.phone_number_id, access_token = excluded.access_token, verify_token = excluded.verify_token
+       returning branch_id, channel, phone_number_id`,
+      [branchId, phoneNumberId, accessToken, verifyToken]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505' && err.constraint === 'branch_channel_phone_number_id_idx') {
+      return res.status(409).json({ error: 'This WhatsApp number is already connected to a different branch.' });
+    }
+    throw err;
+  }
+});
+
 router.use(requireStaffApi);
 router.use(scopeToBranch);
 router.use(scopeToWorkArea);
