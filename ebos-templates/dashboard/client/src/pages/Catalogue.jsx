@@ -8,9 +8,21 @@ const UNCATEGORIZED = 'Uncategorized';
 // Groups by category (a bulk import's own section headings, or whatever
 // staff typed manually) so a large catalogue reads as the sections it
 // actually has, not one flat list -- the whole point of carrying category
-// through at all is making a specific item quick to find here. Items
-// without a category ("Uncategorized") sort last, real categories
-// alphabetically, items within a category alphabetically too.
+// through at all is making a specific item quick to find here.
+//
+// Chidera, 2026-09-16: "it only got category right, it scattered the
+// rest... the actual menu should be up as organized" -- this used to
+// re-sort everything alphabetically (both category order and item order
+// within a category), which silently discarded the real menu's own
+// layout. A real menu is rarely alphabetical: a "combos" or "chef's
+// specials" section usually belongs first regardless of its name, and
+// items within a section are ordered on purpose. The API now returns
+// items in `position` order (reading order of the original menu, or
+// append-order for anything added by hand -- see routes/api.js's
+// /catalogue and /catalogue/bulk-import) -- preserve that order here
+// instead of re-sorting it away. Items with no category
+// ("Uncategorized") still sort last regardless of where they first
+// appeared -- there's no "original position" for a catch-all bucket.
 function groupByCategory(items) {
   const groups = new Map();
   for (const item of items) {
@@ -18,11 +30,10 @@ function groupByCategory(items) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(item);
   }
-  for (const list of groups.values()) list.sort((a, b) => a.name.localeCompare(b.name));
   return [...groups.entries()].sort(([a], [b]) => {
     if (a === UNCATEGORIZED) return 1;
     if (b === UNCATEGORIZED) return -1;
-    return a.localeCompare(b);
+    return 0; // keep first-appearance order otherwise -- Array.prototype.sort is stable
   });
 }
 

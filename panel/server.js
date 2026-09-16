@@ -806,6 +806,7 @@ function page(clients, ebosClients) {
     <form id="whatsappForm">
       <label>Meta access token</label><input name="token" required>
       <label>Phone number ID</label><input name="phoneId" required>
+      <label>WhatsApp Business Account ID</label><input name="wabaId" required>
       <label>Webhook verify token</label><input name="verifyToken" required>
       <button type="submit">Add WhatsApp</button>
     </form>
@@ -1017,7 +1018,7 @@ document.getElementById('createForm').addEventListener('submit', (e) => {
 document.getElementById('whatsappForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
-  submitJson('/api/add-whatsapp', { client: currentClient, token: f.get('token'), phoneId: f.get('phoneId'), verifyToken: f.get('verifyToken') });
+  submitJson('/api/add-whatsapp', { client: currentClient, token: f.get('token'), phoneId: f.get('phoneId'), wabaId: f.get('wabaId'), verifyToken: f.get('verifyToken') });
 });
 
 document.getElementById('instagramForm').addEventListener('submit', (e) => {
@@ -2072,10 +2073,17 @@ app.post('/api/create', (req, res) => {
   res.json({ jobId });
 });
 
+// Found live 2026-09-16: this route never passed --waba-id through even
+// though add-whatsapp.mjs has required it for a while (it patches
+// whatsappBusinessAccountId into the registry and submits the
+// "business_outreach" template) -- every manual onboarding through this
+// form was failing on a usage error before it could do anything. The
+// self-serve Embedded Signup path (below) was never affected -- it always
+// had a real wabaId from Meta's own response.
 app.post('/api/add-whatsapp', (req, res) => {
-  const { client, token, phoneId, verifyToken } = req.body;
-  if (!client || !token || !phoneId || !verifyToken) return res.status(400).json({ error: 'missing fields' });
-  const jobId = startJob('add-whatsapp.mjs', [`--client=${client}`, `--token=${token}`, `--phone-id=${phoneId}`, `--verify-token=${verifyToken}`]);
+  const { client, token, phoneId, wabaId, verifyToken } = req.body;
+  if (!client || !token || !phoneId || !wabaId || !verifyToken) return res.status(400).json({ error: 'missing fields' });
+  const jobId = startJob('add-whatsapp.mjs', [`--client=${client}`, `--token=${token}`, `--phone-id=${phoneId}`, `--verify-token=${verifyToken}`, `--waba-id=${wabaId}`]);
   res.json({ jobId });
 });
 

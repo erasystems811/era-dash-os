@@ -76,11 +76,16 @@ export async function getSharingMode() {
 export async function resolveMenu(branchId) {
   const base = `select id, name, description, price, category, is_combo from product where availability = true and import_status is distinct from 'new'`;
   const sharingMode = branchId ? await getSharingMode() : 'merged';
+  // position preserves the real menu's own layout (bulk-import assigns it
+  // in the order items were found in the source text/photo(s) -- see
+  // routes/api.js's /catalogue/bulk-import) instead of an alphabetical
+  // re-sort, so the bot reads the menu in the same order Catalogue.jsx
+  // now shows it in, not a different scrambled order of its own.
   if (sharingMode === 'merged') {
-    const { rows } = await pool.query(`${base} order by category nulls last, name`);
+    const { rows } = await pool.query(`${base} order by position asc nulls last, category nulls last, name`);
     return rows;
   }
-  const { rows } = await pool.query(`${base} and (branch_id = $1 or branch_id is null) order by category nulls last, name`, [branchId]);
+  const { rows } = await pool.query(`${base} and (branch_id = $1 or branch_id is null) order by position asc nulls last, category nulls last, name`, [branchId]);
   return rows;
 }
 

@@ -1192,7 +1192,7 @@ router.get('/catalogue', async (req, res) => {
        (select coalesce(json_agg(json_build_object('componentProductId', pci.component_product_id, 'name', cp.name, 'quantity', pci.quantity)), '[]')
         from product_combo_item pci join product cp on cp.id = pci.component_product_id where pci.product_id = p.id) as combo_items
      from product p
-     order by p.created_at desc`
+     order by p.position asc nulls last, p.created_at asc`
   );
   res.json(rows);
 });
@@ -1207,7 +1207,8 @@ router.get('/catalogue', async (req, res) => {
 router.post('/catalogue', requireStaffApi, async (req, res) => {
   const f = req.body;
   const { rows } = await pool.query(
-    'insert into product (name, description, price, availability_type, duration_minutes, category, image_data_url) values ($1, $2, $3, $4, $5, $6, $7) returning *',
+    `insert into product (name, description, price, availability_type, duration_minutes, category, image_data_url, position)
+     values ($1, $2, $3, $4, $5, $6, $7, (select coalesce(max(position), 0) + 1 from product)) returning *`,
     [f.name, f.description || null, f.price, f.availability_type || 'stock', f.duration_minutes || null, f.category || null, f.image_data_url || null]
   );
   syncBestEffort();
@@ -1262,10 +1263,20 @@ router.post('/catalogue/bulk-import', requireStaffApi, async (req, res) => {
     );
     changed++;
   }
+  // Sequential positions in the order items were found in the source
+  // text/photo(s) -- parseMenuText/parseMenuImages return items in reading
+  // order, so this is what preserves the real menu's own layout (both
+  // which category appears first and item order within it) instead of
+  // Catalogue.jsx falling back to an alphabetical re-sort. One query for
+  // the starting point, then a plain per-item increment -- newItems is
+  // never large enough (a single menu upload) to need a bulk insert.
+  const { rows: maxPositionRows } = await pool.query('select coalesce(max(position), 0) as max from product');
+  let nextPosition = maxPositionRows[0].max;
   for (const item of newItems) {
+    nextPosition += 1;
     await pool.query(
-      `insert into product (name, description, price, availability_type, category, import_status) values ($1, $2, $3, 'stock', $4, 'new')`,
-      [item.name, item.description, item.price, item.category]
+      `insert into product (name, description, price, availability_type, category, import_status, position) values ($1, $2, $3, 'stock', $4, 'new', $5)`,
+      [item.name, item.description, item.price, item.category, nextPosition]
     );
   }
   if (removedIds.length) {
@@ -1359,7 +1370,8 @@ router.post('/catalogue/combo', requireStaffApi, async (req, res) => {
   const description = `Includes: ${items.map((item) => `${item.quantity || 1}x ${byId.get(item.productId).name}`).join(', ')}`;
 
   const { rows: productRows } = await pool.query(
-    `insert into product (name, description, price, category, is_combo) values ($1, $2, $3, 'Special Offers', true) returning *`,
+    `insert into product (name, description, price, category, is_combo, position)
+     values ($1, $2, $3, 'Special Offers', true, (select coalesce(max(position), 0) + 1 from product)) returning *`,
     [f.name, description, f.price]
   );
   const combo = productRows[0];
