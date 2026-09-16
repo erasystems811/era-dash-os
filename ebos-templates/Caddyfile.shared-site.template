@@ -11,8 +11,9 @@
         reverse_proxy 127.0.0.1:{{N8N_PORT}}
     }
     handle /assets/* {
-        header Cache-Control "public, max-age=31536000, immutable"
-        reverse_proxy 127.0.0.1:{{DASHBOARD_PORT}}
+        reverse_proxy 127.0.0.1:{{DASHBOARD_PORT}} {
+            header_down Cache-Control "public, max-age=31536000, immutable"
+        }
     }
     handle {
         reverse_proxy 127.0.0.1:{{DASHBOARD_PORT}}
