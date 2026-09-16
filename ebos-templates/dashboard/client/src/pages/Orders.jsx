@@ -228,6 +228,14 @@ export default function Orders() {
   // `orders` (lib/auth.js's scopeToWorkArea), and 'in_house' never reaches
   // this page in the first place (App.jsx redirects it to /in-house).
   const [dineinEnabled, setDineinEnabled] = useState(false);
+  // Chidera, 2026-09-16: "why is there a ring rider in the card when
+  // delivery is not toggled on" -- the button only ever checked the
+  // ORDER's own fulfilment_type === 'delivery' (a real value even when the
+  // business has no own-rider system at all -- a delivery order can exist
+  // without ERA's Delivery add-on being switched on), never whether this
+  // business's delivery mode is actually 'own_riders'. Ringing a rider on
+  // a business with zero riders configured would either no-op or error.
+  const [ownRidersEnabled, setOwnRidersEnabled] = useState(false);
   const [activeTab, setActiveTab] = useState('online');
   // Two real pipelines, not one -- Chidera 2026-09-11: "confirming payment
   // is different from marking served so there should be 2 piplines."
@@ -259,6 +267,7 @@ export default function Orders() {
     api.get(`/orders${q}`).then(setOrders);
     api.get(`/orders/stats/today${q}`).then(setToday);
     api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
+    api.get('/delivery-config').then((c) => setOwnRidersEnabled(c?.mode === 'own_riders'));
     loadInHouse();
   }
 
@@ -547,7 +556,7 @@ export default function Orders() {
                                 {nextStageFor(o).label}
                               </button>
                             ))}
-                      {canEdit(staff) && o.status === 'ready' && o.fulfilment_type === 'delivery' && (
+                      {canEdit(staff) && ownRidersEnabled && o.status === 'ready' && o.fulfilment_type === 'delivery' && (
                         <button style={{ marginTop: 8, width: '100%' }} className="secondary" onClick={(e) => ringRider(e, o.id)}>
                           Ring rider
                         </button>
