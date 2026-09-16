@@ -1755,14 +1755,36 @@ async function handleCollectFulfilment(customer, order, text) {
 // bank-transfer flow unchanged. Falls back to bank details if the Paystack
 // call itself fails (a network hiccup, a bad key) rather than leaving the
 // customer stuck with neither.
+// Shared by sendPaymentInstructions and its repeat-reminder counterpart --
+// same real send, same reasoning (see buildPayLine's own comment on why
+// the URL travels as a button, not embedded text) either time it's needed.
+async function sendPaymentLinkButton(customer, paymentUrl) {
+  if (customer.channel === 'instagram') {
+    await reply(customer, `Pay here: ${paymentUrl}`);
+    return;
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppCtaUrl(recipientFor(customer), 'Tap below to pay securely.', 'Pay now', paymentUrl, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[payment link sent: ${paymentUrl}]`, trigger: 'payment_link', processed: true });
+}
+
 async function buildPayLine(order, customer, { amount, amountLabel }) {
   if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
     try {
       const url = await initializePaystackTransaction({ order, customer, amount });
       if (url) {
+        // Chidera, 2026-09-16: "i actually got a payment link o, but it
+        // opened out of whatsapp not in" -- the URL used to be embedded
+        // straight into this plain-text line, so WhatsApp rendered it as
+        // an ordinary tappable link (opens the phone's own browser, same
+        // as any link in any text message). paymentUrl is now returned
+        // separately so the caller can send it as a real CTA-URL button
+        // instead, exactly like the menu link and the handover link
+        // already do -- opens inside WhatsApp's own in-app browser.
         return {
-          payLine: `Please pay NGN ${amountLabel} here: ${url}\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
+          payLine: `Please pay NGN ${amountLabel} using the button below.\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
           needsHandover: false,
+          paymentUrl: url,
         };
       }
     } catch (err) {
@@ -1777,6 +1799,7 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       ? `Please pay NGN ${amountLabel}.\n\nBank: ${b.bank_name}\nAccount number: ${b.bank_account_number}\nAccount name: ${b.bank_account_name}\n\nThen send proof of payment here.`
       : `Your total is NGN ${amountLabel}. Let me get someone to confirm payment details with you.`,
     needsHandover: !hasBankDetails,
+    paymentUrl: null,
   };
 }
 
@@ -1828,8 +1851,9 @@ async function sendPaymentInstructions(customer, order) {
   // exactly the kind of thing that's easy to misread or fat-finger
   // copying out -- each on its own line reads the way a real transfer
   // slip would.
-  const { payLine, needsHandover } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
+  const { payLine, needsHandover, paymentUrl } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
   await reply(customer, `${invoiceLine}\n\n${payLine}`);
+  if (paymentUrl) await sendPaymentLinkButton(customer, paymentUrl);
   // ackText false -- payLine already told them someone will confirm payment
   // details (see above), same double-ack bug as the others fixed 2026-09-03.
   if (needsHandover) await handover(customer, 'Order ready for payment but no payment method is configured for this business yet', null, false);
@@ -2033,8 +2057,9 @@ async function handleWaitingOnPayment(customer, order, text) {
   // underlying fact (how to pay), just on a repeat reminder, so it must
   // never say something different (a stale bank-transfer reminder after
   // the business switched to Paystack would be a real lie).
-  const { payLine, needsHandover } = await buildPayLine(order, customer, { amount: order.total, amountLabel: order.total });
+  const { payLine, needsHandover, paymentUrl } = await buildPayLine(order, customer, { amount: order.total, amountLabel: order.total });
   await reply(customer, payLine, 'payment_reminder');
+  if (paymentUrl) await sendPaymentLinkButton(customer, paymentUrl);
   if (needsHandover) await handover(customer, 'Customer waiting on payment but no payment link/bank details are available', null, false);
 }
 
