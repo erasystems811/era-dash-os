@@ -12,6 +12,7 @@ import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCt
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice } from './documents.js';
+import { initializePaystackTransaction } from './payment.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
@@ -1689,13 +1690,44 @@ async function handleCollectFulfilment(customer, order, text) {
 // that lands while still awaiting payment (new total needs a fresh Paystack
 // transaction and a re-sent amount, not the stale one from before the
 // change).
-// Real Paystack integration (payment.js) is deliberately not called here
-// any more -- customers consistently preferred just being given the bank
-// account number over a "Pay now" link, so payment is bank-transfer +
-// manual staff confirmation only now, for every business. Not deleted
-// (payment.js/webhook-paystack.js still work as before) in case that
-// changes later -- this is a detach, the integration point, not a removal
-// of the capability itself.
+// Real Paystack integration, re-attached 2026-09-16 for a client who
+// specifically wants auto-confirmation -- webhook-paystack.js's own
+// auto-confirm only ever fires for a transaction that was actually
+// initialized through Paystack, and nothing called
+// initializePaystackTransaction anywhere until now. Deliberately per-
+// business, not a return to a global "Pay now" link for everyone: the
+// comment this replaced recorded why it was pulled in the first place
+// (customers preferred plain bank details), and that's still true for
+// every business that hasn't configured Paystack -- only
+// PAYMENT_PROVIDER=paystack gets this path, everyone else keeps the exact
+// bank-transfer flow unchanged. Falls back to bank details if the Paystack
+// call itself fails (a network hiccup, a bad key) rather than leaving the
+// customer stuck with neither.
+async function buildPayLine(order, customer, { amount, amountLabel }) {
+  if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
+    try {
+      const url = await initializePaystackTransaction({ order, customer, amount });
+      if (url) {
+        return {
+          payLine: `Please pay NGN ${amountLabel} here: ${url}\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
+          needsHandover: false,
+        };
+      }
+    } catch (err) {
+      console.error(`Paystack initialize failed for order ${order.id}, falling back to bank details: ${err.message}`);
+    }
+  }
+  const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
+  const b = biz[0] || {};
+  const hasBankDetails = b.bank_name && b.bank_account_number && b.bank_account_name;
+  return {
+    payLine: hasBankDetails
+      ? `Please pay NGN ${amountLabel}.\n\nBank: ${b.bank_name}\nAccount number: ${b.bank_account_number}\nAccount name: ${b.bank_account_name}\n\nThen send proof of payment here.`
+      : `Your total is NGN ${amountLabel}. Let me get someone to confirm payment details with you.`,
+    needsHandover: !hasBankDetails,
+  };
+}
+
 async function sendPaymentInstructions(customer, order) {
   const { total, deliveryFee } = await summariseOrder(order);
   const invoicePath = await createInvoice(order);
@@ -1735,9 +1767,6 @@ async function sendPaymentInstructions(customer, order) {
   // earlier in "confirm order" (delivery fee wasn't known yet then). Stated
   // here so the amount they're about to pay never comes as a surprise.
   const deliveryFeeLine = deliveryFee > 0 ? ` (includes NGN ${deliveryFee} delivery fee)` : '';
-  const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
-  const b = biz[0] || {};
-  const hasBankDetails = b.bank_name && b.bank_account_number && b.bank_account_name;
   // Structured, one fact per line -- same reasoning as the item-by-item
   // price confirmation (Chidera's earlier call: "structured line by line
   // way not paragraph"), now for the bank details too. Chidera 2026-09-11:
@@ -1747,13 +1776,11 @@ async function sendPaymentInstructions(customer, order) {
   // exactly the kind of thing that's easy to misread or fat-finger
   // copying out -- each on its own line reads the way a real transfer
   // slip would.
-  const payLine = hasBankDetails
-    ? `Please pay NGN ${total}${deliveryFeeLine}.\n\nBank: ${b.bank_name}\nAccount number: ${b.bank_account_number}\nAccount name: ${b.bank_account_name}\n\nThen send proof of payment here.`
-    : `Your total is NGN ${total}${deliveryFeeLine}. Let me get someone to confirm payment details with you.`;
+  const { payLine, needsHandover } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
   await reply(customer, `${invoiceLine}\n\n${payLine}`);
   // ackText false -- payLine already told them someone will confirm payment
   // details (see above), same double-ack bug as the others fixed 2026-09-03.
-  if (!hasBankDetails) await handover(customer, 'Order ready for payment but no payment method is configured for this business yet', null, false);
+  if (needsHandover) await handover(customer, 'Order ready for payment but no payment method is configured for this business yet', null, false);
 }
 
 // A customer nudging the bot while still unpaid ("where's the link", "resend
@@ -1950,21 +1977,13 @@ async function handleWaitingOnPayment(customer, order, text) {
   }
   await pool.query(`update "order" set payment_reminder_sent_at = now() where id = $1`, [order.id]);
 
-  const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
-  const b = biz[0] || {};
-  if (b.bank_name && b.bank_account_number && b.bank_account_name) {
-    // Same structured, one-fact-per-line format as sendPaymentInstructions'
-    // own bank details -- this is the same information, just on a repeat
-    // reminder, so it shouldn't read differently.
-    await reply(
-      customer,
-      `Pay NGN ${order.total}.\n\nBank: ${b.bank_name}\nAccount number: ${b.bank_account_number}\nAccount name: ${b.bank_account_name}\n\nThen send proof of payment here.`,
-      'payment_reminder'
-    );
-    return;
-  }
-  await reply(customer, `Let me get someone to confirm payment details with you.`, 'payment_reminder');
-  await handover(customer, 'Customer waiting on payment but no payment link/bank details are available', null, false);
+  // Same buildPayLine as sendPaymentInstructions -- this is the same
+  // underlying fact (how to pay), just on a repeat reminder, so it must
+  // never say something different (a stale bank-transfer reminder after
+  // the business switched to Paystack would be a real lie).
+  const { payLine, needsHandover } = await buildPayLine(order, customer, { amount: order.total, amountLabel: order.total });
+  await reply(customer, payLine, 'payment_reminder');
+  if (needsHandover) await handover(customer, 'Customer waiting on payment but no payment link/bank details are available', null, false);
 }
 
 // Reviewing an order isn't a one-shot thing -- "add a chapman" or "remove
@@ -2076,6 +2095,15 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
       ? `Here's your top-up invoice: ${invoiceUrl}`
       : `Your top-up invoice is ready.`;
 
+  // Deliberately still bank-transfer-only, not buildPayLine -- a top-up is
+  // extra money on an ALREADY-paid order, and Paystack's own transaction
+  // reference has to be unique per charge, so re-using order.reference here
+  // (as buildPayLine does) would collide with the original payment's own
+  // Paystack transaction. Auto-confirming a top-up needs its own reference
+  // scheme and its own webhook resolution (order_topup isn't looked up by
+  // findOrderByPaymentReference at all today) -- real, separate work, not
+  // built ahead of a client actually needing it (same reasoning hours.js
+  // itself already uses for not over-building).
   const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
   const b = biz[0] || {};
   const hasBankDetails = b.bank_name && b.bank_account_number && b.bank_account_name;
