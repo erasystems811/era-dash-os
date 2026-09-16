@@ -385,6 +385,17 @@ tr.clickable:hover {
   background: var(--warn-soft);
   color: var(--warn);
 }
+/* Customer segments (CRM add-on) -- .new already matches warn above.
+   repeat reuses the accent tone; vip gets --gold, the one place that
+   colour was defined but never actually used in a badge yet. */
+.badge.repeat {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.badge.vip {
+  background: rgba(184, 150, 79, 0.16);
+  color: var(--gold);
+}
 /* A branch's primary flag, not a status -- reuses the accent tone (same
    family as confirmed/preparing above) so it reads as "notable default",
    not "healthy" (green, already means active) or "needs attention". */

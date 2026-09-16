@@ -1498,21 +1498,140 @@ router.get('/conversations/:id', async (req, res) => {
 // that could drift from the actual order history. Deliberately no bulk-
 // send anywhere on this list or its export -- see crm-config's own comment
 // on why (Chidera's explicit call, 2026-09-16).
+// segment: the same New/Repeat/VIP definitions /customers/stats uses below
+// (1 order / 2+ orders / top 10% spend among ordering customers) -- one
+// customer's segment must never disagree between the stats cards and this
+// list's own status badge, so both read it from the identical case
+// expression rather than two separately-maintained rules.
+// Every ordering customer falls into exactly one segment (matches a
+// mockup the client shared where New + Repeat + VIP sums to 100%): New =
+// exactly 1 completed order; VIP = top 10% by spend AMONG customers with
+// 2+ orders (so VIP is always a subset of "has ordered more than once",
+// never a one-off big spender counted as both New and VIP); Repeat =
+// everyone else with 2+ orders. spend_pct_rank is computed only within the
+// 2+-orders group for that reason -- ranking against every ordering
+// customer (including one-time ones) would let a single big first order
+// rank as VIP despite having no repeat behaviour at all.
 router.get('/customers', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query(
     `select c.*,
        coalesce(o.order_count, 0)::int as order_count,
        coalesce(o.total_spend, 0) as total_spend,
-       case when coalesce(o.order_count, 0) > 0 then round(o.total_spend / o.order_count, 2) else 0 end as average_spend
+       case when coalesce(o.order_count, 0) > 0 then round(o.total_spend / o.order_count, 2) else 0 end as average_spend,
+       case
+         when coalesce(o.order_count, 0) = 0 then null
+         when o.order_count = 1 then 'new'
+         when coalesce(r.spend_pct_rank, 0) >= 0.9 then 'vip'
+         else 'repeat'
+       end as segment
      from customers c
      left join (
        select customer_id, count(*) as order_count, sum(total) as total_spend
        from "order" where status = 'completed'
        group by customer_id
      ) o on o.customer_id = c.id
+     left join (
+       select customer_id, percent_rank() over (order by total_spend) as spend_pct_rank
+       from (
+         select customer_id, sum(total) as total_spend
+         from "order" where status = 'completed'
+         group by customer_id having count(*) >= 2
+       ) repeat_spend
+     ) r on r.customer_id = c.id
      order by o.total_spend desc nulls last, c.created_at desc`
   );
   res.json(rows);
+});
+
+// Dashboard cards/charts (Chidera, 2026-09-16, matching a client's own CRM
+// mockup) -- New = exactly 1 completed order, Repeat = 2+, VIP = top 10%
+// by total spend among customers who've ordered at least once. Retention
+// rate is deliberately just "repeat / everyone who's ordered at least
+// once" -- the same repeat-customer count the stat card already shows, not
+// a second, differently-defined number. "vs last month" compares the
+// trailing 30 days to the 30 days before that; a metric with nothing in
+// the prior window (deltaPct: null) shows as new rather than a fake "+infinity%".
+router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
+  const [totals, segments, thisMonth, lastMonth, daily] = await Promise.all([
+    pool.query(`select count(*)::int as total_customers from customers`),
+    pool.query(
+      `with per_customer as (
+         select customer_id, count(*) as order_count, sum(total) as total_spend
+         from "order" where status = 'completed'
+         group by customer_id
+       ),
+       repeat_ranked as (
+         select customer_id, percent_rank() over (order by total_spend) as spend_pct_rank
+         from per_customer where order_count >= 2
+       )
+       select
+         count(*) filter (where c.order_count = 1)::int as new_count,
+         count(*) filter (where c.order_count >= 2)::int as repeat_count,
+         count(*) filter (where c.order_count > 0)::int as ordering_count,
+         count(*) filter (where r.spend_pct_rank >= 0.9)::int as vip_count,
+         coalesce(sum(c.total_spend), 0) as total_revenue
+       from per_customer c
+       left join repeat_ranked r on r.customer_id = c.customer_id`
+    ),
+    // "This month" -- trailing 30 days, not calendar-month, so the number
+    // is always a real rolling window (a business built on the 3rd of the
+    // month never sees a nonsensical "week-old data = 100% of the month").
+    pool.query(
+      `select count(distinct customer_id) filter (where order_rank = 1)::int as new_customers,
+         coalesce(sum(total) filter (where completed_at > now() - interval '30 days'), 0) as revenue
+       from (
+         select customer_id, total, completed_at, row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed'
+       ) o
+       where completed_at > now() - interval '30 days'`
+    ),
+    pool.query(
+      `select count(distinct customer_id) filter (where order_rank = 1)::int as new_customers,
+         coalesce(sum(total) filter (where completed_at between now() - interval '60 days' and now() - interval '30 days'), 0) as revenue
+       from (
+         select customer_id, total, completed_at, row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed'
+       ) o
+       where completed_at between now() - interval '60 days' and now() - interval '30 days'`
+    ),
+    // Last 7 days, one row per day: how many customers placed their FIRST
+    // ever completed order that day (new) vs a later one (repeat) -- the
+    // Customer Overview line chart.
+    pool.query(
+      `select date(completed_at) as day,
+         count(*) filter (where order_rank = 1)::int as new_customers,
+         count(*) filter (where order_rank > 1)::int as repeat_customers
+       from (
+         select customer_id, completed_at, row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed'
+       ) o
+       where completed_at > now() - interval '7 days'
+       group by date(completed_at)
+       order by day`
+    ),
+  ]);
+
+  const s = segments.rows[0];
+  const totalCustomers = totals.rows[0].total_customers;
+  const retentionRate = s.ordering_count > 0 ? Math.round((s.repeat_count / s.ordering_count) * 1000) / 10 : 0;
+
+  const pctChange = (current, previous) => (previous > 0 ? Math.round(((current - previous) / previous) * 1000) / 10 : null);
+
+  res.json({
+    totalCustomers,
+    repeatCustomers: s.repeat_count,
+    retentionRate,
+    totalRevenue: Number(s.total_revenue),
+    // vip_count is already a subset of repeat_count (computed only among
+    // 2+-order customers, same as the /customers list's own segment
+    // column), so this subtraction can never go negative.
+    segments: { new: s.new_count, repeat: s.repeat_count - s.vip_count, vip: s.vip_count },
+    deltas: {
+      newCustomersPct: pctChange(thisMonth.rows[0].new_customers, lastMonth.rows[0].new_customers),
+      revenuePct: pctChange(Number(thisMonth.rows[0].revenue), Number(lastMonth.rows[0].revenue)),
+    },
+    daily: daily.rows.map((r) => ({ day: r.day, newCustomers: r.new_customers, repeatCustomers: r.repeat_customers })),
+  });
 });
 
 // Deliberately its own narrow route (one field), not folded into a
