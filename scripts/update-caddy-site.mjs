@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRegistry, findClient } from './lib/registry.mjs';
-import { runRemote, copyToRemote } from './lib/ssh.mjs';
+import { runRemote, copyToRemote, readRemote } from './lib/ssh.mjs';
 import { render } from './lib/render-template.mjs';
 import { addSite, removeSite } from './lib/shared-host.mjs';
 import { templatesDirFor } from './lib/templates-dir.mjs';
@@ -48,19 +48,49 @@ async function main() {
     await addSite(client.ip, client.name, siteBlock);
     console.log(`Re-applied shared-host site block for "${client.name}".`);
   } else {
-    const caddyfile = render(readFileSync(path.join(templatesDir, 'Caddyfile.template'), 'utf8'), { SUBDOMAIN: client.subdomain });
-    const tmpFile = `/tmp/Caddyfile-${client.name}`;
+    const siteBlock = render(readFileSync(path.join(templatesDir, 'Caddyfile.template'), 'utf8'), { SUBDOMAIN: client.subdomain }).trim();
+
+    // 2026-09-16: this used to overwrite the WHOLE remote Caddyfile with
+    // just this one client's rendered block -- fine for a brand-new
+    // dedicated box, but era-demo's box also happens to host two OTHER
+    // domains' site blocks by hand in this same physical file
+    // (dash.erasystems.com.ng -- the control panel AND every EBOS client's
+    // Meta webhook callback URL -- and wa-router.erasystems.com.ng). A
+    // blind overwrite here silently deleted both, breaking WhatsApp for
+    // every EBOS client at once until caught live and restored. Splicing
+    // between markers (same convention shared-host.mjs already uses for
+    // shared-hosting clients) means this can only ever touch this one
+    // client's own block, never anything else that happens to share the
+    // file.
+    const begin = `# BEGIN ${client.name}`;
+    const end = `# END ${client.name}`;
+    const current = await readRemote(client.ip, `/opt/${client.name}/Caddyfile`);
+    const beginIdx = current.indexOf(begin);
+    const endIdx = current.indexOf(end);
+    let updated;
+    if (beginIdx !== -1 && endIdx !== -1) {
+      updated = current.slice(0, beginIdx) + `${begin}\n${siteBlock}\n${end}` + current.slice(endIdx + end.length);
+    } else {
+      // No markers yet -- refuse to guess at a file that might carry other
+      // domains' hand-added blocks (exactly how this broke last time).
+      // Wrapping the WHOLE current file in markers here, once, makes every
+      // future run of this script safe without ever needing another blind
+      // overwrite.
+      console.log(`No "${client.name}" markers found in /opt/${client.name}/Caddyfile -- wrapping its entire current content once so future updates are safe to splice.`);
+      updated = `${begin}\n${current.trim()}\n${end}\n`;
+    }
+
     const { writeFileSync, mkdtempSync } = await import('node:fs');
     const os = await import('node:os');
     const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'era-caddy-'));
     const localFile = path.join(tmpDir, 'Caddyfile');
-    writeFileSync(localFile, caddyfile);
+    writeFileSync(localFile, updated);
     await copyToRemote(client.ip, localFile, `/opt/${client.name}/Caddyfile`);
     // caddy reload alone was found NOT to reliably pick up a changed
     // Caddyfile on era-demo, 2026-09-16 -- a full container restart is the
     // one that actually took effect every time it was tested.
     await runRemote(client.ip, `cd /opt/${client.name} && docker compose restart caddy`);
-    console.log(`Re-applied dedicated Caddyfile for "${client.name}".`);
+    console.log(`Re-applied dedicated Caddyfile block for "${client.name}" (other domains in the same file left untouched).`);
   }
 }
 
