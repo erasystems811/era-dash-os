@@ -8,11 +8,25 @@
 // not an SSH session. Chidera's own words, 2026-09-11: "i cant use ssh...
 // i told it to build alternative ways."
 //
-// Deliberately just `git pull` -- no force, no reset, no stashing away
-// local changes. If the control server's checkout has uncommitted local
-// edits that would conflict, this fails loudly (git's own error) rather
-// than silently discarding something. That's a real scenario worth
-// knowing about, not one to paper over.
+// Deliberately just `git pull` by default -- no force, no reset, no
+// stashing away local changes. If the control server's checkout has
+// uncommitted local edits that would conflict, this fails loudly (git's
+// own error) rather than silently discarding something. That's a real
+// scenario worth knowing about, not one to paper over.
+//
+// --discard-conflicts is the one opt-in exception (Chidera's panel is a
+// deploy target, never a place for real local work -- any uncommitted
+// diff there is leftover cruft, e.g. a file scp'd on as a one-off fix
+// instead of going through git, same class of bug this script exists to
+// prevent). Found live, 2026-09-16: exactly that -- a handful of
+// dashboard files had been copied straight onto the control server
+// earlier, and the next plain `git pull` refused with "local changes...
+// would be overwritten by merge", blocking every future sync until
+// someone with SSH could clear it by hand. Still opt-in, still narrow:
+// only `git checkout --` the SPECIFIC files git's own error names as
+// conflicting, never a blanket reset, and only when this flag is passed
+// -- the default run above still fails loudly for anyone who hasn't
+// explicitly asked for automatic recovery.
 //
 // Does NOT restart the panel process itself -- panel/server.js's own code
 // only takes effect on its next restart (a separate, deliberate action,
@@ -72,10 +86,40 @@ async function bootstrapIfNeeded() {
   return true;
 }
 
-export async function main() {
+// Git's own "local changes... would be overwritten by merge" error lists
+// exactly which tracked files are the problem, one per indented line,
+// right after this header line -- e.g.:
+//   error: Your local changes to the following files would be overwritten by merge:
+//   \tpanel/server.js
+//   \tebos-templates/dashboard/routes/api.js
+//   Please commit your changes or stash them before you merge.
+// Parsed out rather than guessed so --discard-conflicts only ever touches
+// the files git itself named, never anything broader.
+function parseConflictingFiles(gitErrorMessage) {
+  const match = gitErrorMessage.match(/would be overwritten by merge:\n([\s\S]+?)\nPlease/);
+  if (!match) return null;
+  return match[1]
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export async function main(argv = []) {
+  const discardConflicts = argv.includes('--discard-conflicts');
   const justBootstrapped = await bootstrapIfNeeded();
   const before = (await run('git', ['rev-parse', 'HEAD'])).trim();
-  console.log(await run('git', ['pull', '--ff-only', 'origin', 'main']));
+
+  try {
+    console.log(await run('git', ['pull', '--ff-only', 'origin', 'main']));
+  } catch (err) {
+    const conflicting = discardConflicts ? parseConflictingFiles(err.message) : null;
+    if (!conflicting) throw err;
+    console.log(`Discarding uncommitted local changes to ${conflicting.length} file(s) that were blocking the pull:`);
+    console.log(conflicting.map((f) => `  ${f}`).join('\n'));
+    await run('git', ['checkout', '--', ...conflicting]);
+    console.log(await run('git', ['pull', '--ff-only', 'origin', 'main']));
+  }
+
   const after = (await run('git', ['rev-parse', 'HEAD'])).trim();
   if (before === after) {
     console.log(justBootstrapped ? 'Bootstrapped at the current commit -- nothing new to pull yet.' : 'Already up to date.');
@@ -86,7 +130,7 @@ export async function main() {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((err) => {
+  main(process.argv.slice(2)).catch((err) => {
     console.error('FAILED:', err.message);
     process.exit(1);
   });

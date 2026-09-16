@@ -1075,11 +1075,21 @@ async function restartFixbot() {
   pollJob(data.jobId);
 }
 
-async function syncCode() {
-  const res = await fetch('/api/sync-code', { method: 'POST' });
+async function syncCode(discardConflicts) {
+  const res = await fetch('/api/sync-code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discardConflicts: Boolean(discardConflicts) }) });
   const data = await res.json();
   if (!res.ok) { alert(data.error || 'Failed'); return; }
-  pollJob(data.jobId);
+  pollJob(data.jobId, (job) => {
+    // The one specific, known failure mode (leftover local edits blocking
+    // the pull -- see scripts/sync-code.mjs) gets an offer to fix it
+    // automatically instead of just leaving a wall of git error text.
+    // Anything else stays a plain failure, nothing auto-retried.
+    if (job.status === 'failed' && !discardConflicts && /would be overwritten by merge/.test(job.log)) {
+      if (confirm('Sync failed because some old files on the server conflict with git. Discard those local copies and retry?')) {
+        syncCode(true);
+      }
+    }
+  });
 }
 
 async function runBackupNow() {
@@ -2130,8 +2140,16 @@ app.post('/api/fixbot/restart', (req, res) => {
 // very next time it's spawned, no restart needed. The panel's OWN code
 // (this file) only takes effect on its next restart -- a separate,
 // deliberate step, not implied by a sync.
+// discardConflicts is the recovery path for the exact failure mode found
+// live 2026-09-16 -- a handful of dashboard files had been copied straight
+// onto this server outside of git at some point, and a plain sync then
+// refuses forever with "local changes would be overwritten by merge" until
+// someone clears it. See scripts/sync-code.mjs's own comment for why this
+// is safe here specifically (this checkout is a deploy target, never a
+// place for real local work) and why it's still opt-in rather than the
+// default.
 app.post('/api/sync-code', (req, res) => {
-  const jobId = startJob('sync-code.mjs', []);
+  const jobId = startJob('sync-code.mjs', req.body?.discardConflicts ? ['--discard-conflicts'] : []);
   res.json({ jobId });
 });
 
