@@ -1531,6 +1531,28 @@ async function sendFieldPrompt(customer, fieldKey, promptText, trigger) {
   await reply(customer, promptText, trigger);
 }
 
+// Buttons for the delivery-area yes/no confirmation -- same reasoning and
+// same "tap sends its title back through the normal text pipeline, no new
+// parsing" shape as sendFieldPrompt's fulfilment_type buttons just above
+// (Chidera, 2026-09-16: "when bot is confirming a delivery address...let
+// it use button clicks of yes and no"). A tap arrives as plain text
+// ("Yes"/"No"), so handleCollectFulfilment's existing
+// botEngine.extractField boolean classification below needs no changes at
+// all -- it already understands "Yes"/"No" as well as any typed answer.
+async function sendYesNoConfirm(customer, promptText) {
+  if (customer.channel === 'whatsapp') {
+    const credentials = await getWhatsAppCredentials(customer.branch_id);
+    const buttons = [
+      { id: 'confirm_yes', title: 'Yes' },
+      { id: 'confirm_no', title: 'No' },
+    ];
+    await sendWhatsAppButtons(recipientFor(customer), promptText, buttons, credentials);
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: 'bot_flow_step' });
+    return;
+  }
+  await reply(customer, promptText);
+}
+
 async function handleCollectFulfilment(customer, order, text) {
   // Dine-in (payment_mode = 'at_table') never asks for delivery/pickup or
   // takes payment through the bot -- spec 5.4: "settled at the table...
@@ -1627,7 +1649,7 @@ async function handleCollectFulfilment(customer, order, text) {
           if (retry) {
             await pool.query(`update "order" set delivery_zone_candidate_id = $1 where id = $2`, [retry.id, order.id]);
             order.delivery_zone_candidate_id = retry.id;
-            await reply(customer, `Got it, just to confirm, is that delivery to ${retry.name}?`);
+            await sendYesNoConfirm(customer, `Got it, just to confirm, is that delivery to ${retry.name}?`);
             return;
           }
           await pool.query(
@@ -1640,7 +1662,7 @@ async function handleCollectFulfilment(customer, order, text) {
           return;
         } else {
           const { rows: zoneRows } = await pool.query('select name from delivery_zone where id = $1', [order.delivery_zone_candidate_id]);
-          await reply(customer, `Just to confirm, is that delivery to ${zoneRows[0]?.name}?`);
+          await sendYesNoConfirm(customer, `Just to confirm, is that delivery to ${zoneRows[0]?.name}?`);
           return;
         }
       } else if (!order.delivery_area_prompted_at) {
@@ -1648,7 +1670,7 @@ async function handleCollectFulfilment(customer, order, text) {
         if (zone) {
           await pool.query(`update "order" set delivery_zone_candidate_id = $1 where id = $2`, [zone.id, order.id]);
           order.delivery_zone_candidate_id = zone.id;
-          await reply(customer, `Just to confirm, is that delivery to ${zone.name}?`);
+          await sendYesNoConfirm(customer, `Just to confirm, is that delivery to ${zone.name}?`);
           return;
         }
         await pool.query(`update "order" set delivery_area_prompted_at = now() where id = $1`, [order.id]);
@@ -1660,7 +1682,7 @@ async function handleCollectFulfilment(customer, order, text) {
         if (zone) {
           await pool.query(`update "order" set delivery_zone_candidate_id = $1 where id = $2`, [zone.id, order.id]);
           order.delivery_zone_candidate_id = zone.id;
-          await reply(customer, `Just to confirm, is that delivery to ${zone.name}?`);
+          await sendYesNoConfirm(customer, `Just to confirm, is that delivery to ${zone.name}?`);
           return;
         }
         // Never guess a zone (spec B5) -- a wrong one means a wrong price
