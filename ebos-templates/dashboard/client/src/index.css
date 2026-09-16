@@ -343,6 +343,29 @@ a:hover {
   margin-bottom: 20px;
 }
 
+/* Chidera, 2026-09-16: "the birthday pop up didnt happen" -- her original
+   ask (2026-09-16, quoted where it's used) was for a real pop up; what
+   shipped was a quiet inline row easy to miss entirely while handling an
+   order. This is the actual modal that request called for. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+.modal-panel {
+  background: var(--surface, #fff);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 24px;
+  max-width: 360px;
+  width: 100%;
+}
+
 /* Shared by CRM's own stat row and Feedback's (StatCard.jsx, extracted
    2026-09-16 specifically so both stay identical). Base sizing lives here
    now instead of inline styles so the mobile block below can actually

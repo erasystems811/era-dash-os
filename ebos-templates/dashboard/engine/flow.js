@@ -2605,8 +2605,15 @@ export async function completePayment(orderId) {
   // not a detail page.
   const orderRecipients = await orderAlertRecipients();
   if (orderRecipients.length) {
-    const { lines, total } = await summariseOrder(order);
-    const alertText = `Payment confirmed, ready to prepare: ${displayNameFor(customer)} (${order.fulfilment_type || 'pickup'})\n${lines}\nTotal: NGN ${total}`;
+    // Chidera, 2026-09-16: "when reporting to staff what to prepare, make
+    // it structured not like a paragraph" -- was using summariseOrder's
+    // `lines` (a single comma-run paragraph, its own comment says so
+    // explicitly), not `itemLines` (one item per line), which the
+    // customer-facing confirm message already switched to 2026-09-10 for
+    // the exact same reason. Staff reading what to prepare deserves the
+    // same structured format, not a regression back to the paragraph.
+    const { itemLines, total } = await summariseOrder(order);
+    const alertText = `Payment confirmed, ready to prepare: ${displayNameFor(customer)} (${order.fulfilment_type || 'pickup'})\n${itemLines.join('\n')}\nTotal: NGN ${total}`;
     for (const { phoneNumber: to, staffId } of orderRecipients) {
       await sendStaffAlert(to, alertText);
       if (!process.env.PUBLIC_URL || !staffId) continue;

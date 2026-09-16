@@ -14,6 +14,7 @@ export default function OrderDetail() {
   const [crmEnabled, setCrmEnabled] = useState(false);
   const [birthdayInput, setBirthdayInput] = useState('');
   const [birthdayBusy, setBirthdayBusy] = useState(false);
+  const [birthdaySkipped, setBirthdaySkipped] = useState(false);
 
   function load() {
     api.get(`/orders/${id}`).then(setData);
@@ -34,7 +35,10 @@ export default function OrderDetail() {
   // customers that dont have" a birthday -- one field, right where staff
   // are already looking while handling the order, not a separate step to
   // remember. Skippable (canEdit staff can just ignore it) and never shown
-  // again once the customer has one on file.
+  // again once the customer has one on file. Shipped 2026-09-16 as a quiet
+  // inline row instead of an actual pop up ("the birthday pop up didnt
+  // happen") -- now a real modal, matching what was actually asked for.
+  const showBirthdayModal = crmEnabled && customer && !customer.birthday && canEdit(staff) && !birthdaySkipped;
   async function saveBirthday(e) {
     e.preventDefault();
     if (!birthdayInput) return;
@@ -101,22 +105,29 @@ export default function OrderDetail() {
         <p>
           {customer?.name || customer?.phone_number} &middot; {customer?.phone_number}
         </p>
-        <p style={{ marginBottom: crmEnabled && customer && !customer.birthday ? 12 : 0 }}>
+        <p style={{ marginBottom: 0 }}>
           Fulfilment: <strong>{order.fulfilment_type}</strong>
           {order.fulfilment_type === 'delivery' && customer?.address ? ` — ${customer.address}` : ''}
         </p>
-        {crmEnabled && customer && !customer.birthday && canEdit(staff) && (
-          <form onSubmit={saveBirthday} style={{ display: 'flex', gap: 8, alignItems: 'center', paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-            <label className="hint" style={{ margin: 0 }}>
-              No birthday on file -- ask them?
-            </label>
-            <input type="date" value={birthdayInput} onChange={(e) => setBirthdayInput(e.target.value)} style={{ width: 'auto' }} />
-            <button type="submit" className="secondary" disabled={birthdayBusy || !birthdayInput} style={{ padding: '6px 12px', fontSize: 13 }}>
-              Save
-            </button>
-          </form>
-        )}
       </div>
+
+      {showBirthdayModal && (
+        <div className="modal-overlay">
+          <div className="modal-panel">
+            <h3 style={{ marginTop: 0 }}>No birthday on file</h3>
+            <p className="hint">Ask {customer.name || customer.phone_number} for their birthday while you have them on the order?</p>
+            <form onSubmit={saveBirthday} style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 }}>
+              <input type="date" value={birthdayInput} onChange={(e) => setBirthdayInput(e.target.value)} style={{ flex: 1 }} autoFocus />
+              <button type="submit" disabled={birthdayBusy || !birthdayInput} style={{ padding: '8px 14px' }}>
+                Save
+              </button>
+            </form>
+            <button type="button" className="secondary" onClick={() => setBirthdaySkipped(true)} style={{ marginTop: 10, width: '100%', padding: '8px 14px' }}>
+              Not now
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Items</h3>
