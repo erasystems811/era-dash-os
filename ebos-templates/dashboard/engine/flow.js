@@ -678,23 +678,31 @@ async function handover(customer, reason, extra, ackText) {
     transcript
   );
   const extraLines = extra ? `\n${Object.values(extra).filter(Boolean).join('\n')}` : '';
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
   for (const { phoneNumber: to, staffId } of recipients) {
-    // A magic link, not a bare dashboard URL -- tapping it signs this exact
-    // staff member straight in (createMagicLink/consumeMagicLink, lib/
-    // auth.js) and lands them on this conversation, no separate login, no
-    // leaving WhatsApp first. Chidera 2026-09-11: "can handover numbers get
-    // to handle whatever it is internally in whatsapp without leaving the
-    // app... they can access the dashboard internally." Falls back to the
-    // old bare (login-required) link when this recipient has no staffId --
-    // the business.handover_number fallback isn't a real staff account, so
-    // there's no session to bind a token to.
-    const link = process.env.PUBLIC_URL
-      ? staffId
-        ? `\n${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/conversations/${customer.id}`)}`
-        : `\n${process.env.PUBLIC_URL}/conversations/${customer.id}`
-      : '';
-    const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}${link}`;
+    const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}`;
     await sendStaffAlert(to, alert);
+
+    // Chidera, 2026-09-16: "when a handover is sent the link should be
+    // open in the whatsapp chat, they dnt have to leave to a site" -- this
+    // used to append the link as plain text onto the alert above, which
+    // opens the device's own external browser when tapped. A real CTA-URL
+    // button instead, same mechanism handleStaffCommand's "text dashboard"
+    // link already uses (opens inside WhatsApp's own in-app browser). A
+    // magic link (not a bare dashboard URL) signs this exact staff member
+    // straight in and lands them on this conversation, no separate login
+    // -- falls back to the old bare (login-required) link when this
+    // recipient has no staffId, since business.handover_number's fallback
+    // isn't a real staff account with a session to bind a token to.
+    if (!process.env.PUBLIC_URL) continue;
+    const link = staffId
+      ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/conversations/${customer.id}`)}`
+      : `${process.env.PUBLIC_URL}/conversations/${customer.id}`;
+    try {
+      await sendWhatsAppCtaUrl(to, `Tap below to open this conversation.`, 'Open Conversation', link, credentials);
+    } catch (err) {
+      console.error(`Failed to send handover conversation link to ${to}:`, err.message);
+    }
   }
 }
 
