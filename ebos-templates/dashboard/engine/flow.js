@@ -1043,7 +1043,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
           // fallback now.
           let catalogShown = false;
           if (customer.channel !== 'instagram') {
-            catalogShown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.").catch((err) => {
+            catalogShown = await sendWebMenuLink(customer, await menuGreetingBody()).catch((err) => {
               console.error('sendWebMenuLink failed:', err.message);
               return false;
             });
@@ -3221,6 +3221,20 @@ async function businessCoverPhotoUrl() {
   return rows[0]?.v ? `${process.env.PUBLIC_URL}/photo/cover?v=${rows[0].v}` : null;
 }
 
+// Chidera, 2026-09-16: "the photo text should have a greeting na. dont
+// era demo have gretig? add Hello! welcome to Pomodoro food truck, then
+// one line space before here is our menu, take a look and pick what you
+// like" -- handleGreeting (this file, ~line 830) already says "Hello!
+// Welcome to X" but ONLY for a plain "hi" with nothing else in it; a
+// message that already expresses order intent (her own test: "I would
+// like to place an order") skips straight past it, so its greeting
+// mirrors the exact same business-name lookup for that other case.
+async function menuGreetingBody() {
+  const { rows } = await pool.query('select name from business limit 1');
+  const businessName = rows[0]?.name || 'us';
+  return `Hello! Welcome to ${businessName},\n\nHere's our menu, take a look and pick what you like.`;
+}
+
 async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null, headerImageUrl = null) {
   if (!process.env.PUBLIC_URL) return false;
   const token = await ensureMenuToken(customer);
@@ -3276,7 +3290,7 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
 export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' , processed: true });
-  const shown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.");
+  const shown = await sendWebMenuLink(customer, await menuGreetingBody());
   if (shown) return;
   await reply(customer, 'What would you like to order?', 'items_menu_shown');
 }
