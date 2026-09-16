@@ -183,47 +183,38 @@ a:hover {
   padding: 20px 12px;
 }
 
+/* The business name IS the brand here -- no separate "EB" icon mark
+   (Chidera's call, 2026-09-16, after a first pass that just made the
+   name bold/bigger: "no it should be like a design not just text...
+   you can remove the eb logo"). A real logotype, not a styled label:
+   its own distinctive display face (Space Grotesk -- geometric, more
+   character than Inter's own workhorse body grade, loaded just for this
+   one element so the rest of the UI's Inter-everywhere decision stays
+   untouched), a dropped, gold-accented first letter (the one classic,
+   unmistakably-"designed" wordmark move that works regardless of how
+   long or short the actual business name is), and real size now that
+   it isn't sharing a row with an icon. */
 .sidebar .brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #fff;
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 16px;
-  padding: 0 12px 20px;
+  display: block;
+  padding: 4px 12px 22px;
 }
-.sidebar .brand-mark {
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  background: var(--gold);
-  color: var(--sidebar-bg);
-  display: grid;
-  place-items: center;
-  font-family: var(--font-display);
-  font-size: 12px;
-  font-weight: 700;
-}
-/* The business name is the headline here, EBOS is just the mark next to
-   it (Chidera's call, 2026-09-16: "write the name in a designed fine way
-   na. not like a text") -- plain inherited bold-16px read as an
-   afterthought label, not a wordmark. Bumped weight/size/tracking for
-   real presence, capped to a max-width with an ellipsis since a business
-   name is arbitrary-length client data, not a fixed short word like
-   "EBOS" was. */
 .sidebar .brand-name {
   display: block;
-  font-size: 19px;
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  line-height: 1.25;
+  font-family: 'Space Grotesk', var(--font-display);
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
   color: #fff;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 150px;
+  max-width: 196px;
+}
+/* Not sidebar-scoped -- the same accented-first-letter wordmark is reused
+   in the mobile header below, which lives outside .sidebar entirely. */
+.brand-name-accent {
+  color: var(--gold);
 }
 .sidebar .brand small {
   display: flex;
@@ -233,10 +224,10 @@ a:hover {
   font-weight: 400;
   color: #94a3b8;
   font-size: 12px;
-  margin-top: 3px;
+  margin-top: 6px;
 }
-/* A small gold dot ties the tagline back to the brand-mark's own gold
-   fill, instead of the small print just floating there as plain grey
+/* A small gold dot ties the tagline back to the wordmark's own accent
+   letter, instead of the small print just floating there as plain grey
    text with nothing connecting it to the rest of the mark. */
 .sidebar .brand small::before {
   content: '';
@@ -979,9 +970,10 @@ label {
     border-radius: 8px;
   }
   .mobile-header-brand {
-    font-weight: 800;
-    font-size: 16px;
-    letter-spacing: -0.01em;
+    font-family: 'Space Grotesk', var(--font-display);
+    font-weight: 700;
+    font-size: 18px;
+    letter-spacing: -0.02em;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

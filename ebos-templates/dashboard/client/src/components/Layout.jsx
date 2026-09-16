@@ -4,6 +4,22 @@ import { useStaff, isPinTier, workAreaOf } from '../StaffContext.jsx';
 import { useScope } from '../ScopeContext.jsx';
 import { api } from '../api.js';
 
+// One accented first letter is the whole logotype now that there's no
+// separate icon mark next to it (Chidera's call, 2026-09-16, after a
+// first pass that just made the name bold/bigger: "no it should be like
+// a design not just text... you can remove the eb logo"). Works the same
+// regardless of how long or short a given business's actual name is,
+// unlike accenting "the first word" (inconsistent for a one-word name).
+function Wordmark({ name, className }) {
+  const label = name || 'EBOS';
+  return (
+    <span className={className} title={label}>
+      <span className="brand-name-accent">{label[0]}</span>
+      {label.slice(1)}
+    </span>
+  );
+}
+
 // Order is Chidera's own explicit call, 2026-09-03: "orders-conversations-
 // delivery-catalogue-knowledge base-branches-documents-roles and numbers-
 // activity log-settings". Delivery/Voice aren't listed here since they're
@@ -151,20 +167,15 @@ export default function Layout() {
         <button className="nav-toggle" aria-label="Open menu" onClick={() => setNavOpen(true)}>
           ☰
         </button>
-        <div className="mobile-header-brand">{businessName || 'EBOS'}</div>
+        <Wordmark name={businessName} className="mobile-header-brand" />
       </header>
 
       {navOpen && <div className="nav-backdrop" onClick={() => setNavOpen(false)} />}
 
       <aside className={`sidebar ${navOpen ? 'open' : ''}`}>
         <div className="brand">
-          <span className="brand-mark">EB</span>
-          <div>
-            <span className="brand-name" title={businessName || 'EBOS'}>
-              {businessName || 'EBOS'}
-            </span>
-            <small>Powered by ERA Systems</small>
-          </div>
+          <Wordmark name={businessName} className="brand-name" />
+          <small>Powered by ERA Systems</small>
         </div>
         {showScopeSwitcher && (
           <div className="scope-switcher">
