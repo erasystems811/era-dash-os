@@ -1935,7 +1935,7 @@ router.post('/bot-states/:key/transitions', requireEraAdmin, async (req, res) =>
 
 router.get('/staff', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query(
-    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.created_at, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
+    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.order_alerts, s.created_at, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
      from staff s left join branch b on b.id = s.branch_id
      where $1::uuid is null or s.branch_id = $1
      order by s.created_at`,
@@ -2028,6 +2028,26 @@ router.post('/staff/:id/handover-alerts', requireEditorApi, async (req, res) => 
   }
   const { rows } = await pool.query('update staff set handover_alerts = $1 where id = $2 returning id, handover_alerts', [
     !!req.body.handover_alerts,
+    req.params.id,
+  ]);
+  res.json(rows[0]);
+});
+
+// Separate from handover-alerts above -- Chidera, 2026-09-16: "a staff
+// number should be able to get a confirmed order after paystack has
+// automatically confirmed payment on their whatsapp." Same phone-number
+// requirement and branch scoping as handover-alerts, for the same reasons.
+router.post('/staff/:id/order-alerts', requireEditorApi, async (req, res) => {
+  const { rows: existing } = await pool.query('select phone_number, branch_id from staff where id = $1', [req.params.id]);
+  if (!existing[0]) return res.status(404).json({ error: 'Staff member not found.' });
+  if (req.branchId && existing[0].branch_id !== req.branchId) {
+    return res.status(403).json({ error: 'You can only manage staff in your own branch.' });
+  }
+  if (req.body.order_alerts && !existing[0].phone_number) {
+    return res.status(400).json({ error: 'Add a phone number for this staff member first.' });
+  }
+  const { rows } = await pool.query('update staff set order_alerts = $1 where id = $2 returning id, order_alerts', [
+    !!req.body.order_alerts,
     req.params.id,
   ]);
   res.json(rows[0]);

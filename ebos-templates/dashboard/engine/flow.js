@@ -512,6 +512,20 @@ export async function handoverRecipients() {
   return biz[0]?.handover_number ? [{ phoneNumber: toWhatsAppDigits(biz[0].handover_number), staffId: null }] : [];
 }
 
+// A separate list from handoverRecipients -- Chidera, 2026-09-16: "a staff
+// number should be able to get a confirmed order after paystack has
+// automatically confirmed payment on their whatsapp without accessing the
+// back end... i think an owner doesnt want staff to get the whole back
+// end." handover_alerts is who deals with a customer escalation
+// (owner/manager, usually); order_alerts is who needs to know the moment a
+// payment clears and an order is ready to prep (kitchen/ops staff) --
+// deliberately no fallback to business.handover_number here: an unset
+// order_alerts list just means nobody gets pinged, not "guess who to tell."
+export async function orderAlertRecipients() {
+  const { rows } = await pool.query(`select id, phone_number from staff where order_alerts = true and phone_number is not null`);
+  return rows.map((s) => ({ phoneNumber: toWhatsAppDigits(s.phone_number), staffId: s.id }));
+}
+
 // Every staff alert below (a handover, a voice callback, a delivery
 // escalation) shares the same real failure mode sendStaffReply's own
 // synchronous fallback already handles for CUSTOMER messages: WhatsApp
@@ -2545,6 +2559,33 @@ export async function completePayment(orderId) {
   // still message in to add something while it's being prepared/delivered.
   // Staff marking it completed on the dashboard (routes/api.js) is what
   // actually closes it.
+
+  // Chidera, 2026-09-16: "a staff number should be able to get a confirmed
+  // order after paystack has automatically confirmed payment on their
+  // whatsapp without accessing the back end... the open link will just
+  // show the kanban so they can click the ready button." A plain text
+  // alert (what/who/how much), then a separate CTA-URL button opening the
+  // kanban board itself -- same two-message shape as handover()'s own
+  // conversation-link alert just above, landing on '/' (the board, same
+  // page PIN-tier staff already land on) rather than a specific order's
+  // page, since the "ready" action lives on the board's own order card,
+  // not a detail page.
+  const orderRecipients = await orderAlertRecipients();
+  if (orderRecipients.length) {
+    const { lines, total } = await summariseOrder(order);
+    const alertText = `Payment confirmed, ready to prepare: ${displayNameFor(customer)} (${order.fulfilment_type || 'pickup'})\n${lines}\nTotal: NGN ${total}`;
+    for (const { phoneNumber: to, staffId } of orderRecipients) {
+      await sendStaffAlert(to, alertText);
+      if (!process.env.PUBLIC_URL || !staffId) continue;
+      try {
+        const link = `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, '/')}`;
+        const credentials = await getWhatsAppCredentials(order.branch_id);
+        await sendWhatsAppCtaUrl(to, `Tap below to open the board.`, 'Open Orders', link, credentials);
+      } catch (err) {
+        console.error(`Failed to send order-alert board link to ${to}:`, err.message);
+      }
+    }
+  }
 }
 
 // WhatsApp gives no typing indicator on the business side, so there is no
