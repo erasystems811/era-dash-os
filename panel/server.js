@@ -11,6 +11,7 @@ import { startJob, getJob, runScript } from './jobs.mjs';
 import { router as workstationRoutes } from './routes/workstation.js';
 import { router as workstationEsfRoutes } from './routes/workstation-esf.js';
 import { main as runBotHealthCheck } from '../scripts/check-bot-health.mjs';
+import { main as runDeepHealthCheck } from '../scripts/deep-health-check.mjs';
 import { main as runBackupAllClients } from '../scripts/backup-all-clients.mjs';
 
 const MIGRATIONS_DIR = path.join(process.cwd(), '..', 'ebos-templates', 'migrations');
@@ -1622,6 +1623,22 @@ app.get('/monitoring', (req, res) => {
 app.get('/', (req, res) => {
   const registry = loadRegistry();
   res.send(page(registry.clients, getEbosClients(registry)));
+});
+
+// Checks what /api/ebos/status can't: whether the shared infrastructure
+// Meta actually talks to (the control panel's own domain, wa-router) is
+// reachable, and whether each client's WABA is still subscribed to us.
+// Built 2026-09-16 after both of those broke silently -- see
+// deep-health-check.mjs's own comment for the full story. Deliberately its
+// own endpoint, not folded into /api/ebos/status, since it does real
+// SSH+Graph API calls per client and shouldn't slow down the page every
+// human dashboard load already polls that route for.
+app.get('/api/ebos/deep-health', async (req, res) => {
+  try {
+    res.json(await runDeepHealthCheck());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/ebos/status', async (req, res) => {
