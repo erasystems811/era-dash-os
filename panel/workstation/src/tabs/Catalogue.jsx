@@ -1,16 +1,8 @@
 import React, { useState } from 'react';
 import { api } from '../api.js';
+import { compressImageToDataUrl } from '../imageUpload.js';
 
 const EMPTY = { name: '', description: '', price: '', availability_type: 'stock', duration_minutes: '' };
-
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
 
 export default function Catalogue({ catalogue, setCatalogue, businessType }) {
   const [form, setForm] = useState(EMPTY);
@@ -63,8 +55,10 @@ export default function Catalogue({ catalogue, setCatalogue, businessType }) {
     setBulkError(null);
     setBulkBusy(true);
     try {
-      const base64 = await readFileAsBase64(file);
-      const { items } = await api.post('/api/workstation/parse-menu', { image: { mediaType: file.type, base64 } });
+      const dataUrl = await compressImageToDataUrl(file);
+      const [header, base64] = dataUrl.split(',');
+      const mediaType = header.match(/data:(.*);base64/)[1];
+      const { items } = await api.post('/api/workstation/parse-menu', { image: { mediaType, base64 } });
       appendParsed(items);
     } catch (err) {
       setBulkError(err.message);
