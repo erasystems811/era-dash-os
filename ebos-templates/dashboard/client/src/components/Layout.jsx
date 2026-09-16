@@ -10,12 +10,14 @@ import { api } from '../api.js';
 // add-ons spliced in conditionally below (right after Conversations, so
 // they land in the same spot the requested order puts Delivery).
 //
-// Branches removed from here entirely, 2026-09-16 -- Chidera: "remove that
-// branches tab i should be the one able to add a branch not them." Adding a
-// branch is ERA's own call (server routing, WhatsApp numbers, staff
-// assignment all follow from it), never a client self-service action -- the
-// /branches route/page itself still exists for ERA's own use, it's just not
-// reachable from a client's own nav.
+// Branches removed from here, 2026-09-16 -- Chidera: "remove that branches
+// tab i should be the one able to add a branch not them" then "customer
+// with no branch shouldnt have branch tab". Two separate things: adding a
+// branch stays ERA's own call (Branches.jsx's own "Add branch" form is
+// gated off below, not removed here), and the TAB itself is spliced in
+// conditionally further down, alongside the other add-ons, only once a
+// business actually has 2+ branches to look at -- a single-location
+// business has nothing to show there at all.
 const BASE_NAV = [
   { to: '/', label: 'Orders', end: true },
   { to: '/conversations', label: 'Conversations' },
@@ -98,8 +100,16 @@ export default function Layout() {
   ];
   // Staff/Settings/Activity log stay owner-or-manager-visible in the nav
   // even when branch-locked; requireEditorApi on their write routes already
-  // governs who can actually change anything once there.
-  const baseNav = BASE_NAV;
+  // governs who can actually change anything once there. Branches is
+  // spliced in here (not folded into addOnItems above, which all land
+  // right after Conversations) so it keeps its own requested position --
+  // "orders-conversations-...-knowledge base-branches-documents-..." --
+  // right after Knowledge base, only once there's actually more than one
+  // branch to look at.
+  const baseNav =
+    branches.length > 1
+      ? [...BASE_NAV.slice(0, 4), { to: '/branches', label: 'Branches' }, ...BASE_NAV.slice(4)]
+      : BASE_NAV;
   const workArea = workAreaOf(staff);
   // The /in-house URL is deliberately handed out as its own link (Chidera
   // 2026-09-11: "i need a era-demo.erasystems.com.ng/in-house link that
@@ -150,8 +160,8 @@ export default function Layout() {
         <div className="brand">
           <span className="brand-mark">EB</span>
           <div>
-            EBOS
-            <small>{businessName}</small>
+            {businessName || 'EBOS'}
+            <small>Powered by ERA Systems</small>
           </div>
         </div>
         {showScopeSwitcher && (
