@@ -74,11 +74,12 @@ export async function readRemote(ip, remotePath, { user = 'root' } = {}) {
 }
 
 // 3 minutes used to be enough; found live, 2026-09-16, creating a
-// throwaway test client: two Hetzner boots in a row both came up reachable
-// only 10-40s past the old 3-minute mark, never within it -- bumped to 5
-// minutes rather than re-tuning to a number that just barely covers today's
-// observed timing.
-export async function waitForSsh(ip, { timeoutMs = 5 * 60 * 1000, intervalMs = 5000 } = {}) {
+// throwaway test client: three Hetzner boots in a row all needed more than
+// 5 minutes too (one confirmed still not reachable at the 5-minute mark,
+// ready within a couple more minutes after that) -- bumped to 10 minutes
+// rather than re-tuning to a number that just barely covers today's
+// observed timing again.
+export async function waitForSsh(ip, { timeoutMs = 10 * 60 * 1000, intervalMs = 5000 } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
