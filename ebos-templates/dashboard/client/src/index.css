@@ -204,12 +204,15 @@ a:hover {
   font-size: 27px;
   font-weight: 700;
   letter-spacing: -0.02em;
-  line-height: 1.1;
+  line-height: 1.15;
   color: #fff;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* A name that doesn't fit wraps to a second line instead of getting cut
+     off with an ellipsis (Chidera's call, 2026-09-16: "if a word cant
+     contain one line make it 2 not adding ..."). overflow-wrap so one
+     genuinely long word can still break mid-word rather than overflowing
+     the sidebar's own width. */
   max-width: 196px;
+  overflow-wrap: break-word;
 }
 /* Not sidebar-scoped -- the same accented-first-letter wordmark is reused
    in the mobile header below, which lives outside .sidebar entirely. */
@@ -974,12 +977,13 @@ label {
     font-weight: 700;
     font-size: 18px;
     letter-spacing: -0.02em;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    /* flex-shrink alone won't let ellipsis kick in -- a flex item's
-       default min-width is auto (its content's natural width), so it
-       never actually shrinks below that without this. */
+    line-height: 1.15;
+    /* A name that doesn't fit wraps to a second line instead of getting
+       cut off with an ellipsis (Chidera's call, 2026-09-16: "if a word
+       cant contain one line make it 2 not adding ..."). min-width:0 is
+       what actually lets this flex item shrink below its content's
+       natural width at all, wrap or not. */
+    overflow-wrap: break-word;
     flex: 1;
     min-width: 0;
   }

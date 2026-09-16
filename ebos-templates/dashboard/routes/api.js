@@ -1693,6 +1693,60 @@ router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
   });
 });
 
+// Chidera, 2026-09-16: "let crm tab and customer tab seperate cause
+// customer can reach 2000 and make crm tab too long, so let crm only be
+// recent chat" -- CRM's own "Recent" tab (Crm.jsx), same 7-day window and
+// shape as Feedback's own Recent tab, so it stays fast regardless of how
+// large the full customer base (Customers.jsx's own /customers list) gets.
+// "Recent" here means real order activity, not a literal message log --
+// same definition the /customers/stats daily chart already uses.
+router.get('/customers/recent', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select c.id, c.name, c.phone_number, c.birthday,
+       o.order_count, o.total_spend, o.last_order_at,
+       case when o.order_count = 1 then 'new' when coalesce(r.spend_pct_rank, 0) >= 0.9 then 'vip' else 'repeat' end as segment
+     from customers c
+     join (
+       select customer_id, count(*) as order_count, sum(total) as total_spend, max(completed_at) as last_order_at
+       from "order" where status = 'completed'
+       group by customer_id
+       having max(completed_at) > now() - interval '7 days'
+     ) o on o.customer_id = c.id
+     left join (
+       select customer_id, percent_rank() over (order by total_spend) as spend_pct_rank
+       from (
+         select customer_id, sum(total) as total_spend
+         from "order" where status = 'completed'
+         group by customer_id having count(*) >= 2
+       ) repeat_spend
+     ) r on r.customer_id = c.id
+     order by o.last_order_at desc`
+  );
+  res.json(rows);
+});
+
+// CRM's "By month" tab -- same one-row-per-calendar-month shape as
+// Feedback's own monthly view. new_customers counts each customer once, on
+// the month of their first-ever completed order; repeat_customers counts a
+// customer at most once per month even if they ordered more than once
+// that month (order_rank > 1 marks every order after their first, ever).
+router.get('/customers/monthly', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select to_char(date_trunc('month', completed_at), 'YYYY-MM') as month,
+       count(*) filter (where order_rank = 1)::int as new_customers,
+       count(distinct customer_id) filter (where order_rank > 1)::int as repeat_customers,
+       coalesce(sum(total), 0) as revenue,
+       count(*)::int as total_orders
+     from (
+       select customer_id, total, completed_at, row_number() over (partition by customer_id order by completed_at) as order_rank
+       from "order" where status = 'completed'
+     ) o
+     group by date_trunc('month', completed_at)
+     order by date_trunc('month', completed_at) desc`
+  );
+  res.json(rows);
+});
+
 // Deliberately its own narrow route (one field), not folded into a
 // general customer-edit endpoint that doesn't otherwise exist yet -- this
 // is the popup on an order's own page asking for a missing birthday

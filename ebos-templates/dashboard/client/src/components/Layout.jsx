@@ -111,7 +111,12 @@ export default function Layout() {
     ...(deliveryMode === 'own_riders' ? [{ to: '/delivery', label: 'Delivery' }] : []),
     ...(voiceEnabled ? [{ to: '/voice', label: 'Voice' }] : []),
     ...(dineinEnabled ? [{ to: '/dinein', label: 'Dine-in' }] : []),
-    ...(crmEnabled ? [{ to: '/customers', label: 'Customers' }] : []),
+    // Chidera, 2026-09-16: split into two tabs -- CRM (stats/charts/
+    // recent/monthly) and Customers (the full, potentially thousands-of-
+    // rows list) -- see Crm.jsx and Customers.jsx's own comments. Same
+    // crmEnabled toggle covers both; there's no separate add-on for just
+    // one of them.
+    ...(crmEnabled ? [{ to: '/crm', label: 'CRM' }, { to: '/customers', label: 'Customers' }] : []),
     ...(posEnabled ? [{ to: '/pos', label: 'POS' }] : []),
   ];
   // Staff/Settings/Activity log stay owner-or-manager-visible in the nav
