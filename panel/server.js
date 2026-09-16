@@ -21,7 +21,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKSTATION_DIST = path.join(__dirname, 'workstation', 'dist');
 const WORKSTATION_ESF_DIST = path.join(__dirname, 'workstation-esf', 'dist');
 const app = express();
-app.use(express.json());
+// Default (100kb) is nowhere near enough for the workstation's menu-photo
+// upload (/api/workstation/parse-menu) -- even after client-side compression
+// (panel/workstation/src/imageUpload.js), a 1600px JPEG is easily
+// 200KB-1MB. Matches the same limit ebos-templates/dashboard/server.js
+// already uses for its own photo uploads.
+app.use(express.json({ limit: '20mb' }));
 
 // Public on purpose, before the auth gate below -- Meta's App Review needs
 // to reach this without credentials.
