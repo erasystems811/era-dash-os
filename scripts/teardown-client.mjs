@@ -5,7 +5,7 @@
 // this automation — NOT for real client offboarding without extra thought
 // (this is permanent and does not back anything up first).
 
-import { loadRegistry, saveRegistry, findClient, removeClient, clientsOnServer } from './lib/registry.mjs';
+import { loadRegistry, saveRegistry, findClient, removeClient, clientsOnServer, findServer, removeServer } from './lib/registry.mjs';
 import { loadSecrets } from './lib/secrets.mjs';
 import * as digitalocean from './lib/digitalocean.mjs';
 import * as hetzner from './lib/hetzner.mjs';
@@ -54,7 +54,28 @@ async function main() {
     console.log('  Removed this client\'s stack and its routing from the shared Caddy.');
     const remaining = clientsOnServer(registry, client.ip).filter((c) => c.name !== client.name);
     if (!remaining.length) {
-      console.log(`  NOTE: ${client.ip} now has no other clients on it. It's still running (not auto-deleted, since deleting a server is a bigger decision than tearing down one client) -- either reuse it with --shared-server=${client.ip} for the next client, or delete it by hand (the ${client.provider || 'oracle'} console, or that provider's deleteServer with its server ID) if you want the cost back.`);
+      // Chidera, 2026-09-16: "anytime there is a tear down let it actally
+      // be tearing down not just leaving dash" -- a shared server nobody's
+      // left on is pure wasted cost, not a "keep it around just in case"
+      // situation, so this now actually deletes it instead of printing a
+      // note asking for a manual follow-up step that's easy to forget.
+      const server = findServer(registry, client.ip);
+      if (server) {
+        console.log(`  ${client.ip} now has no other clients on it -- deleting the server too...`);
+        if (server.provider === 'hetzner') {
+          await hetzner.deleteServer(secrets.HETZNER_TOKEN, server.serverId);
+        } else if (server.provider === 'oracle') {
+          await oracle.deleteServer(oracle.requireOracleConfig(secrets), server.serverId);
+        } else if (server.provider === 'ovh') {
+          await ovh.deleteServer(ovh.requireOvhConfig(secrets), server.serverId);
+        } else {
+          await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, server.serverId);
+        }
+        removeServer(registry, client.ip);
+        console.log('  Server deleted.');
+      } else {
+        console.log(`  NOTE: ${client.ip} has no other clients on it, but no matching entry was found in registry.servers to delete it by -- check the ${client.provider || 'oracle'} console by hand.`);
+      }
     }
   } else {
     const provider = client.provider || 'digitalocean'; // older registry entries predate the provider field
