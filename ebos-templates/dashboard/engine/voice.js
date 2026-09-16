@@ -8,7 +8,7 @@
 // TelephonyProvider + streaming STT.
 import { pool } from '../lib/db.js';
 import { handleVoiceTurn, escalateVoiceCall, handleClosedHoursCall } from './flow.js';
-import { checkOperatingHours } from './voice-hours.js';
+import { checkOperatingHours } from './hours.js';
 
 // Starting point only -- spec A7's own words: "two weeks of confidence
 // scores from a real restaurant is worth more than any amount of testing

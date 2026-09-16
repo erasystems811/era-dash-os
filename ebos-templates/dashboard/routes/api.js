@@ -1750,6 +1750,30 @@ router.get('/business', requireFullAccessApi, async (req, res) => {
   res.json(rows[0] || null);
 });
 
+// Opening hours -- stored on the primary branch's own opening_hours column
+// (engine/hours.js checks it on every inbound message), not a new business-
+// level column. For the common single-branch business this is
+// indistinguishable from "the business's hours"; a multi-branch business
+// wanting different hours per location sets them from Branches instead --
+// not built here, since nobody's asked for it yet (see hours.js's own
+// comment on not building ahead of a real need).
+router.get('/business-hours', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(`select opening_hours from branch where is_primary = true limit 1`);
+  res.json({ opening_hours: rows[0]?.opening_hours || null });
+});
+
+router.post('/business-hours', requireEditorApi, async (req, res) => {
+  const { open, close } = req.body;
+  // Either both set (a real {open, close} pair) or both cleared (back to
+  // "always open", the same "not configured" state a business starts in).
+  const openingHours = open && close ? { open, close } : null;
+  const { rows } = await pool.query(
+    `update branch set opening_hours = $1 where is_primary = true returning opening_hours`,
+    [openingHours ? JSON.stringify(openingHours) : null]
+  );
+  res.json({ opening_hours: rows[0]?.opening_hours || null });
+});
+
 // Which Instagram account (if any) is actually connected right now, read
 // live from Meta rather than just echoing back the stored user ID -- a
 // real username/profile picture is what actually lets staff (or a Meta App

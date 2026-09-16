@@ -1,14 +1,18 @@
-// Out-of-hours handling for the voice add-on (spec A9). Deliberately its
-// own small, structured format -- `{ open: "HH:MM", close: "HH:MM" }`,
-// applied every day -- rather than reusing business.operating_hours/
-// branch.opening_hours, which are free text everywhere else in this
-// codebase (interpolated straight into an AI prompt in flow.js, never
-// parsed programmatically). A real "is it open right now" decision needs
-// something a program can actually compare, not a sentence an AI would
-// have to re-interpret on every single call, which would mean cost,
-// latency, and a wrong guess on a bad day, for a fact that's really just
-// two numbers. A full day-by-day schedule is a natural next step once a
-// real client actually needs one -- not built ahead of that need.
+// Out-of-hours handling, shared by the voice add-on (spec A9) and the
+// regular WhatsApp/Instagram text flow (Chidera, 2026-09-16: tell a
+// customer who messages while closed when the business opens, instead of
+// answering normally). Deliberately its own small, structured format --
+// `{ open: "HH:MM", close: "HH:MM" }`, applied every day -- rather than the
+// separate business.operating_hours/branch.operating_hours free-text
+// columns interpolated straight into an AI prompt elsewhere in this
+// codebase. A real "is it open right now" decision needs something a
+// program can actually compare, not a sentence an AI would have to
+// re-interpret on every single message, which would mean cost, latency,
+// and a wrong guess on a bad day, for a fact that's really just two
+// numbers. Stored on branch.opening_hours (already a jsonb column, unused
+// before this) -- a real place for a program to compare against, not text.
+// A full day-by-day schedule is a natural next step once a real client
+// actually needs one -- not built ahead of that need.
 //
 // Fixed to Africa/Lagos: every existing timezone default in this codebase
 // (branch.timezone) already assumes it, and EBOS has no client outside

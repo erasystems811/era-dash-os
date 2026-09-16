@@ -18,11 +18,19 @@ export default function Settings() {
   const [waSaved, setWaSaved] = useState(false);
   const [waError, setWaError] = useState(null);
   const [uploadingField, setUploadingField] = useState(null);
+  const [hoursOpen, setHoursOpen] = useState('');
+  const [hoursClose, setHoursClose] = useState('');
+  const [hoursSaved, setHoursSaved] = useState(false);
+  const [hoursError, setHoursError] = useState(null);
 
   useEffect(() => {
     api.get('/business').then(setBusiness);
     api.get('/settings/instagram-status').then(setInstagramStatus);
     api.get('/whatsapp-profile').then(setWaProfile).catch((err) => setWaError(err.message));
+    api.get('/business-hours').then((h) => {
+      setHoursOpen(h.opening_hours?.open || '');
+      setHoursClose(h.opening_hours?.close || '');
+    });
   }, []);
 
   if (!business) return null;
@@ -118,6 +126,20 @@ export default function Settings() {
       setWaSaved(true);
     } catch (err) {
       setWaError(err.message);
+    }
+  }
+
+  async function saveHours(e) {
+    e.preventDefault();
+    setHoursError(null);
+    setHoursSaved(false);
+    try {
+      const updated = await api.post('/business-hours', { open: hoursOpen || null, close: hoursClose || null });
+      setHoursOpen(updated.opening_hours?.open || '');
+      setHoursClose(updated.opening_hours?.close || '');
+      setHoursSaved(true);
+    } catch (err) {
+      setHoursError(err.message);
     }
   }
 
@@ -232,6 +254,29 @@ export default function Settings() {
             <div className="field">
               <label>Account name</label>
               <input value={business.bank_account_name || ''} onChange={(e) => set('bank_account_name', e.target.value)} disabled={!editable} />
+            </div>
+          </div>
+          {editable && <button type="submit">Save</button>}
+        </form>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Opening hours</h3>
+        <p className="hint">
+          While you're closed, customers who message get told when you open and are messaged again the moment you do -- instead of
+          the bot replying like you're open. Leave both blank to stay always open (the default).
+        </p>
+        {hoursSaved && <div className="success-banner">Saved.</div>}
+        {hoursError && <div className="error-banner">Could not save: {hoursError}</div>}
+        <form onSubmit={saveHours}>
+          <div className="form-row">
+            <div className="field">
+              <label>Opens at</label>
+              <input type="time" value={hoursOpen} onChange={(e) => setHoursOpen(e.target.value)} disabled={!editable} />
+            </div>
+            <div className="field">
+              <label>Closes at</label>
+              <input type="time" value={hoursClose} onChange={(e) => setHoursClose(e.target.value)} disabled={!editable} />
             </div>
           </div>
           {editable && <button type="submit">Save</button>}

@@ -23,7 +23,7 @@ import { router as riderApiRoutes } from './routes/rider.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
-import { recoverPendingMessages, closeStaleOrders } from './engine/flow.js';
+import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -181,4 +181,11 @@ app.listen(port, () => {
   setInterval(() => {
     sweepOfferEscalation().catch((err) => console.error('sweepOfferEscalation failed:', err));
   }, 15_000);
+  // "Let them know immediately they open" (Chidera, 2026-09-16) -- a minute
+  // is frequent enough that nobody notices the delay, and the sweep itself
+  // is a no-op read whenever no branch has both opening_hours set and a
+  // customer actually waiting, which is most minutes for most businesses.
+  setInterval(() => {
+    sweepOpeningNotifications().catch((err) => console.error('sweepOpeningNotifications failed:', err));
+  }, 60_000);
 });

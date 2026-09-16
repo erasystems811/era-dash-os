@@ -16,6 +16,7 @@ import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
 import { createMagicLink, findStaffByPhoneNumber, toWhatsAppDigits } from '../lib/auth.js';
+import { checkOperatingHours } from './hours.js';
 
 // The one place that decides "who is this customer and how do we reach
 // them" by channel -- WhatsApp uses their phone number, Instagram uses
@@ -3293,9 +3294,82 @@ export async function handleMenuItemTap({ phoneNumber, channelId, product, chann
   await finishItemsCollection(customer, order, `Added ${product.name}. `);
 }
 
+// The branch whose opening_hours actually govern this customer -- their
+// own branch if one's resolved (multi-branch, independent sharing), else
+// the primary branch, same "zero/one/many" fallback every other
+// branch-scoped fact in this file already uses rather than assuming a
+// business has exactly one.
+async function branchHoursFor(customer) {
+  const { rows } = await pool.query(
+    customer.branch_id ? `select id, opening_hours from branch where id = $1` : `select id, opening_hours from branch where is_primary = true limit 1`,
+    customer.branch_id ? [customer.branch_id] : []
+  );
+  return { branchId: rows[0]?.id || null, openingHours: rows[0]?.opening_hours || null };
+}
+
+// Chidera, 2026-09-16: "when its not in that time it can tell client that
+// they are not currently open and the time they open and say itll let them
+// know immediately they open." A hard early return, not a prefix folded
+// into the normal flow -- closed means closed, no menu, no order-taking,
+// same shape as handleClosedHoursCall's voice equivalent. Upserting into
+// hours_notify_request is what sweepOpeningNotifications (below) later
+// finds to actually send that promised message; ON CONFLICT DO NOTHING
+// means messaging again while still closed doesn't queue a second one.
+async function handleClosedHoursMessage(customer, opensAt, branchId) {
+  const message = opensAt
+    ? `We're closed right now, we open again at ${opensAt}. I'll message you the moment we're open.`
+    : `We're closed right now.`;
+  await reply(customer, message, 'closed_hours');
+  await pool.query(
+    `insert into hours_notify_request (customer_id, branch_id) values ($1, $2) on conflict (customer_id) where notified_at is null do nothing`,
+    [customer.id, branchId]
+  );
+}
+
+// Run on an interval from server.js, same "cheap when nothing's waiting,
+// genuinely inert for a business that's never set opening_hours" shape as
+// every other sweep in this codebase. Per branch (not globally) since two
+// branches can keep different hours -- only a branch that's actually open
+// right now, with rows actually waiting, does any work.
+export async function sweepOpeningNotifications() {
+  const { rows: branches } = await pool.query(
+    `select distinct b.id, b.opening_hours from branch b
+     join hours_notify_request r on r.branch_id = b.id and r.notified_at is null
+     where b.opening_hours is not null`
+  );
+  for (const branch of branches) {
+    const { open } = checkOperatingHours(branch.opening_hours);
+    if (!open) continue;
+    const { rows: pending } = await pool.query(`select * from hours_notify_request where branch_id = $1 and notified_at is null`, [branch.id]);
+    for (const request of pending) {
+      const { rows: customerRows } = await pool.query('select * from customers where id = $1', [request.customer_id]);
+      const customer = customerRows[0];
+      await pool.query('update hours_notify_request set notified_at = now() where id = $1', [request.id]);
+      if (!customer) continue;
+      try {
+        await reply(customer, `We're open now! Reply to place an order.`, 'opening_notify');
+      } catch (err) {
+        console.error(`Failed to send opening notification to customer ${customer.id}:`, err);
+      }
+    }
+  }
+}
+
 export async function handleInboundMessage({ phoneNumber, channelId, text, channel = 'whatsapp', messageId, branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: text });
+
+  // Voice has its own separate closed-hours path (voice_config.operating_hours,
+  // checked in engine/voice.js before this function is ever reached) -- this
+  // is the text-channel (WhatsApp/Instagram) equivalent, using the branch's
+  // own opening_hours instead.
+  const { branchId: hoursBranchId, openingHours } = await branchHoursFor(customer);
+  const hours = checkOperatingHours(openingHours);
+  if (!hours.open) {
+    await handleClosedHoursMessage(customer, hours.opensAt, hoursBranchId);
+    return;
+  }
+
   // Best-effort -- shows "typing..." for the whole debounce+processing
   // wait so the customer sees something happening instead of silence.
   // Never let this delay or break the actual reply. Only started for the
