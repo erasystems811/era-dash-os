@@ -531,6 +531,11 @@ async function ebosBusinessStatus(client, hetznerToken) {
     voiceEnabled: Boolean(voiceConfig?.enabled),
     dineinEnabled: Boolean(dineinConfig?.enabled),
     crmEnabled: Boolean(crmConfig?.enabled),
+    // Chidera, 2026-09-17: "not every restaurant needs it, let it be a
+    // toogle on or off capability" -- its own field, not just CRM's.
+    // Defaults true (matches the migration's own default) so a business
+    // that never touches this toggle keeps today's behavior.
+    birthdayPromptEnabled: crmConfig?.birthday_prompt_enabled !== false,
     posSyncEnabled: Boolean(posSyncConfig?.enabled),
     posSyncConnected: Boolean(posSyncConfig?.hasWebhookCredentials),
     // Already on the registry (add-payment.mjs sets it, same field the
@@ -606,8 +611,8 @@ function businessesSection(ebosClients) {
   <div id="ebosTotals" style="margin:10px 0;font-size:14px;">Loading totals...</div>
   <button onclick="pushUpdate(null, true)" title="Rolls out the current template/dashboard code to every EBOS business at once -- secrets are read back from each server and reused, never regenerated.">Push code update to all EBOS businesses</button>
   <table>
-    <tr><th>Name</th><th>Status</th><th>AI cost (this month)</th><th>Server cost (monthly)</th><th title="Real bot errors and AI/API failures in the last hour -- not handovers or normal business activity, just signs the engine itself is broken.">Code errors (1h)</th><th>Chowdeck delivery</th><th>Own-rider delivery</th><th>Voice ordering</th><th>Dine-in</th><th>Customers</th><th>POS</th><th>Payment</th><th>Last code push</th></tr>
-    <tbody id="ebosStatusRows"><tr><td colspan="13">Loading...</td></tr></tbody>
+    <tr><th>Name</th><th>Status</th><th>AI cost (this month)</th><th>Server cost (monthly)</th><th title="Real bot errors and AI/API failures in the last hour -- not handovers or normal business activity, just signs the engine itself is broken.">Code errors (1h)</th><th>Chowdeck delivery</th><th>Own-rider delivery</th><th>Voice ordering</th><th>Dine-in</th><th>Customers</th><th title="Only matters while Customers is on -- the popup on the customer's own web menu page asking for their birthday.">Birthday pop up</th><th>POS</th><th>Payment</th><th>Last code push</th></tr>
+    <tbody id="ebosStatusRows"><tr><td colspan="14">Loading...</td></tr></tbody>
   </table>
 
   <p><a href="/monitoring">Open Bot Monitoring &rarr;</a> &mdash; the full live feed across every business, on its own page so this one stays fast as you add more businesses. "Code errors (1h)" above is still the quick at-a-glance number.</p>
@@ -1199,6 +1204,20 @@ async function toggleCrmMode(name, enabled) {
   loadEbosStatus();
 }
 
+// Chidera, 2026-09-17: "that birthday pop up, not every restaurant needs
+// it, let it be a toogle on or off capability" -- separate from CRM's own
+// toggle above, same confirm-then-call shape.
+async function toggleBirthdayPromptMode(name, enabled) {
+  if (!confirm((enabled ? 'Enable' : 'Disable') + ' the birthday pop up for ' + name + '?')) {
+    loadEbosStatus();
+    return;
+  }
+  const res = await fetch('/api/ebos/birthday-prompt-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name, enabled }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); loadEbosStatus(); return; }
+  loadEbosStatus();
+}
+
 async function togglePosSyncMode(name, enabled) {
   if (!confirm((enabled ? 'Enable' : 'Disable') + ' POS sync for ' + name + '?')) {
     loadEbosStatus();
@@ -1233,16 +1252,17 @@ async function loadEbosStatus() {
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.voiceEnabled ? 'checked' : '') + ' onchange="toggleVoiceMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.voiceEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.dineinEnabled ? 'checked' : '') + ' onchange="toggleDineinMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.dineinEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.crmEnabled ? 'checked' : '') + ' onchange="toggleCrmMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.crmEnabled ? 'on' : 'off') + '</label></td>'
+          + '<td><label><input type="checkbox" style="width:auto" ' + (b.birthdayPromptEnabled ? 'checked' : '') + ' onchange="toggleBirthdayPromptMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.birthdayPromptEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.posSyncEnabled ? 'checked' : '') + ' onchange="togglePosSyncMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.posSyncEnabled ? 'on' : 'off') + '</label>' + (b.posSyncEnabled && !b.posSyncConnected ? ' <span class="danger" title="No Moniepoint webhook credentials set yet -- run scripts/add-pos-sync.mjs once the client has real API access.">(not connected)</span>' : '') + '</td>'
           + '<td>' + (b.paymentProvider ? escClient(b.paymentProvider) : 'no') + '</td>'
           + '<td>' + (b.lastPushedAt ? new Date(b.lastPushedAt).toLocaleString() : 'never') + '</td>'
           + '</tr>'
         ).join('')
-      : '<tr><td colspan="13">No businesses yet.</td></tr>';
+      : '<tr><td colspan="14">No businesses yet.</td></tr>';
   } catch (err) {
     const totalsEl = document.getElementById('ebosTotals');
     if (totalsEl) totalsEl.textContent = '';
-    el.innerHTML = '<tr><td colspan="13">Error: ' + escClient(err.message) + '</td></tr>';
+    el.innerHTML = '<tr><td colspan="14">Error: ' + escClient(err.message) + '</td></tr>';
   }
 }
 loadEbosStatus();
@@ -1780,6 +1800,20 @@ app.post('/api/ebos/crm-mode', async (req, res) => {
     const { client: name, enabled } = req.body;
     const client = ebosClientOrThrow(name);
     res.json(await callBusinessApi(client, '/api/crm-config', 'POST', { enabled: Boolean(enabled) }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-17: "that birthday pop up, not every restaurant needs
+// it, let it be a toogle on or off capability" -- same /api/crm-config
+// route as crm-mode above, just the other field (birthdayPromptEnabled
+// only, so this never touches CRM's own on/off).
+app.post('/api/ebos/birthday-prompt-mode', async (req, res) => {
+  try {
+    const { client: name, enabled } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/crm-config', 'POST', { birthdayPromptEnabled: Boolean(enabled) }));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }

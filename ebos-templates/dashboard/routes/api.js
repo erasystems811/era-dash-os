@@ -469,16 +469,26 @@ router.get('/crm-config', async (req, res) => {
   const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
   if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
   if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
-  const { rows } = await pool.query(`select business_id, enabled from crm_config limit 1`);
-  res.json(rows[0] || { enabled: false });
+  const { rows } = await pool.query(`select business_id, enabled, birthday_prompt_enabled from crm_config limit 1`);
+  res.json(rows[0] || { enabled: false, birthday_prompt_enabled: true });
 });
 
+// Chidera, 2026-09-17: "that birthday pop up, not every restaurant needs
+// it, let it be a toogle on or off capability" -- birthdayPromptEnabled is
+// its own independent field now, not tied to CRM's own on/off. Both args
+// optional so the panel's two separate toggles (crm-mode, its own new
+// birthday-prompt-mode below) can each update just their own field without
+// clobbering the other's current value.
 router.post('/crm-config', requireEraAdmin, async (req, res) => {
-  const { enabled } = req.body;
+  const { enabled, birthdayPromptEnabled } = req.body;
   const { rows } = await pool.query(
-    `insert into crm_config (business_id, enabled) values ((select id from business limit 1), $1)
-     on conflict (business_id) do update set enabled = excluded.enabled returning *`,
-    [enabled]
+    `insert into crm_config (business_id, enabled, birthday_prompt_enabled)
+     values ((select id from business limit 1), coalesce($1, false), coalesce($2, true))
+     on conflict (business_id) do update set
+       enabled = coalesce($1, crm_config.enabled),
+       birthday_prompt_enabled = coalesce($2, crm_config.birthday_prompt_enabled)
+     returning *`,
+    [enabled, birthdayPromptEnabled]
   );
   res.json(rows[0]);
 });

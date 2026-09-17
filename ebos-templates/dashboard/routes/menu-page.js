@@ -95,13 +95,13 @@ router.get('/:token', async (req, res) => {
     menuForBranch(customer.branch_id),
     pendingOrderPayload(customer.id),
     resolveWaNumber(customer.branch_id),
-    pool.query('select enabled from crm_config limit 1'),
+    pool.query('select enabled, birthday_prompt_enabled from crm_config limit 1'),
   ]);
   res.set('Content-Type', 'text/html').send(
     renderMenuPage({
       reviewPath: `/m/${req.params.token}/review`,
       birthdayPath: `/m/${req.params.token}/birthday`,
-      showBirthdayPrompt: Boolean(crmRows.rows[0]?.enabled) && !customer.birthday,
+      showBirthdayPrompt: Boolean(crmRows.rows[0]?.enabled) && crmRows.rows[0]?.birthday_prompt_enabled !== false && !customer.birthday,
       businessName: branding.business_name || '',
       subtitle: 'Pick what you would like, then review your order.',
       coverPhotoVersion: branding.cover_photo_version,
