@@ -996,6 +996,21 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
       // who writes their whole order in one go should never have to repeat
       // it back one item at a time.
       const { matched, ambiguous } = await extractOrderItems(text, order.branch_id);
+      // Chidera, 2026-09-17: "a customer texted she wanted to order alfredo
+      // pasta and the bot attended to her with text which is good but at
+      // the begining he would have also sent the menu text... some
+      // customers may not know thats available" -- this "already shown"
+      // check used to only be computed inside the !matched.length branch
+      // below, so a message that named a real item successfully on the
+      // very first try (skipping that branch entirely) never triggered the
+      // menu send at all -- the customer who names one dish they already
+      // know about never finds out what else is on offer. Computed once,
+      // shared by both branches, so "first items interaction on this
+      // order" means the same thing whether or not the message matched.
+      const { rows: menuAlreadyShown } = await pool.query(
+        `select 1 from message where customer_id = $1 and trigger = 'items_menu_shown' and created_at >= $2 limit 1`,
+        [customer.id, order.created_at]
+      );
       if (!matched.length) {
         // A vague mention that could genuinely mean more than one real item
         // ("rice" when both jollof and fried rice exist) -- ask which one,
@@ -1020,11 +1035,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         // fast. After that, a short nudge instead: they can already see
         // what's on offer, no need to recite it back every time nothing
         // matches.
-        const { rows: shown } = await pool.query(
-          `select 1 from message where customer_id = $1 and trigger = 'items_menu_shown' and created_at >= $2 limit 1`,
-          [customer.id, order.created_at]
-        );
-        if (shown.length) {
+        if (menuAlreadyShown.length) {
           await send(`You can check what we have and let me know what you'd like.`, 'items_reask');
         } else {
           // The real web menu page (engine/menu-page-template.js) beats
@@ -1070,6 +1081,26 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
       }
       for (const m of matched) {
         await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, m.productId, m.quantity, m.price]);
+      }
+      // Named a real item straight away, first try -- still worth showing
+      // the full menu once (see the comment on menuAlreadyShown above):
+      // they only told us about the one dish they already had in mind, not
+      // everything else on offer. Sent ahead of the normal text reply
+      // below, not instead of it -- "attended to her with text... at the
+      // beginning he would have also sent the menu."
+      if (!menuAlreadyShown.length && customer.channel !== 'instagram') {
+        const sent = await sendWebMenuLink(customer, await menuGreetingBody()).catch((err) => {
+          console.error('sendWebMenuLink failed:', err.message);
+          return false;
+        });
+        // sendWebMenuLink's own logMessage tags itself 'menu_shown', not
+        // 'items_menu_shown' -- that second, specific trigger is what
+        // menuAlreadyShown's own query above looks for, so it has to be
+        // logged here too or every later message in this same order would
+        // think the menu was never shown and keep re-sending it.
+        if (sent) {
+          await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[covered by menu button above, no separate text sent]', trigger: 'items_menu_shown', processed: true });
+        }
       }
       // The clear items above still get added -- the ambiguous part just
       // rides along on whatever reply comes next (branch, confirm, etc.)
