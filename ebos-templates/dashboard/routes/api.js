@@ -26,6 +26,7 @@ import {
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
 import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
+import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
 import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../engine/whatsapp-profile.js';
@@ -489,6 +490,33 @@ router.post('/crm-config', requireEraAdmin, async (req, res) => {
        birthday_prompt_enabled = coalesce($2, crm_config.birthday_prompt_enabled)
      returning *`,
     [enabled, birthdayPromptEnabled]
+  );
+  res.json(rows[0]);
+});
+
+// Chidera, 2026-09-17: "i give them 1500 free every month then they cover
+// the rest by putting money in an account... i extract it from there" --
+// ERA's own prepaid message wallet (engine/wallet.js), enabled/credited
+// ONLY from the panel side (requireEraAdmin), same "ERA switches these"
+// shape as every other add-on toggle. Deliberately no client-facing
+// self-service top-up yet -- she credits it herself once she's actually
+// received the money, outside this codebase.
+router.get('/wallet-status', requireEraAdmin, async (req, res) => {
+  res.json((await getWalletStatus()) || { enabled: false, balance_kobo: 0 });
+});
+
+router.post('/wallet-credit', requireEraAdmin, async (req, res) => {
+  const kobo = Math.round(Number(req.body?.naira) * 100);
+  if (!Number.isInteger(kobo) || kobo <= 0) return res.status(400).json({ error: 'A positive naira amount is required.' });
+  res.json(await creditWallet(kobo));
+});
+
+router.post('/wallet-mode', requireEraAdmin, async (req, res) => {
+  const { enabled } = req.body;
+  const { rows } = await pool.query(
+    `insert into message_wallet (business_id, enabled) values ((select id from business limit 1), $1)
+     on conflict (business_id) do update set enabled = excluded.enabled returning *`,
+    [Boolean(enabled)]
   );
   res.json(rows[0]);
 });

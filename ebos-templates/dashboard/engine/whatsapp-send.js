@@ -1,6 +1,8 @@
 // The real WhatsApp Cloud API send call -- this is the whatsappSend
 // dependency injected into bot-engine/send.js's sendMessage. Nothing else
 // in the engine talks to Meta's API directly.
+import { canSendAndCharge } from './wallet.js';
+
 const GRAPH_VERSION = 'v20.0';
 
 // Retries a transient network blip or a Meta-side 5xx (2 short retries) so
@@ -15,7 +17,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Chidera, 2026-09-17: "i give them 1500 free every month then they cover
+// the rest by putting money in an account... if not it wont go" -- thrown,
+// not silently swallowed here, specifically so it's caught by the many
+// .catch((err) => { console.error(...); return false; }) patterns already
+// throughout flow.js, degrading each of those call sites toward roughly
+// the same "didn't go out" behavior they already have for a real send
+// failure, without every call site needing to be individually rewritten.
+// message_wallet.enabled stays false for every business right now (built
+// 2026-09-17, deliberately not turned on for anyone yet) -- this class
+// never actually throws until that changes. Known gap before it's ever
+// enabled for real: a handover()/error-recovery message sent AFTER a
+// wallet-exhausted throw would itself throw again through this same gate
+// -- needs a real look at exactly how that should degrade before rollout,
+// not guessed at here.
+export class WalletExhaustedError extends Error {}
+
 async function postMessage(phoneNumberId, accessToken, payload) {
+  if (!(await canSendAndCharge())) {
+    throw new WalletExhaustedError('Message wallet balance exhausted for this business.');
+  }
   for (let attempt = 0; ; attempt++) {
     let res;
     try {

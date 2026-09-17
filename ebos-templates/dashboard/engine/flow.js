@@ -1801,14 +1801,25 @@ async function handleCollectFulfilment(customer, order, text) {
 // Shared by sendPaymentInstructions and its repeat-reminder counterpart --
 // same real send, same reasoning (see buildPayLine's own comment on why
 // the URL travels as a button, not embedded text) either time it's needed.
-async function sendPaymentLinkButton(customer, paymentUrl) {
+//
+// Chidera, 2026-09-17: "cutting from ~15 to ~10 messages per order... but
+// be careful let the current quality not drop" -- `bodyText` used to be a
+// separate plain-text reply sent right before this (e.g. "Please pay NGN
+// X using the button below."), immediately followed by this exact button
+// with a near-empty body ("Tap below to pay securely."). WhatsApp's own
+// CTA-URL body field already holds up to 1024 characters, so that lead-in
+// text now travels AS the button's own body instead of its own separate
+// message -- same information, same button, one send instead of two. Only
+// on Instagram (no CTA-URL button type) does bodyText still need its own
+// plain-text line ahead of the raw link.
+async function sendPaymentLinkButton(customer, paymentUrl, bodyText) {
   if (customer.channel === 'instagram') {
-    await reply(customer, `Pay here: ${paymentUrl}`);
+    await reply(customer, `${bodyText}\n\nPay here: ${paymentUrl}`);
     return;
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), 'Tap below to pay securely.', 'Pay now', paymentUrl, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[payment link sent: ${paymentUrl}]`, trigger: 'payment_link', processed: true });
+  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, 'Pay now', paymentUrl, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText}\n[payment link sent: ${paymentUrl}]`, trigger: 'payment_link', processed: true });
 }
 
 async function buildPayLine(order, customer, { amount, amountLabel }) {
@@ -1895,8 +1906,11 @@ async function sendPaymentInstructions(customer, order) {
   // copying out -- each on its own line reads the way a real transfer
   // slip would.
   const { payLine, needsHandover, paymentUrl } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
-  await reply(customer, `${invoiceLine}\n\n${payLine}`);
-  if (paymentUrl) await sendPaymentLinkButton(customer, paymentUrl);
+  if (paymentUrl) {
+    await sendPaymentLinkButton(customer, paymentUrl, `${invoiceLine}\n\n${payLine}`);
+  } else {
+    await reply(customer, `${invoiceLine}\n\n${payLine}`);
+  }
   // ackText false -- payLine already told them someone will confirm payment
   // details (see above), same double-ack bug as the others fixed 2026-09-03.
   if (needsHandover) await handover(customer, 'Order ready for payment but no payment method is configured for this business yet', null, false);
@@ -2101,8 +2115,11 @@ async function handleWaitingOnPayment(customer, order, text) {
   // never say something different (a stale bank-transfer reminder after
   // the business switched to Paystack would be a real lie).
   const { payLine, needsHandover, paymentUrl } = await buildPayLine(order, customer, { amount: order.total, amountLabel: order.total });
-  await reply(customer, payLine, 'payment_reminder');
-  if (paymentUrl) await sendPaymentLinkButton(customer, paymentUrl);
+  if (paymentUrl) {
+    await sendPaymentLinkButton(customer, paymentUrl, payLine);
+  } else {
+    await reply(customer, payLine, 'payment_reminder');
+  }
   if (needsHandover) await handover(customer, 'Customer waiting on payment but no payment link/bank details are available', null, false);
 }
 

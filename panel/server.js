@@ -845,6 +845,14 @@ function page(clients, ebosClients) {
       <button type="submit">Add payment</button>
     </form>
 
+    <h4>Message wallet</h4>
+    <p class="muted">Chidera, 2026-09-17: "1500 free every month then they cover the rest by putting money in an account". Off by default -- turning it on means this business's bot stops sending any WhatsApp message the moment its balance can't cover the next one, so only flip it on once you've actually agreed this with them. <button type="button" onclick="loadWalletStatus()">Load status</button></p>
+    <div id="walletStatus" style="margin:10px 0;"></div>
+    <form id="walletCreditForm">
+      <label>Credit balance (NGN)</label><input name="naira" type="number" min="1" step="1" required>
+      <button type="submit">Add funds</button>
+    </form>
+
     <h4>Environment variables</h4>
     <button type="button" onclick="loadEnv()">Load current</button>
     <div id="envList" style="margin:10px 0;font-family:monospace;font-size:12px;"></div>
@@ -1474,6 +1482,45 @@ if (metaCredsForm) {
   });
 }
 
+async function loadWalletStatus() {
+  const el = document.getElementById('walletStatus');
+  el.textContent = 'Loading...';
+  const res = await fetch('/api/ebos/wallet-status?client=' + encodeURIComponent(currentClient));
+  const data = await res.json();
+  if (!res.ok) { el.textContent = 'Error: ' + (data.error || 'failed'); return; }
+  const enabled = Boolean(data.enabled);
+  const nairaBalance = ((data.balance_kobo || 0) / 100).toLocaleString();
+  el.innerHTML =
+    '<div>Balance: NGN ' + nairaBalance + '</div>'
+    + '<div>Free messages used this month: ' + (data.free_messages_this_month || 0) + ' / ' + (data.free_messages_per_month || 1500) + '</div>'
+    + '<label style="margin-top:6px;display:block;"><input type="checkbox" style="width:auto" ' + (enabled ? 'checked' : '') + ' onchange="toggleWalletMode(this.checked)"> Wallet enforced for this business (' + (enabled ? 'on' : 'off') + ')</label>';
+}
+
+async function toggleWalletMode(enabled) {
+  if (!confirm((enabled ? 'Enable' : 'Disable') + ' the message wallet for ' + currentClient + '? ' + (enabled ? 'Its bot will stop sending WhatsApp messages the moment its balance runs out.' : ''))) {
+    loadWalletStatus();
+    return;
+  }
+  const res = await fetch('/api/ebos/wallet-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: currentClient, enabled }) });
+  const data = await res.json();
+  if (!res.ok) alert(data.error || 'Failed');
+  loadWalletStatus();
+}
+
+document.getElementById('walletCreditForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const res = await fetch('/api/ebos/wallet-credit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client: currentClient, naira: Number(f.get('naira')) }),
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  e.target.reset();
+  loadWalletStatus();
+});
+
 async function generateConnectLink() {
   const el = document.getElementById('connectLinkResult');
   el.textContent = 'Generating...';
@@ -1800,6 +1847,41 @@ app.post('/api/ebos/crm-mode', async (req, res) => {
     const { client: name, enabled } = req.body;
     const client = ebosClientOrThrow(name);
     res.json(await callBusinessApi(client, '/api/crm-config', 'POST', { enabled: Boolean(enabled) }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-17: "i give them 1500 free every month then they cover
+// the rest by putting money in an account... i extract it from there" --
+// ERA's own prepaid message wallet. No self-service client-facing top-up
+// exists (or is planned yet) -- she credits it herself, manually, once
+// she's actually received the money, same reasoning as this whole section
+// being ERA-only (requireEraAdmin on the client-side routes it calls).
+app.get('/api/ebos/wallet-status', async (req, res) => {
+  try {
+    const client = ebosClientOrThrow(req.query.client);
+    res.json(await callBusinessApi(client, '/api/wallet-status', 'GET'));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/ebos/wallet-credit', async (req, res) => {
+  try {
+    const { client: name, naira } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/wallet-credit', 'POST', { naira }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/ebos/wallet-mode', async (req, res) => {
+  try {
+    const { client: name, enabled } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/wallet-mode', 'POST', { enabled: Boolean(enabled) }));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
