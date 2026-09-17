@@ -924,8 +924,20 @@ async function handleEnquiry(customer, text) {
 }
 
 async function summariseOrder(order) {
+  // Chidera, 2026-09-17: "when you ask those penne or spaghetti questions
+  // or cold or room temperature, you dont record it anywhere??" -- it was
+  // recorded (order_item_answer), just never read back into any message
+  // anyone actually sees. Joined in here since summariseOrder already
+  // feeds both the customer's own confirm message and the staff prep
+  // alert -- one fix covers both.
   const { rows } = await pool.query(
-    `select p.name, oi.quantity, oi.price from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+    `select p.name, oi.quantity, oi.price,
+       coalesce(
+         (select string_agg(oa.answer, ', ' order by oa.created_at)
+          from order_item_answer oa where oa.order_item_id = oi.id),
+         ''
+       ) as answer_summary
+     from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [order.id]
   );
   const lines = rows.map((r) => `${r.quantity}x ${r.name} (NGN ${r.price} each)`).join(', ');
@@ -936,7 +948,7 @@ async function summariseOrder(order) {
   // way not paragraph". Colon separator, not a dash -- reply()'s own
   // normalizeDashes turns " - " into ", ", which would silently collapse
   // this right back into a run-on line.
-  const itemLines = rows.map((r) => `${r.quantity}x ${r.name}: NGN ${r.price}`);
+  const itemLines = rows.map((r) => `${r.quantity}x ${r.name}${r.answer_summary ? ` (${r.answer_summary})` : ''}: NGN ${r.price}`);
   const itemsTotal = rows.reduce((sum, r) => sum + Number(r.price) * r.quantity, 0);
   // delivery_fee is 0 until handleCollectFulfilment sets it (only known once
   // fulfilment_type/address are collected, and only for real Chowdeck
@@ -2649,7 +2661,14 @@ export async function completePayment(orderId) {
       await sendStaffAlert(to, alertText);
       if (!process.env.PUBLIC_URL || !staffId) continue;
       try {
-        const link = `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, '/')}`;
+        // Chidera, 2026-09-17: "the link is meant to open the specific
+        // kanban inside for that order not the pipeline surface" -- still
+        // the board itself, not a detail page (her own earlier call: "the
+        // kanban not the conversation... the ready button" lives on the
+        // board's own card), just landing scrolled to and highlighting
+        // THIS order's card instead of the customer having to hunt for it
+        // among everything else in the pipeline. Orders.jsx reads ?order=.
+        const link = `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/?order=${order.id}`)}`;
         const credentials = await getWhatsAppCredentials(order.branch_id);
         await sendWhatsAppCtaUrl(to, `Tap below to open the board.`, 'Open Orders', link, credentials);
       } catch (err) {

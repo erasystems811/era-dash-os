@@ -752,7 +752,14 @@ router.get('/orders', async (req, res) => {
   const { rows } = await pool.query(
     `select o.*, c.name as customer_name, c.phone_number as customer_phone, c.channel as customer_channel,
             d.rider_name as rider_name,
-            (select coalesce(json_agg(json_build_object('name', p.name, 'quantity', oi.quantity)), '[]')
+            (select coalesce(json_agg(json_build_object(
+               'name', p.name, 'quantity', oi.quantity,
+               'answers', (
+                 select coalesce(json_agg(json_build_object('question', pq.question, 'answer', oa.answer) order by oa.created_at), '[]')
+                 from order_item_answer oa join product_question pq on pq.id = oa.question_id
+                 where oa.order_item_id = oi.id
+               )
+             )), '[]')
              from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
      from "order" o join customers c on c.id = o.customer_id
      left join delivery d on d.order_id = o.id
@@ -925,8 +932,22 @@ router.get('/orders/:id', async (req, res) => {
   const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [req.params.id]);
   const order = orderRows[0];
   if (!order) return res.status(404).json({ error: 'Not found.' });
+  // Chidera, 2026-09-17: "when you ask those penne or spaghetti questions
+  // or cold or room temperature, you dont record it anywhere??" -- the
+  // answer was genuinely saved (order_item_answer, flow.js's
+  // askNextItemQuestion/its own insert), just never read back anywhere
+  // staff could see it -- captured, then invisible to whoever actually
+  // preps the order. json_agg here, not a separate query, since answers
+  // is naturally a per-item array.
   const { rows: items } = await pool.query(
-    `select oi.*, p.name from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+    `select oi.*, p.name,
+       coalesce(
+         (select json_agg(json_build_object('question', pq.question, 'answer', oa.answer) order by oa.created_at)
+          from order_item_answer oa join product_question pq on pq.id = oa.question_id
+          where oa.order_item_id = oi.id),
+         '[]'
+       ) as answers
+     from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [order.id]
   );
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);

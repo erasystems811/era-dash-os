@@ -237,6 +237,23 @@ export default function Orders() {
   // a business with zero riders configured would either no-op or error.
   const [ownRidersEnabled, setOwnRidersEnabled] = useState(false);
   const [activeTab, setActiveTab] = useState('online');
+  // Chidera, 2026-09-17: "the link is meant to open the specific kanban
+  // inside for that order not the pipeline surface" -- the "ready to
+  // prepare" staff alert links here with ?order=<id> (flow.js's
+  // completePayment); once the board's own data has loaded, scroll that
+  // one card into view and outline it briefly so staff land right on it
+  // instead of hunting for it among everything else in the pipeline.
+  useEffect(() => {
+    if (!orders) return;
+    const orderId = new URLSearchParams(window.location.search).get('order');
+    if (!orderId) return;
+    const el = document.getElementById(`order-${orderId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('highlight');
+    const timeout = setTimeout(() => el.classList.remove('highlight'), 4000);
+    return () => clearTimeout(timeout);
+  }, [orders]);
   // Two real pipelines, not one -- Chidera 2026-09-11: "confirming payment
   // is different from marking served so there should be 2 piplines."
   // 'serving' = not yet served_at (a Served button). 'awaitingPayment' =
@@ -423,7 +440,7 @@ export default function Orders() {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
                 {col.orders.map((o) => (
-                  <Link key={o.id} to={`/orders/${o.id}`} className="docket">
+                  <Link key={o.id} id={`order-${o.id}`} to={`/orders/${o.id}`} className="docket">
                     <div className="row1">
                       <span className="no mono">Table {o.table_label}</span>
                     </div>
@@ -432,6 +449,9 @@ export default function Orders() {
                         {o.items.map((item, i) => (
                           <li key={i}>
                             <b>{item.quantity}</b> {item.name}
+                            {item.answers?.length > 0 && (
+                              <span className="hint"> ({item.answers.map((a) => a.answer).join(', ')})</span>
+                            )}
                           </li>
                         ))}
                       </ul>
@@ -522,7 +542,7 @@ export default function Orders() {
                 {colOrders.map((o) => {
                   const waiting = waitingSince(o.created_at);
                   return (
-                    <Link key={o.id} to={`/orders/${o.id}`} className="docket">
+                    <Link key={o.id} id={`order-${o.id}`} to={`/orders/${o.id}`} className="docket">
                       <div className="row1">
                         <span className="no mono">{o.reference}</span>
                         {o.customer_channel && <span className={`chan ${o.customer_channel}`}>{o.customer_channel}</span>}
@@ -535,6 +555,9 @@ export default function Orders() {
                           {o.items.map((item, i) => (
                             <li key={i}>
                               <b>{item.quantity}</b> {item.name}
+                              {item.answers?.length > 0 && (
+                                <span className="hint"> ({item.answers.map((a) => a.answer).join(', ')})</span>
+                              )}
                             </li>
                           ))}
                         </ul>

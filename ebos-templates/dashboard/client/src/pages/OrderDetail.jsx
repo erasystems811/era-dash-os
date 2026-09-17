@@ -9,20 +9,11 @@ export default function OrderDetail() {
   const { id } = useParams();
   const { staff } = useStaff();
   const [data, setData] = useState(null);
-  // CRM add-on only -- off by default, same "don't even render it" rule
-  // every other add-on in this dashboard follows.
-  const [crmEnabled, setCrmEnabled] = useState(false);
-  const [birthdayInput, setBirthdayInput] = useState('');
-  const [birthdayBusy, setBirthdayBusy] = useState(false);
-  const [birthdaySkipped, setBirthdaySkipped] = useState(false);
 
   function load() {
     api.get(`/orders/${id}`).then(setData);
   }
   useEffect(load, [id]);
-  useEffect(() => {
-    api.get('/crm-config').then((c) => setCrmEnabled(Boolean(c?.enabled)));
-  }, []);
 
   const [overrideReason, setOverrideReason] = useState('');
   const [overrideBusy, setOverrideBusy] = useState(false);
@@ -30,26 +21,6 @@ export default function OrderDetail() {
 
   if (!data) return <Loading />;
   const { order, items, customer, topups = [], paymentProofs = [], delivery, deliveryAssignment } = data;
-
-  // Chidera, 2026-09-16: "can it be a pop up when taking orders...for
-  // customers that dont have" a birthday -- one field, right where staff
-  // are already looking while handling the order, not a separate step to
-  // remember. Skippable (canEdit staff can just ignore it) and never shown
-  // again once the customer has one on file. Shipped 2026-09-16 as a quiet
-  // inline row instead of an actual pop up ("the birthday pop up didnt
-  // happen") -- now a real modal, matching what was actually asked for.
-  const showBirthdayModal = crmEnabled && customer && !customer.birthday && canEdit(staff) && !birthdaySkipped;
-  async function saveBirthday(e) {
-    e.preventDefault();
-    if (!birthdayInput) return;
-    setBirthdayBusy(true);
-    try {
-      await api.post(`/customers/${customer.id}/birthday`, { birthday: birthdayInput });
-      load();
-    } finally {
-      setBirthdayBusy(false);
-    }
-  }
 
   async function releaseDelivery(e) {
     e.preventDefault();
@@ -111,24 +82,6 @@ export default function OrderDetail() {
         </p>
       </div>
 
-      {showBirthdayModal && (
-        <div className="modal-overlay">
-          <div className="modal-panel">
-            <h3 style={{ marginTop: 0 }}>No birthday on file</h3>
-            <p className="hint">Ask {customer.name || customer.phone_number} for their birthday while you have them on the order?</p>
-            <form onSubmit={saveBirthday} style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 }}>
-              <input type="date" value={birthdayInput} onChange={(e) => setBirthdayInput(e.target.value)} style={{ flex: 1 }} autoFocus />
-              <button type="submit" disabled={birthdayBusy || !birthdayInput} style={{ padding: '8px 14px' }}>
-                Save
-              </button>
-            </form>
-            <button type="button" className="secondary" onClick={() => setBirthdaySkipped(true)} style={{ marginTop: 10, width: '100%', padding: '8px 14px' }}>
-              Not now
-            </button>
-          </div>
-        </div>
-      )}
-
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Items</h3>
         <table>
@@ -142,7 +95,18 @@ export default function OrderDetail() {
           <tbody>
             {items.map((i) => (
               <tr key={i.id}>
-                <td>{i.name}</td>
+                <td>
+                  {i.name}
+                  {i.answers?.length > 0 && (
+                    <div className="hint" style={{ marginTop: 2 }}>
+                      {i.answers.map((a, idx) => (
+                        <div key={idx}>
+                          {a.question}: <strong>{a.answer}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </td>
                 <td>{i.quantity}</td>
                 <td>{Number(i.price).toFixed(2)}</td>
               </tr>

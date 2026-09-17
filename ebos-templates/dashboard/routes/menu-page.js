@@ -51,6 +51,21 @@ async function pendingOrderPayload(customerId) {
   };
 }
 
+// Chidera, 2026-09-17: "the birthday pop up is meant to be on the
+// customers website they place others not the staff dashboard" -- schema.sql's
+// own crm_config migration already said this ("filled in via the... popup
+// on an order's own page"), the first build just put it in the wrong
+// place. Public, token-authenticated like /review above -- no staff
+// session exists on this surface at all.
+router.post('/:token/birthday', async (req, res) => {
+  const customer = await resolveCustomer(req.params.token);
+  if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  const birthday = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.birthday || '') ? req.body.birthday : null;
+  if (!birthday) return res.status(400).json({ error: 'A valid date is required.' });
+  await pool.query('update customers set birthday = $1 where id = $2', [birthday, customer.id]);
+  res.json({ ok: true });
+});
+
 router.post('/:token/review', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).json({ error: 'Link not found.' });
@@ -75,15 +90,18 @@ router.post('/:token/review', async (req, res) => {
 router.get('/:token', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
-  const [branding, products, pendingOrder, waNumber] = await Promise.all([
+  const [branding, products, pendingOrder, waNumber, crmRows] = await Promise.all([
     resolveMenuBranding(),
     menuForBranch(customer.branch_id),
     pendingOrderPayload(customer.id),
     resolveWaNumber(customer.branch_id),
+    pool.query('select enabled from crm_config limit 1'),
   ]);
   res.set('Content-Type', 'text/html').send(
     renderMenuPage({
       reviewPath: `/m/${req.params.token}/review`,
+      birthdayPath: `/m/${req.params.token}/birthday`,
+      showBirthdayPrompt: Boolean(crmRows.rows[0]?.enabled) && !customer.birthday,
       businessName: branding.business_name || '',
       subtitle: 'Pick what you would like, then review your order.',
       coverPhotoVersion: branding.cover_photo_version,

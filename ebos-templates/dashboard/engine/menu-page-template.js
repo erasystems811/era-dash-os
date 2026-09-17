@@ -43,7 +43,7 @@
 // request to defer and would have downloaded as part of this same HTML
 // regardless of the attribute. So the page paints instantly AND stays
 // light no matter how many photos a business has.
-export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory }) {
+export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
   const lightProducts = products.map((p) => ({
     id: p.id,
@@ -152,11 +152,20 @@ export function renderMenuPage({ reviewPath, businessName, subtitle, coverPhotoV
   <div class="sheetHead"><h3>Your order</h3><button id="sheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
   <div id="sheetList"></div>
 </div>
+<div id="bdaySheet" class="sheet" hidden>
+  <div class="sheetHead"><h3>When's your birthday?</h3><button id="bdaySheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
+  <p style="color:var(--mid);font-size:13px;margin:0 0 14px">We like to make it a little special when it comes around.</p>
+  <input id="bdayInput" type="date" style="width:100%;padding:12px;border-radius:10px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box">
+  <button id="bdaySave" style="width:100%;margin-top:12px">Save</button>
+  <button id="bdaySkip" style="width:100%;margin-top:8px;background:none;border:0;color:var(--mid);font-size:13px;padding:8px">Not now</button>
+</div>
 <script>
 const PRODUCTS = ${JSON.stringify(lightProducts)};
 const INITIAL_CATEGORY = ${JSON.stringify(initialCategory || null)};
 const PENDING_ORDER = ${JSON.stringify(pendingOrder)};
 const REVIEW_PATH = ${JSON.stringify(reviewPath)};
+const BIRTHDAY_PATH = ${JSON.stringify(birthdayPath || null)};
+const SHOW_BIRTHDAY_PROMPT = ${JSON.stringify(Boolean(showBirthdayPrompt))};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
 let basket = {};
 if (PENDING_ORDER && PENDING_ORDER.items) {
@@ -267,7 +276,39 @@ function closeSheet() {
 }
 document.getElementById('bc').onclick = openSheet;
 document.getElementById('sheetClose').onclick = closeSheet;
-document.getElementById('backdrop').onclick = closeSheet;
+
+// Chidera, 2026-09-17: "the birthday pop up is meant to be on the
+// customers website they place others not the staff dashboard" -- schema.sql's
+// own crm_config migration already said this ("filled in via the...
+// popup on an order's own page"), so it lives here, not on the staff
+// dashboard's order detail page. Reuses the same #backdrop/.sheet
+// pattern as the basket review above for one consistent visual
+// language, not a second kind of popup on the same page.
+function openBdaySheet() {
+  document.getElementById('backdrop').hidden = false;
+  document.getElementById('bdaySheet').hidden = false;
+}
+function closeBdaySheet() {
+  document.getElementById('backdrop').hidden = true;
+  document.getElementById('bdaySheet').hidden = true;
+}
+document.getElementById('bdaySheetClose').onclick = closeBdaySheet;
+document.getElementById('bdaySkip').onclick = closeBdaySheet;
+document.getElementById('bdaySave').onclick = async () => {
+  const value = document.getElementById('bdayInput').value;
+  if (!value) return;
+  try {
+    await fetch(BIRTHDAY_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ birthday: value }) });
+  } catch (err) {
+    // Silent -- this is a nice-to-have, not something worth blocking or
+    // alarming a guest mid-order over if their connection hiccups.
+  }
+  closeBdaySheet();
+};
+document.getElementById('backdrop').onclick = () => {
+  if (!document.getElementById('bdaySheet').hidden) closeBdaySheet();
+  else closeSheet();
+};
 
 document.getElementById('go').onclick = async () => {
   const items = Object.entries(basket).map(([productId, quantity]) => ({ productId, quantity }));
@@ -300,6 +341,7 @@ document.getElementById('go').onclick = async () => {
 renderCats();
 render();
 updateBasket();
+if (SHOW_BIRTHDAY_PROMPT) openBdaySheet();
 // A guest reopening this link may already have an order sitting with us --
 // basket is already pre-loaded from it above, and the basket bar itself
 // (never "Nothing added yet" when that's true) is the ambient signal;

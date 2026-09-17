@@ -879,7 +879,15 @@ label {
   text-decoration: none;
   color: inherit;
   box-shadow: var(--shadow-sm);
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, outline-color 0.3s ease;
+}
+/* Chidera, 2026-09-17: "the link is meant to open the specific kanban
+   inside for that order not the pipeline surface" -- lands on the board
+   scrolled to and briefly outlined around this one card (Orders.jsx's own
+   ?order= handling), not just the board in general. */
+.docket.highlight {
+  outline: 2px solid var(--accent, #b4700f);
+  outline-offset: 2px;
 }
 .docket::before {
   content: '';
