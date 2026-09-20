@@ -40,7 +40,12 @@ async function loadTopupForDocument(topupId) {
     reference: `${order.reference}-TOPUP`,
     total: topup.amount,
     delivery_fee: 0,
-    payment_link_url: null,
+    // Chidera, 2026-09-20: "totally stop sending account number... use
+    // just paystack" -- a topup now gets its own real Paystack link
+    // (engine/payment.js's initializePaystackTopupTransaction), so this
+    // reads the topup's own real value instead of the hardcoded null that
+    // used to force the bank-account fallback below unconditionally.
+    payment_link_url: topup.payment_link_url,
     payment_status: topup.payment_status === 'confirmed' ? 'confirmed' : 'pending',
   };
   return { order: topupOrder, items: topup.items, customer: customerRows[0] || {}, business: bizRows[0] || {} };
@@ -78,6 +83,13 @@ function documentPage({ title, business, customer, order, items }) {
     )
     .join('');
 
+  // Also gates whether the bank account box below even shows -- Chidera,
+  // 2026-09-20: "when there is a paystack already no need for invoice to
+  // have account number." Showing both used to hand a customer two
+  // different ways to pay the same invoice, which is exactly the kind of
+  // ambiguity a real Paystack link (card or transfer, already reconciled
+  // automatically) exists to remove -- the bank box stays only for orders
+  // with no real payment link at all (no showPayNow) or already settled.
   const showPayNow = order.payment_link_url && !['confirmed', 'accepted'].includes(order.payment_status);
   const deliveryFeeRow =
     Number(order.delivery_fee) > 0
@@ -140,8 +152,11 @@ function documentPage({ title, business, customer, order, items }) {
   <div class="boxes">
     <div class="box">
       <div class="label">PAYMENT INFORMATION</div>
-      ${business.bank_name ? `Bank: ${esc(business.bank_name)}<br>Account: ${esc(business.bank_account_number)}<br>Name: ${esc(business.bank_account_name)}` : 'Contact the business for payment details.'}
-      ${showPayNow ? `<br><a class="pay-btn" href="${esc(order.payment_link_url)}">Pay now</a>` : ''}
+      ${showPayNow
+        ? `Tap below to pay securely by card or transfer.<br><a class="pay-btn" href="${esc(order.payment_link_url)}">Pay now</a>`
+        : business.bank_name
+          ? `Bank: ${esc(business.bank_name)}<br>Account: ${esc(business.bank_account_number)}<br>Name: ${esc(business.bank_account_name)}`
+          : 'Contact the business for payment details.'}
     </div>
     <div class="box">
       <div class="label">STATUS</div>

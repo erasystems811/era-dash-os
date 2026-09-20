@@ -12,7 +12,7 @@ import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCt
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice } from './documents.js';
-import { initializePaystackTransaction } from './payment.js';
+import { initializePaystackTransaction, initializePaystackTopupTransaction } from './payment.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
@@ -2325,15 +2325,27 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
       ? `Here's your top-up invoice: ${invoiceUrl}`
       : `Your top-up invoice is ready.`;
 
-  // Deliberately still bank-transfer-only, not buildPayLine -- a top-up is
-  // extra money on an ALREADY-paid order, and Paystack's own transaction
-  // reference has to be unique per charge, so re-using order.reference here
-  // (as buildPayLine does) would collide with the original payment's own
-  // Paystack transaction. Auto-confirming a top-up needs its own reference
-  // scheme and its own webhook resolution (order_topup isn't looked up by
-  // findOrderByPaymentReference at all today) -- real, separate work, not
-  // built ahead of a client actually needing it (same reasoning hours.js
-  // itself already uses for not over-building).
+  // Chidera, 2026-09-20: "totally stop sending account number for era
+  // demo and use just paystack" -- used to be deliberately bank-transfer-
+  // only (own comment here said reusing order.reference would collide
+  // with the original payment's own Paystack transaction). Now that every
+  // reference is unique per attempt (payment.js's callPaystackInitialize),
+  // that blocker's gone -- try Paystack first, same as buildPayLine
+  // already does for the main order, falling back to bank details only
+  // when Paystack genuinely isn't configured or the call itself fails.
+  let paymentUrl = null;
+  if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
+    try {
+      paymentUrl = await initializePaystackTopupTransaction({ topupId, order, customer, amount: addedValue });
+    } catch (err) {
+      console.error(`Paystack initialize failed for topup ${topupId}, falling back to bank details: ${err.message}`);
+    }
+  }
+  if (paymentUrl) {
+    const payLine = `Please pay NGN ${addedValue} for the extra item(s) using the button below.`;
+    await sendPaymentLinkButton(customer, paymentUrl, `Got it, added on:\n${itemLines}\n\n${invoiceLine}\n\n${payLine}`);
+    return;
+  }
   const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
   const b = biz[0] || {};
   const hasBankDetails = b.bank_name && b.bank_account_number && b.bank_account_name;
@@ -2725,6 +2737,34 @@ export async function notifyDeliverySearching(orderId, trackingPath) {
     `Your order is ready and we're finding you a rider. Track it here: ${process.env.PUBLIC_URL}${trackingPath}`,
     'delivery_searching'
   );
+}
+
+// Called from the Paystack webhook once a TOP-UP is verified (see
+// completePayment just below for the main-order equivalent) -- Chidera,
+// 2026-09-20: "totally stop sending account number... use just paystack."
+// Deliberately does NOT touch the order's own status/engine_state -- the
+// order itself is already fully paid and moving through its own
+// lifecycle; a topup is just extra money for items already added
+// (applyOrderModifications already inserted them regardless of payment).
+export async function completeTopupPayment(topupId) {
+  const { rows } = await pool.query('select * from order_topup where id = $1', [topupId]);
+  const topup = rows[0];
+  if (!topup || topup.payment_status === 'confirmed') return;
+  await pool.query(`update order_topup set payment_status = 'confirmed' where id = $1`, [topupId]);
+
+  const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [topup.order_id]);
+  const order = orderRows[0];
+  if (!order) return;
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+  const customer = custRows[0];
+  if (customer) await reply(customer, `Payment received for your top-up on order ${order.reference} -- thank you!`);
+
+  const orderRecipients = await orderAlertRecipients();
+  if (orderRecipients.length) {
+    const itemLines = (topup.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ');
+    const alertText = `Top-up payment confirmed on order ${order.reference}: ${itemLines} (NGN ${topup.amount}).`;
+    for (const { phoneNumber: to } of orderRecipients) await sendStaffAlert(to, alertText);
+  }
 }
 
 // Called from the Paystack webhook once a payment is verified -- not part

@@ -951,6 +951,12 @@ create table if not exists order_topup (
   items jsonb not null,
   amount numeric(12,2) not null,
   payment_status text not null default 'pending' check (payment_status in ('pending', 'proof_submitted', 'confirmed')),
+  -- 0052, Chidera 2026-09-20: "totally stop sending account number...
+  -- use just paystack" -- a top-up now gets its own real Paystack
+  -- transaction (engine/payment.js's initializePaystackTopupTransaction),
+  -- not just bank-transfer instructions.
+  payment_reference text,
+  payment_link_url text,
   created_at timestamptz not null default now()
 );
 create index if not exists order_topup_order_idx on order_topup (order_id);
