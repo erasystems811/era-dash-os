@@ -867,7 +867,11 @@ async function handleGreeting(customer, text) {
     ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
     : message;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), body, 'See menu', menuUrl, credentials, headerImageUrl);
+  // Chidera, 2026-09-20: "that see menu put 'tap here to see menu'"
+  // (also applied everywhere else this exact button showed up, for one
+  // consistent wording, not just this one call site). Exactly 20
+  // characters -- Meta's own cap on a CTA-URL/reply button's title.
+  await sendWhatsAppCtaUrl(recipientFor(customer), body, 'Tap here to see menu', menuUrl, credentials, headerImageUrl);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body, trigger: 'greeting', processed: true });
 }
 
@@ -3330,7 +3334,9 @@ async function sendDineinWelcome(customer, table, { joiningActiveTable = false }
     ? `Welcome to ${biz?.name || 'us'}! Table ${table.label} has an active order -- add to it, or see what's already been ordered.`
     : `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
   const buttons = [
-    { id: 'dinein_menu', title: 'See the menu' },
+    // Chidera, 2026-09-20: "that see menu put 'tap here to see menu'" --
+    // exactly 20 characters, Meta's own cap on a reply button's title too.
+    { id: 'dinein_menu', title: 'Tap here to see menu' },
     { id: 'dinein_specials', title: "Today's specials" },
   ];
   // Same cover-photo mechanism the normal chat greeting already uses
@@ -4092,11 +4098,11 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
     const guestToken = await ensureMenuToken(customer);
     const url = `${process.env.PUBLIC_URL}/t/${tableToken}?g=${guestToken}`;
     const credentials = await getWhatsAppCredentials(customer.branch_id);
-    await sendWhatsAppCtaUrl(recipientFor(customer), message, 'See the menu', url, credentials);
+    await sendWhatsAppCtaUrl(recipientFor(customer), message, 'Tap here to see menu', url, credentials);
     await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'order_confirm_no', processed: true });
     return;
   }
-  const shown = await sendWebMenuLink(customer, message, 'See the menu');
+  const shown = await sendWebMenuLink(customer, message, 'Tap here to see menu');
   if (!shown) await reply(customer, message, 'order_confirm_no');
 }
 
