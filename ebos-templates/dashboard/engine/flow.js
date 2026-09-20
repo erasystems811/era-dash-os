@@ -2450,6 +2450,16 @@ export async function applyOrderModifications(order, mods, { allowRemovals }, cu
 
   const { itemLines, total } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
+  // Chidera, 2026-09-20, real report: "after requesting payment and its
+  // pending i added another water... it kept showing me old stale
+  // amount" -- same fix as routes/dinein-menu.js's own /review route, for
+  // this (typed-chat) add-on path. Any PENDING order_payment is frozen at
+  // whatever the order totalled when it was requested; a real item change
+  // makes that stale regardless of which channel added it. Confirmed
+  // payments are real money already received and untouched here.
+  if (mods.adds.length || (allowRemovals && (mods.removes.length || mods.sets.length))) {
+    await pool.query(`delete from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
+  }
   // A dine-in order already marked served that gets something added to it
   // needs serving again -- back to In House's first pipeline, not sitting
   // in the second (awaiting payment) still showing the old items. Chidera
@@ -3831,7 +3841,11 @@ export async function notifyGuestsReadyToPay(order) {
     try {
       const token = await ensureMenuToken(guest);
       const url = `${process.env.PUBLIC_URL}/t/${table.qr_token}/pay?g=${token}`;
-      await sendWhatsAppCtaUrl(recipientFor(guest), `Table ${table.label} is served! Total so far: NGN ${total}.`, 'Ready to pay', url, credentials);
+      // Chidera, 2026-09-20 (repeated): "i told you to change the wording
+      // to 'ready to pay? click here'" -- applied to the online order's
+      // own pay link earlier, missed this dine-in one, the actual origin
+      // of the wording request.
+      await sendWhatsAppCtaUrl(recipientFor(guest), `Table ${table.label} is served! Total so far: NGN ${total}. Ready to pay?`, 'Click here', url, credentials);
       await logMessage({ customerId: guest.id, direction: 'outbound', channel: guest.channel, sender: 'bot', body: `[ready to pay link sent: ${url}]`, trigger: 'dinein_ready_to_pay' });
     } catch (err) {
       // Best-effort, per guest -- one guest's send failing (a stale

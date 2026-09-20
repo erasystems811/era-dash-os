@@ -42,6 +42,11 @@ export default function OrderDetail() {
     if (snapshot && newQty === item.quantity) addOnItems.push({ ...item, newQty: 0 });
     else mainItems.push({ ...item, newQty });
   }
+  // A dine-in table not yet served has nothing to do with proof-of-payment
+  // (dine-in pays after eating, POS/at-table -- never by sending proof) or
+  // the pickup/delivery ready pipeline (a table never goes through it at
+  // all) -- see markServed's own comment above.
+  const dineinUnserved = order.channel === 'dinein' && !order.served_at;
 
   async function releaseDelivery(e) {
     e.preventDefault();
@@ -75,6 +80,21 @@ export default function OrderDetail() {
 
   async function confirmTopup(topupId) {
     await api.post(`/orders/${id}/topups/${topupId}/confirm`);
+    load();
+  }
+
+  // Chidera, 2026-09-20: "when that kanban card is opened no need for
+  // that confirmed payment button for served pipeline inside the
+  // kanban, wven the mark as ready and the cancel order, the button
+  // needed is mark as served." nextStageFor's whole ready/in_transit
+  // pipeline is for pickup/delivery orders -- a dine-in table never
+  // goes through it at all (payment/InHouse.jsx's own "Mark paid" is
+  // what actually closes it out, not a status-advance click), and
+  // "Confirm payment received" (proof-of-payment) doesn't apply either
+  // since dine-in payment is POS/at-table, not proof-based. Same
+  // /dinein/orders/:id/served endpoint InHouse.jsx's own button hits.
+  async function markServed() {
+    await api.post(`/dinein/orders/${id}/served`);
     load();
   }
 
@@ -167,7 +187,7 @@ export default function OrderDetail() {
         <p style={{ textAlign: 'right', fontWeight: 700, marginTop: 4 }}>Total: NGN {Number(order.total).toLocaleString()}</p>
       </div>
 
-      {(paymentProofs.length > 0 || (canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted')) && (
+      {!dineinUnserved && (paymentProofs.length > 0 || (canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted')) && (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>Payment</h3>
           {paymentProofs.length > 0 ? (
@@ -243,7 +263,12 @@ export default function OrderDetail() {
       )}
 
       {canEdit(staff) && !['completed', 'cancelled'].includes(order.status) && (() => {
-        const next = nextStageFor(order);
+        // Chidera, 2026-09-20: dine-in never goes through the pickup/
+        // delivery ready/in_transit pipeline nextStageFor drives -- the
+        // only real next action for a table is getting served (payment
+        // after that happens on the guest's own pay page or InHouse.jsx's
+        // "Mark paid", not a status-advance click here).
+        const next = order.channel === 'dinein' ? null : nextStageFor(order);
         return (
           <div className="card">
             <h3 style={{ marginTop: 0 }}>Update status</h3>
@@ -251,6 +276,7 @@ export default function OrderDetail() {
               Currently: <span className={`badge ${order.status}`}>{order.status}</span>
             </p>
             <div style={{ display: 'flex', gap: 8 }}>
+              {dineinUnserved && <button onClick={markServed}>Mark as served</button>}
               {next && <button onClick={() => advanceStatus(next.next)}>{next.label}</button>}
               <button className="secondary" onClick={cancelOrder}>
                 Cancel order

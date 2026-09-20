@@ -303,6 +303,21 @@ router.post('/:qrToken/review', async (req, res) => {
   const total = resolved.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
 
+  // Chidera, 2026-09-20, real report: "after requesting payment and its
+  // pending i added another water, when i tapped request payment amount
+  // it kept showing me old stale amount instead of the new total or my
+  // outstanding." A PENDING order_payment's amount is frozen at whatever
+  // the order totalled the moment it was requested -- once the items
+  // genuinely change (add or remove), that amount no longer means
+  // anything real, and letting it keep sitting there risks a real POS
+  // transaction matching against a stale figure (an undercount, "excess
+  // payout" the other way). Confirmed payments are real money already
+  // received and are never touched here -- only pending ones, which
+  // never represented an actual charge in the first place.
+  if (netAdded || anyRemoved) {
+    await pool.query(`delete from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
+  }
+
   // Chidera, 2026-09-20: "when the customer add something in dine in
   // after theyve been served the first one, dont send the whole menu to
   // the customer again, just send the add on to the staff and just top
