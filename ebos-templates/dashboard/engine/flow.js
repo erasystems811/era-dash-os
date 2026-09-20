@@ -1163,7 +1163,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         // the very next thing that runs from here (nothing else follows
         // this branch), so a bare acknowledgment is enough -- the real
         // breakdown shows up once, in that message.
-        await applyOrderModifications(order, mods, { allowRemovals: true });
+        await applyOrderModifications(order, mods, { allowRemovals: true }, customer);
         prefix = `${prefix}Got it. `;
       } else {
         const fields = await loadBotFields();
@@ -1477,7 +1477,7 @@ async function handlePendingUpsell(customer, order, text) {
     // Same reasoning as handleCollectInfo's own mods branch -- no "your
     // order's now X" here, finishItemsCollection's own confirm message is
     // the one place that lists it.
-    await applyOrderModifications(order, mods, { allowRemovals: true });
+    await applyOrderModifications(order, mods, { allowRemovals: true }, customer);
     return finishItemsCollection(customer, order, 'Got it. ');
   }
 
@@ -2247,7 +2247,18 @@ async function clearPendingQuestionIfOnItem(order, orderItemId) {
   await pool.query('update "order" set pending_question_order_item_id = null, pending_question_id = null where id = $1', [order.id]);
 }
 
-async function applyOrderModifications(order, mods, { allowRemovals }) {
+// customer -- Chidera, 2026-09-20, real report: "what do you mean by a
+// guest-chicken... was it not the same number that ordered chicken
+// through an upsell? why are you seperating it?" Root cause: this insert
+// never set added_by_customer_id at all, unlike the web-menu review
+// route's own item insert (which always does) -- so any item added
+// through a typed-chat path, upsell acceptance included
+// (handlePendingUpsell below), landed with added_by_customer_id null,
+// and pendingOrderPayload's labelFor falls back to "a guest" for a null
+// id no matter whose real number it actually was. Now attributed to
+// whichever customer is actually in this conversation, same as every
+// other item-adding path already does.
+export async function applyOrderModifications(order, mods, { allowRemovals }, customer) {
   const { rows: existingItems } = await pool.query('select id, product_id, quantity from order_item where order_id = $1', [order.id]);
   let addedValue = 0;
 
@@ -2256,7 +2267,7 @@ async function applyOrderModifications(order, mods, { allowRemovals }) {
     if (existing) {
       await pool.query('update order_item set quantity = quantity + $1 where id = $2', [item.quantity, existing.id]);
     } else {
-      await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+      await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, item.productId, item.quantity, item.price, customer?.id || null]);
     }
     addedValue += item.quantity * Number(item.price);
   }
@@ -2387,7 +2398,7 @@ async function handleOrderModification(customer, order, mods) {
     if (!mods.adds.length) return;
   }
 
-  const { itemLines, total, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid });
+  const { itemLines, total, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid }, customer);
   const summary = itemLines.join('\n');
 
   if (paid) {
