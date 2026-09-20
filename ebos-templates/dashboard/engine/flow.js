@@ -1566,6 +1566,14 @@ export async function handlePendingUpsell(customer, order, text) {
     for (const m of matched) {
       await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, m.productId, m.quantity, m.price, customer.id]);
     }
+    // Chidera, 2026-09-20: "when an item is added, why is stale amount on
+    // ready to pay still there" -- same fix as applyOrderModifications'
+    // own insert (this function's OTHER add path, just above), missed
+    // here since this is a second, parallel insert that was never routed
+    // through it. Any PENDING order_payment is now stale the moment a
+    // real item gets added, regardless of which of this function's own
+    // two paths did it.
+    await pool.query(`delete from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
     return finishItemsCollection(customer, order, `Added ${matched.map((m) => `${m.quantity}x ${m.name}`).join(', ')}. `, { preferTextForQuestions: true });
   }
 
@@ -1629,6 +1637,14 @@ export async function handleUpsellListTap({ phoneNumber, channelId, rowId, chann
   // accept an upsell) has always had its own separate insert that never
   // set it.
   await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, 1, $3, $4)', [order.id, product.id, product.price, customer.id]);
+  // Chidera, 2026-09-20: "when an item is added, why is stale amount on
+  // ready to pay still there... it should show new outstanding balance
+  // na" -- same fix as applyOrderModifications' own insert; this is the
+  // default, zero-AI-cost way most customers actually accept an upsell
+  // (a tap on the list, not typing), and the most likely real path behind
+  // this exact report. Any PENDING order_payment is now stale the moment
+  // a real item gets added.
+  await pool.query(`delete from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
   return finishItemsCollection(customer, order, `Added ${product.name}. `);
 }
 
@@ -4485,6 +4501,13 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
 
     const { itemLines, total } = await summariseOrder(order);
     await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
+    // Chidera, 2026-09-20: "when an item is added, why is stale amount on
+    // ready to pay still there" -- same fix as applyOrderModifications'
+    // own insert, this time for the general web-menu resubmit path (an
+    // online order with a POS payment already pending, e.g. mid confirm_
+    // payment, getting more added before it's paid). Any PENDING
+    // order_payment is now stale the moment a real item change happens.
+    await pool.query(`delete from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
     if (adds.length) await resetServedForAddOn(order);
 
     if (paid) {

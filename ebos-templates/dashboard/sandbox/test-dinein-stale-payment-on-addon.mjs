@@ -87,6 +87,44 @@ async function main() {
   });
   assert((await create2.json()).amount === 4000, 'requesting again correctly reflects the NEW total (3500 + 500), not the stale 3500');
 
+  // === Scenario B2: a tap on the upsell's own WhatsApp list -- the
+  // default way most customers actually accept one, and the most likely
+  // real path behind this exact report ("i added another water" almost
+  // certainly means an upsell) -- had its own separate insert, missed by
+  // the first pass over this same bug. Fresh table/order (not reusing A's,
+  // which is already mid its own real state transition from the add-on
+  // round just above) -- this is testing the insert path itself, not a
+  // sequence of rounds on one order.
+  const { rows: tableRows2 } = await pool.query(
+    `insert into restaurant_table (branch_id, label, qr_token) values ($1, 'ST2', 'qrstale2') returning id`,
+    [branchId]
+  );
+  const table2 = tableRows2[0];
+  const customer2 = await flow.findOrCreateCustomer({ phoneNumber: '2348011119931', channel: 'whatsapp', branchId });
+  const { rows: sessionRows2 } = await pool.query(`insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3) returning *`, [table2.id, branchId, customer2.id]);
+  const session2 = sessionRows2[0];
+  // engine_state 'collect_info' -- same as sandbox/test-upsell-attribution.mjs's
+  // own handleUpsellListTap scenario. Isolating just the insert/dedup
+  // behavior being tested here, not the full serve-then-pay state
+  // sequence (already covered end-to-end by sandbox/test-dinein-joint.mjs) --
+  // the pending order_payment is inserted directly rather than through
+  // the real /pay/create flow, which assumes a served, further-along order.
+  const { rows: order2Rows } = await pool.query(
+    `insert into "order" (customer_id, reference, branch_id, channel, table_id, session_id, fulfilment_type, payment_mode, engine_state, status, total, pending_upsell_category)
+     values ($1, 'REF-STALE2', $2, 'dinein', $3, $4, 'table', 'at_table', 'collect_info', 'new', 3500, 'drinks') returning *`,
+    [customer2.id, branchId, table2.id, session2.id]
+  );
+  const order2 = order2Rows[0];
+  await pool.query(`insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, 1, 3500, $3)`, [order2.id, prod1[0].id, customer2.id]);
+  await pool.query(
+    `insert into order_payment (order_id, provider, reference, amount, covers_item_ids) values ($1, 'pos', 'REF-STALE2-P1', 3500, null)`,
+    [order2.id]
+  );
+  const { rows: prod3 } = await pool.query(`insert into product (name, price, category, branch_id, availability) values ('Zobo Drink', 1200, 'DRINKS', $1, true) returning id`, [branchId]);
+  await flow.handleUpsellListTap({ phoneNumber: '2348011119931', channelId: '2348011119931', rowId: `upsell::${prod3[0].id}`, channel: 'whatsapp', branchId });
+  const { rows: afterAddB2 } = await pool.query(`select status from order_payment where order_id = $1 and covers_item_ids is null`, [order2.id]);
+  assert(afterAddB2.every((p) => p.status !== 'pending'), 'a tap on the upsell\'s own WhatsApp list also clears the stale pending payment, not just the typed-chat path');
+
   // === Scenario B: a CONFIRMED payment must never be touched by an add-on ===
   const { rows: confirmedSetup } = await pool.query(`select id from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
   await pool.query(`update order_payment set status = 'confirmed', confirmed_at = now() where id = $1`, [confirmedSetup[0].id]);

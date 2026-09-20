@@ -1211,10 +1211,15 @@ setInterval(async function () {
 // inside the web na, for dine in it can be where the shared order ready to
 // pay lives... make it 'ready to pay? click here'." A single online order
 // never needs the guest-selection step renderPayPage has (there's only
-// ever one customer paying, for the whole order) -- straight to the
-// Transfer/Card choice instead. Same visual language, same auto-confirm
-// mechanism (order_payment + matchPosTransactionToPayment), reached via
-// routes/menu-page.js's /:token/pay.
+// ever one customer paying, for the whole order). "online orders an only
+// use transfer route" -- corrected the same day: unlike dine-in (Transfer
+// or Card, since the guest is physically at the restaurant and either is
+// real), an online customer never has a terminal in front of them to tap
+// a card on -- so no choice here at all, the account details just show
+// directly alongside the amount, no extra tap needed. Same visual
+// language, same auto-confirm mechanism (order_payment +
+// matchPosTransactionToPayment), reached via routes/menu-page.js's
+// /:token/pay.
 export function renderSingleOrderPayPage({ businessName, amount, confirmed, posTransfer, statusPath }) {
   return `<!doctype html>
 <html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -1233,10 +1238,6 @@ export function renderSingleOrderPayPage({ businessName, amount, confirmed, posT
   .top .mt{font-size:12.5px;color:#B3A597;margin-top:4px}
   .payAmount{text-align:center;margin:16px;background:#fff;border-radius:14px;padding:20px;border:1px solid var(--line)}
   .payAmount .big{font-family:"Fraunces",serif;font-size:28px;font-weight:700;margin:6px 0}
-  .secondaryBtn{width:100%;margin-top:10px;background:#fff;color:var(--ink);border:1px solid var(--line);font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
-  .payChoice{display:flex;gap:10px;margin-top:14px}
-  .payChoice[hidden]{display:none}
-  .payChoice button{flex:1;margin-top:0}
   .transferBox{text-align:left;margin-top:14px;background:#F6F1E8;border-radius:10px;padding:14px;font-size:13.5px}
   .transferBox .row{display:flex;justify-content:space-between;gap:12px;padding:4px 0}
   .done{margin:16px;background:var(--ok);color:#fff;border-radius:14px;padding:18px;text-align:center;font-family:"Fraunces",serif;font-size:17px;font-weight:700}
@@ -1248,35 +1249,17 @@ export function renderSingleOrderPayPage({ businessName, amount, confirmed, posT
 </div>
 <div id="doneBanner" class="done" ${confirmed ? '' : 'hidden'}>Payment confirmed. Thank you!</div>
 <div id="amountCard" class="payAmount" ${confirmed ? 'hidden' : ''}>
-  <div style="color:var(--mid);font-size:13px" id="amountHint">${posTransfer ? 'How would you like to pay?' : 'Please pay this amount at the counter or on the POS terminal'}</div>
+  <div style="color:var(--mid);font-size:13px">${posTransfer ? 'Please transfer to the account below' : 'Please pay this amount at the counter or on the POS terminal'}</div>
   <div class="big">NGN ${Number(amount).toLocaleString()}</div>
-  <div style="color:var(--mid);font-size:12.5px" id="amountSub" ${posTransfer ? 'hidden' : ''}>We'll confirm automatically the moment it clears.</div>
-  ${posTransfer ? `<div class="payChoice" id="payChoice"><button id="payTransferBtn" class="secondaryBtn">Transfer</button><button id="payCardBtn" class="secondaryBtn">Tap card</button></div>` : ''}
-  <div class="transferBox" id="transferBox" hidden></div>
+  <div style="color:var(--mid);font-size:12.5px">We'll confirm automatically the moment it clears${posTransfer ? '. No need to send proof.' : '.'}</div>
+  ${
+    posTransfer
+      ? `<div class="transferBox"><div class="row"><span>Bank</span><span>${escapeHtml(posTransfer.bankName)}</span></div><div class="row"><span>Account number</span><span>${escapeHtml(posTransfer.accountNumber)}</span></div><div class="row"><span>Account name</span><span>${escapeHtml(posTransfer.accountName)}</span></div></div>`
+      : ''
+  }
 </div>
 <script>
 const STATUS_PATH = ${JSON.stringify(statusPath)};
-const POS_TRANSFER = ${JSON.stringify(posTransfer)};
-
-if (POS_TRANSFER) {
-  document.getElementById('payTransferBtn').onclick = function () {
-    document.getElementById('payChoice').hidden = true;
-    document.getElementById('transferBox').hidden = false;
-    document.getElementById('transferBox').innerHTML =
-      '<div class="row"><span>Bank</span><span>' + POS_TRANSFER.bankName + '</span></div>' +
-      '<div class="row"><span>Account number</span><span>' + POS_TRANSFER.accountNumber + '</span></div>' +
-      '<div class="row"><span>Account name</span><span>' + POS_TRANSFER.accountName + '</span></div>';
-    document.getElementById('amountSub').hidden = false;
-    document.getElementById('amountSub').textContent = "We'll confirm automatically the moment it clears. No need to send proof.";
-  };
-  document.getElementById('payCardBtn').onclick = function () {
-    document.getElementById('payChoice').hidden = true;
-    document.getElementById('transferBox').hidden = false;
-    document.getElementById('transferBox').innerHTML = '<div class="row"><span>Tap your card on our POS terminal for this amount.</span></div>';
-    document.getElementById('amountSub').hidden = false;
-    document.getElementById('amountSub').textContent = "We'll confirm automatically the moment it clears.";
-  };
-}
 
 // Same 15s-poll pattern as dine-in's own pay page -- "Payment confirmed!"
 // never needs a manual refresh to notice.

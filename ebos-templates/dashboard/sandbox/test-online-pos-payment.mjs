@@ -115,8 +115,12 @@ async function main() {
   const payPageHtml = await payPageRes.text();
   assert(payPageRes.status === 200, 'the real pay page loads');
   assert(payPageHtml.includes(Number(total).toLocaleString()), 'shows the real amount owed');
-  assert(payPageHtml.includes('1234567890') && payPageHtml.includes('Moniepoint MFB'), 'carries the real transfer details from Settings, ready for the customer to reveal by tapping Transfer');
-  assert(payPageHtml.includes('Tap card'), 'the Card option is offered too');
+  // Chidera, 2026-09-20: "online orders an only use transfer route" -- no
+  // Transfer/Card choice for a single online order (unlike dine-in, the
+  // customer here is never physically at a terminal to tap a card on),
+  // account details show directly, no extra tap needed.
+  assert(payPageHtml.includes('1234567890') && payPageHtml.includes('Moniepoint MFB'), 'carries the real transfer details from Settings, shown directly, no choice needed');
+  assert(!payPageHtml.includes('Tap card') && !payPageHtml.includes('Tap your card'), 'no Card option is ever offered for an online order');
 
   const statusBefore = await (await fetch(`${BASE}/m/${token}/pay/status`)).json();
   assert(statusBefore.confirmed === false, 'not confirmed yet before any real POS transaction arrives');
