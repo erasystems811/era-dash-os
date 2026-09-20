@@ -186,7 +186,11 @@ async function main() {
   // Simulate staff confirming + serving the order (the real confirm/
   // engine_state walk is a separate, already-tested part of the engine --
   // this test is only exercising what Stage 2 itself adds).
-  await pool.query(`update "order" set status = 'preparation' where id = $1`, [order.id]);
+  // confirmed_at too -- only a real "Yes, confirm" tap sets it, and it's
+  // what distinguishes a genuine repeat add-on round from a still-being-
+  // decided first order (see flow.js's finishItemsCollection/
+  // handleOrderModification, wasAlreadyConfirmed).
+  await pool.query(`update "order" set status = 'preparation', confirmed_at = now() where id = $1`, [order.id]);
   const { rows: servedRows } = await pool.query(`update "order" set served_at = now() where id = $1 returning *`, [order.id]);
   const servedOrder = servedRows[0];
 
@@ -207,11 +211,12 @@ async function main() {
 
   // Guest 2 orders MORE after being served ("in house people can be
   // ordering in batch and based on mood... the bill can pile up as
-  // conclusive") -- should reopen the SAME order, not spawn a second one,
-  // reset served_at back to null, and alert staff.
-  const logs = [];
-  const originalLog = console.log;
-  console.log = (...args) => { logs.push(args.join(' ')); originalLog(...args); };
+  // conclusive"). Chidera, 2026-09-20: "when they add on send them the
+  // yes to confirm button... dont send the whole menu to the customer
+  // again" -- should reopen the SAME order (not spawn a second one), and
+  // get a real yes/no confirm gate scoped to just the new items, NOT the
+  // whole running bill restated. served_at/the staff alert are deferred
+  // until that yes is actually tapped (checked further below).
   const review3 = await fetch(`${BASE}/t/qrtest5/review?g=${g2}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -221,24 +226,45 @@ async function main() {
       ],
     }),
   });
-  console.log = originalLog;
   assert(review3.status === 200, 'post-serve add-on submit succeeds');
 
   const { rows: orderRowsFinal } = await pool.query(`select * from "order" where session_id = $1`, [session.id]);
   assert(orderRowsFinal.length === 1, 'STILL exactly one order for the table -- the post-serve add-on reused it, not a second kitchen ticket');
-  assert(orderRowsFinal[0].served_at === null, 'served_at reset back to null so the order returns to the Serving pipeline');
-  assert(logs.some((l) => l.includes('added more after being served')), 'staff got pinged about the post-serve add-on');
+  assert(orderRowsFinal[0].served_at !== null, 'served_at NOT reset yet -- the add-on has not been confirmed with a yes tap');
 
-  // Chidera, 2026-09-20: "dont send the whole menu to the customer again,
-  // just send the add on to the staff and just top up" -- guest 2 should
-  // get a short "added on" note naming just the delta (3 more zobo), NOT
-  // the full item-question/upsell/confirm-order cycle with the whole
-  // running bill read back and a fresh yes/no gate.
   const { rows: guest2LastMsg } = await pool.query(
-    `select body from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`, [customer2.id]
+    `select body, trigger from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`, [customer2.id]
   );
   assert(guest2LastMsg[0]?.body?.includes('3x Zobo Drink'), 'guest 2 told exactly the delta added (3 more zobo), not the running total quantity');
-  assert(!/To confirm|Yes, confirm/i.test(guest2LastMsg[0]?.body || ''), 'guest 2 did NOT get the full re-confirm cycle for a post-serve add-on');
+  assert(guest2LastMsg[0]?.body?.startsWith('Add on:'), 'the add-on gets its own short confirm, not the full order restated');
+  assert(guest2LastMsg[0]?.trigger === 'order_confirm_asked', 'the add-on still gets a real yes/no confirm gate (sendConfirmButtons), same as any other round');
+
+  // Guest 2 taps "Yes, confirm" on the add-on -- THIS is what actually
+  // pings staff and moves the table back to the Serving pipeline.
+  // handleConfirmOrder's own yes/no reading is AI-based (real, deliberate
+  // -- not something this test re-verifies); the real Anthropic API call
+  // underneath it is mocked at the network boundary (not the application
+  // code) so this exercises the REAL post-"yes" code path, same "zero-AI
+  // test path" discipline every other sandbox test uses, just applied one
+  // layer deeper since this specific call has no non-AI route in.
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('api.anthropic.com')) {
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: '{"confirmed": true}' }], usage: {} }), { status: 200 });
+    }
+    return realFetch(url, opts);
+  };
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => { logs.push(args.join(' ')); originalLog(...args); };
+  const { rows: orderForConfirm } = await pool.query(`select * from "order" where id = $1`, [order.id]);
+  await flow.handleConfirmOrder(customer2, orderForConfirm[0], 'yes');
+  console.log = originalLog;
+  global.fetch = realFetch;
+
+  const { rows: orderRowsAfterYes } = await pool.query(`select served_at from "order" where id = $1`, [order.id]);
+  assert(orderRowsAfterYes[0].served_at === null, 'served_at reset back to null once the add-on is actually confirmed');
+  assert(logs.some((l) => l.includes('added more after being served')), 'staff got pinged about the post-serve add-on, on the yes tap');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

@@ -1182,7 +1182,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
     Object.assign(order, reloaded[0]);
   }
 
-  return finishItemsCollection(customer, order, prefix);
+  return finishItemsCollection(customer, order, prefix, { preferTextForQuestions: true });
 }
 
 // Finds the earliest catalogue-question still unanswered across every item
@@ -1233,13 +1233,18 @@ async function askNextItemQuestion(orderId) {
 // just never fire for almost anyone. Folded into 'drink's own keywords
 // instead, so a business that DOES give it a distinct category still
 // gets it offered, under the same "would you like a drink" ask.
-const UPSELL_GROUPS = [
+// Exported so routes/api.js's upsell-success-rate stat can tell whether an
+// offered category actually landed in the final order using the exact same
+// keyword matching nextUpsellGroup itself uses to decide a category's
+// already satisfied -- one source of truth for what counts as a match,
+// not a second guess at the same keywords.
+export const UPSELL_GROUPS = [
   { key: 'drink', keywords: ['drink', 'beverage', 'juice', 'water'], label: 'a drink' },
   { key: 'protein', keywords: ['protein', 'meat'], label: 'a protein' },
   { key: 'snack', keywords: ['snack', 'small chop', 'appetiser', 'appetizer', 'starter'], label: 'a snack' },
 ];
 
-function categoryMatchesGroup(category, keywords) {
+export function categoryMatchesGroup(category, keywords) {
   if (!category) return false;
   const lower = category.toLowerCase();
   return keywords.some((k) => lower.includes(k));
@@ -1374,7 +1379,17 @@ async function orderSoFarSummary(order) {
 // genuinely unanswered question still gets asked over WhatsApp rather
 // than silently skipped; autoConfirm only ever replaces the FINAL
 // yes/no ask, once nothing else was actually outstanding.
-export async function finishItemsCollection(customer, order, prefix = '', { autoConfirm = false } = {}) {
+// deltaLines -- Chidera, 2026-09-20: "when they add on send them the yes
+// to confirm button and place the ordr, let their total and items be
+// compounding in the ready to pay stuff." An add-on round (order already
+// confirmed once before) still gets the same real yes/no confirm gate
+// every round does -- just scoped to what's NEW this round (deltaLines),
+// not the whole running order restated again. The full, ever-growing
+// total/item list is what the ready-to-pay page shows (routes/dinein-
+// menu.js's payStatusPayload, already reading the one shared order's
+// live total) -- that's where "compounding" belongs, not every chat
+// message. null (the default) means the normal, first-round full summary.
+export async function finishItemsCollection(customer, order, prefix = '', { autoConfirm = false, preferTextForQuestions = false, deltaLines = null } = {}) {
   const nextQuestion = await askNextItemQuestion(order.id);
   if (nextQuestion) {
     await pool.query('update "order" set pending_question_order_item_id = $1, pending_question_id = $2 where id = $3', [
@@ -1388,12 +1403,25 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
     // exact pending order -- see routes/menu-page.js's pendingOrderPayload
     // and menu-page-template.js's firstUnansweredKey) covers every
     // outstanding item-question in one visit instead of one Meta message
-    // per question. pending_question_order_item_id/_id above are still set
-    // regardless, so a customer who ignores the link and just types an
-    // answer anyway (handlePendingItemQuestion) still works exactly as
-    // before -- the link is the cheaper default, never the only path.
-    const shownLink = await sendWebMenuLink(customer, `${prefix}Just need a couple more details on your order -- tap below to finish up.`, 'Finish my order', null, null, order);
-    if (shownLink) return;
+    // per question.
+    //
+    // preferTextForQuestions -- Chidera, 2026-09-20, real report (Emmanuel,
+    // era-demo): "if they are already using text no need to send them back
+    // to the menu to answer cold or not, just go text it." A customer who
+    // placed THIS item by typing (not tapping through the web menu or a
+    // button) is already mid-conversation in plain text -- redirecting
+    // them to a web link for one short question is a worse experience
+    // than just asking it, not a cheaper one. Set true by every
+    // text-originated caller below; left false (web link first, same as
+    // before) for every web/button-tap-originated caller, where a link is
+    // the natural continuation of what they were already doing.
+    // pending_question_order_item_id/_id above are still set regardless,
+    // so a customer who ignores the link and just types an answer anyway
+    // (handlePendingItemQuestion) still works exactly as before.
+    if (!preferTextForQuestions) {
+      const shownLink = await sendWebMenuLink(customer, `${prefix}Just need a couple more details on your order -- tap below to finish up.`, 'Finish my order', null, null, order);
+      if (shownLink) return;
+    }
     const soFar = await orderSoFarSummary(order);
     await reply(customer, `${prefix}${soFar}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
     return;
@@ -1442,8 +1470,11 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
     return;
   }
 
-  const summary = [...itemLines, `Total: NGN ${total}`].join('\n');
-  await sendConfirmButtons(customer, `${prefix}To confirm:\n${summary}`.trim(), 'order_confirm_asked');
+  const summary = deltaLines
+    ? [...deltaLines, `Table's total is now: NGN ${total}`].join('\n')
+    : [...itemLines, `Total: NGN ${total}`].join('\n');
+  const heading = deltaLines ? 'Add on:' : 'To confirm:';
+  await sendConfirmButtons(customer, `${prefix}${heading}\n${summary}`.trim(), 'order_confirm_asked');
 }
 
 // The reply to the upsell question above. Checked in order:
@@ -1478,17 +1509,22 @@ async function handlePendingUpsell(customer, order, text) {
     // order's now X" here, finishItemsCollection's own confirm message is
     // the one place that lists it.
     await applyOrderModifications(order, mods, { allowRemovals: true }, customer);
-    return finishItemsCollection(customer, order, 'Got it. ');
+    return finishItemsCollection(customer, order, 'Got it. ', { preferTextForQuestions: true });
   }
 
   const { matched } = await extractOrderItems(text, order.branch_id);
   if (matched.length) {
     order.pending_upsell_category = null;
     await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+    // added_by_customer_id -- same fix as applyOrderModifications' own
+    // insert (Chidera, 2026-09-20: "why are you seperating it" re a
+    // chicken added via this exact upsell path). A second, parallel
+    // insert this function has always had its own copy of, missed the
+    // first time through.
     for (const m of matched) {
-      await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, m.productId, m.quantity, m.price]);
+      await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, m.productId, m.quantity, m.price, customer.id]);
     }
-    return finishItemsCollection(customer, order, `Added ${matched.map((m) => `${m.quantity}x ${m.name}`).join(', ')}. `);
+    return finishItemsCollection(customer, order, `Added ${matched.map((m) => `${m.quantity}x ${m.name}`).join(', ')}. `, { preferTextForQuestions: true });
   }
 
   const wantsQuestion = 'Are they saying yes, they would like to add one, without yet naming which specific option?';
@@ -1511,7 +1547,7 @@ async function handlePendingUpsell(customer, order, text) {
 
   order.pending_upsell_category = null;
   await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
-  return finishItemsCollection(customer, order, '');
+  return finishItemsCollection(customer, order, '', { preferTextForQuestions: true });
 }
 
 // A tap on sendUpsellList's List Message above -- the zero-AI-cost path,
@@ -1574,8 +1610,10 @@ async function handlePendingItemQuestion(customer, order, text) {
 
   // finishItemsCollection's own item-question check (its very first thing)
   // picks up the next unanswered question itself if there is one -- no
-  // need to duplicate that lookup here too.
-  return finishItemsCollection(customer, order, 'Got it. ');
+  // need to duplicate that lookup here too. preferTextForQuestions --
+  // they just answered this one by typing, so a second outstanding
+  // question stays in text too, not a web-link detour.
+  return finishItemsCollection(customer, order, 'Got it. ', { preferTextForQuestions: true });
 }
 
 // "Confirmed" (order.status) and "engine_state = confirm_order" are not the
@@ -1586,7 +1624,7 @@ async function handlePendingItemQuestion(customer, order, text) {
 // deciding whether to order this" from "ordering it, now working out how it
 // gets to them" -- asking for an address is not the same step as agreeing
 // to buy.
-async function handleConfirmOrder(customer, order, text) {
+export async function handleConfirmOrder(customer, order, text) {
   // A plain "no" doesn't reliably mean "cancel this entirely" -- they may
   // just want to change something, or hesitate for a reason unrelated to
   // wanting out. So "no" never cancels here: it just asks what to change,
@@ -1632,6 +1670,16 @@ async function handleConfirmOrder(customer, order, text) {
 
   await pool.query(`update "order" set confirmed_at = now() where id = $1`, [order.id]);
   order.confirmed_at = new Date();
+  // Chidera, 2026-09-20: "when they add on send them the yes to confirm
+  // button and place the ordr" -- the staff "table added more" alert
+  // (resetServedForAddOn) now fires HERE, on the real yes tap, not the
+  // moment the item was inserted -- same two-step "shown, then confirmed"
+  // shape the very first round of an order already has. order.served_at
+  // still holds whatever it was before this round started (nothing
+  // resets it earlier anymore), so this is a genuine no-op for a first-
+  // ever order (never served yet) and the real, intended alert for a
+  // repeat add-on round on a table that had already been served.
+  await resetServedForAddOn(order);
   await handleCollectFulfilment(customer, order, null);
 }
 
@@ -2287,12 +2335,17 @@ export async function applyOrderModifications(order, mods, { allowRemovals }, cu
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
   // A dine-in order already marked served that gets something added to it
   // needs serving again -- back to In House's first pipeline, not sitting
-  // in the second (awaiting payment) still showing the old items. No-op
-  // for every other case: an online order never sets served_at at all, and
-  // a dine-in order not yet served is already null. Chidera 2026-09-11:
-  // "even if staff marks served and it goes to the next pipeline and they
-  // still add it should go back to first pipeline."
-  if (mods.adds.length) await resetServedForAddOn(order);
+  // in the second (awaiting payment) still showing the old items. Chidera
+  // 2026-09-11: "even if staff marks served and it goes to the next
+  // pipeline and they still add it should go back to first pipeline."
+  //
+  // Deliberately NOT fired here anymore -- Chidera, 2026-09-20: "when they
+  // add on send them the yes to confirm button and place the ordr." This
+  // used to fire the moment an item was inserted, before the customer had
+  // even confirmed the add-on -- staff could see "back to Serving" before
+  // the guest had actually decided to go through with it. handleConfirmOrder
+  // now calls resetServedForAddOn itself, on the real yes tap, same two-
+  // step "shown, then confirmed" shape the very first round already has.
   return { itemLines, total, addedValue };
 }
 
@@ -2370,20 +2423,20 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
 
 async function handleOrderModification(customer, order, mods) {
   const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
-  // Captured BEFORE applyOrderModifications, whose own resetServedForAddOn
-  // call resets served_at to null as a side effect -- Chidera, 2026-09-20:
-  // "when the customer add something in dine in after theyve been served
-  // the first one, dont send the whole menu to the customer again, just
-  // send the add on to the staff and just top up." Dine-in never sets
-  // payment_status to confirmed/accepted until it's actually marked paid
-  // post-serving (payment happens AFTER eating, not before) -- so `paid`
-  // above is always false for a served-but-unpaid table, and this used to
-  // fall all the way through to the same full "Got it, your order: [the
-  // WHOLE running bill] New total... confirm?" re-ask every other pre-
-  // payment edit gets, even though staff already got the real, actionable
-  // alert (resetServedForAddOn's own). Same short top-up acknowledgment
-  // as the web-menu review route now sends for the identical case.
-  const wasServed = order.channel === 'dinein' && Boolean(order.served_at);
+  // Captured before applyOrderModifications -- Chidera, 2026-09-20: "when
+  // they add on send them the yes to confirm button and place the ordr."
+  // Dine-in never sets payment_status to confirmed/accepted until it's
+  // actually marked paid post-serving (payment happens AFTER eating), so
+  // `paid` above is always false for a served-but-unpaid table -- an
+  // add-on there used to fall all the way through to the same full "Got
+  // it, your order: [the WHOLE running bill] New total... confirm?"
+  // re-ask every other pre-payment edit gets. wasAlreadyConfirmed (this
+  // order already went through its own real yes once before) is what
+  // actually distinguishes a repeat add-on from the genuinely first-ever
+  // order -- a repeat round still gets its own real yes/no confirm gate,
+  // just scoped to what's new (deltaLines below), not the whole order
+  // restated again.
+  const wasAlreadyConfirmed = Boolean(order.confirmed_at);
 
   if (paid && (mods.removes.length || mods.sets.length)) {
     // A change/removal after payment needs a real person -- Chidera
@@ -2408,12 +2461,18 @@ async function handleOrderModification(customer, order, mods) {
 
   // Pure addition only -- a removal or change alongside it is a rarer,
   // more substantial edit that still deserves the fuller read-back below,
-  // not folded into a quick "added on" note that would silently skip
-  // over what was taken off.
-  if (wasServed && mods.adds.length && !mods.removes.length && !mods.sets.length) {
-    const addedLines = mods.adds.map((i) => `${i.quantity}x ${i.name}`).join('\n');
-    await reply(customer, `Got it, added on:\n${addedLines}\n\nYour table's total is now NGN ${total}.`);
-    return;
+  // not folded into a quick "add on" confirm that would silently skip
+  // over what was taken off. preferTextForQuestions -- this whole path
+  // only runs from a TYPED reply (dispatch's own mods-detection), so any
+  // item question the new line needs stays in text too (Chidera,
+  // 2026-09-20, real report re Emmanuel: "if they are already using text
+  // no need to send them back to the menu... just go text it").
+  if (wasAlreadyConfirmed && mods.adds.length && !mods.removes.length && !mods.sets.length) {
+    await pool.query(`update "order" set confirmed_at = null where id = $1`, [order.id]);
+    order.confirmed_at = null;
+    const deltaLines = mods.adds.map((i) => `${i.quantity}x ${i.name}`);
+    await restartItemsCollection(order);
+    return finishItemsCollection(customer, order, '', { preferTextForQuestions: true, deltaLines });
   }
 
   // Any edit before payment needs a fresh yes -- whether still picking

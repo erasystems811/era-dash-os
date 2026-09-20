@@ -1005,6 +1005,8 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
   .row{display:flex;justify-content:space-between;gap:12px;font-size:14px;padding:7px 0;border-bottom:1px solid #F0EBE2}
   .row:last-child{border-bottom:0}
   .row .who{color:var(--mid);font-size:12px}
+  .itemGroupHead{font-family:"Fraunces",serif;font-size:13px;font-weight:600;color:var(--mid);padding:10px 0 2px}
+  .itemGroupHead:first-child{padding-top:0}
   .tot{display:flex;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:2px solid var(--ink);font-family:"Fraunces",serif;font-size:19px;font-weight:700}
   .guest{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #F0EBE2;font-size:14px}
   .guest:last-child{border-bottom:0}
@@ -1059,8 +1061,21 @@ function render() {
     document.getElementById('mainContent').hidden = true;
     return;
   }
-  document.getElementById('itemsCard').innerHTML = status.items.map(function (i) {
-    return '<div class="row"><span>' + i.quantity + 'x ' + i.name + ' <span class="who">\\u00b7 ' + i.addedByLabel + '</span></span><span>' + naira(i.price * i.quantity) + '</span></div>';
+  // Chidera, 2026-09-20: "let that web only show all they have ordered
+  // so far per person name not menu" -- grouped under each guest's own
+  // name (You first), same as the ordering page's own review sheet, not
+  // a flat list with a name tagged onto each row.
+  const itemGroups = new Map();
+  for (const i of status.items) {
+    const label = i.addedByLabel || 'a guest';
+    if (!itemGroups.has(label)) itemGroups.set(label, []);
+    itemGroups.get(label).push(i);
+  }
+  const orderedItemLabels = [...itemGroups.keys()].sort((a, b) => (a === 'You' ? -1 : b === 'You' ? 1 : a.localeCompare(b)));
+  document.getElementById('itemsCard').innerHTML = orderedItemLabels.map(function (label) {
+    return '<div class="itemGroupHead">' + label + '</div>' + itemGroups.get(label).map(function (i) {
+      return '<div class="row"><span>' + i.quantity + 'x ' + i.name + '</span><span>' + naira(i.price * i.quantity) + '</span></div>';
+    }).join('');
   }).join('') + '<div class="tot"><span>Table total</span><span>' + naira(status.total) + '</span></div>';
 
   document.getElementById('guestList').innerHTML = status.guests.map(function (g) {

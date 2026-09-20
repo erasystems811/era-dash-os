@@ -6,7 +6,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderPayPage } from '../engine/menu-page-template.js';
-import { createOrderPayment, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, reply, resetServedForAddOn, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
+import { createOrderPayment, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
@@ -244,6 +244,13 @@ router.post('/:qrToken/review', async (req, res) => {
   // re-inserting all of `resolved` below is re-inserting everyone's items,
   // not dropping anyone else's.
   const order = await getOrCreateTableOrder(session, table, customer);
+  // Captured before anything below touches the order -- Chidera,
+  // 2026-09-20: "when they add on send them the yes to confirm button and
+  // place the ordr." A repeat round (this order already went through its
+  // own yes once before) still gets a real confirm gate, just scoped to
+  // what's new (deltaLines below) -- only a genuinely FIRST-ever
+  // submission gets the full first-time walk.
+  const wasAlreadyConfirmed = Boolean(order.confirmed_at);
   // Net-added, not just "resubmitted" -- joint dine-in, Stage 2: a guest
   // reopening this page to only REMOVE something, or resubmitting with
   // nothing actually changed, shouldn't ping staff or bump the order back
@@ -277,27 +284,28 @@ router.post('/:qrToken/review', async (req, res) => {
   }
   const total = resolved.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
-  // wasPostServeAddOn -- resetServedForAddOn's own return value says
-  // whether this genuinely was one (order.channel dinein and it had
-  // actually been served), not just whether netAdded is true.
-  const wasPostServeAddOn = netAdded ? await resetServedForAddOn(order) : false;
 
   // Chidera, 2026-09-20: "when the customer add something in dine in
   // after theyve been served the first one, dont send the whole menu to
   // the customer again, just send the add on to the staff and just top
-  // up." A table that's already eating doesn't need to re-run the whole
-  // item-question/upsell/confirm-order cycle (and see their ENTIRE running
-  // bill read back at them) just because they want another drink -- staff
-  // already got told via resetServedForAddOn's own alert just above; the
-  // customer gets a short, focused "added on" line, same spirit as
-  // sendTopupInvoice's own top-up acknowledgment for delivery/pickup
-  // orders, not the full order-engine walk.
-  if (wasPostServeAddOn && !anyRemoved) {
-    const addedLines = resolved
+  // up... when they add on send them the yes to confirm button." A table
+  // that's already eating doesn't need to re-run the whole item-question/
+  // upsell/confirm-order cycle and see their ENTIRE running bill read
+  // back just because they want another drink -- but they still get the
+  // same real yes/no confirm gate every round does, just scoped to what's
+  // new. The staff "added more" alert (resetServedForAddOn) now fires on
+  // the actual yes tap (handleConfirmOrder), not here -- same two-step
+  // "shown, then confirmed" shape the very first round already has.
+  const isRepeatAddOn = wasAlreadyConfirmed && netAdded && !anyRemoved;
+  if (isRepeatAddOn) {
+    await pool.query(`update "order" set confirmed_at = null where id = $1`, [order.id]);
+    order.confirmed_at = null;
+    const deltaLines = resolved
       .map((item) => ({ ...item, addedQty: item.quantity - (beforeQty.get(item.productId) || 0) }))
       .filter((item) => item.addedQty > 0)
       .map((item) => `${item.addedQty}x ${item.name}`);
-    await reply(customer, `Got it, added on:\n${addedLines.join('\n')}\n\nYour table's total is now NGN ${total}.`);
+    await restartItemsCollection(order);
+    await finishItemsCollection(customer, order, '', { deltaLines });
     res.json({ ok: true });
     return;
   }
