@@ -1232,6 +1232,13 @@ create table if not exists pos_sync_config (
   api_key text,
   webhook_username text,
   webhook_password text,
+  -- Chidera, 2026-09-20: the real connection mechanism -- a subscription
+  -- created through Moniepoint's own Settings UI authenticates webhook
+  -- deliveries with an HMAC-SHA256 signature (moniepoint-webhook-signature
+  -- header), not Basic auth. webhook_username/password stay for the
+  -- API-key-based path (never actually reached live); this is the one
+  -- that matters. See migrations/0055_pos_webhook_secret.sql.
+  webhook_secret text,
   connected_at timestamptz
 );
 create table if not exists pos_transaction (

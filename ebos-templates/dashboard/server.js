@@ -38,6 +38,14 @@ const app = express();
 // before the global express.json() below and parses its own body with
 // express.raw() -- everything else gets normal parsed JSON/form bodies.
 app.use('/webhook/paystack', paystackWebhook);
+// Chidera, 2026-09-20: same reasoning as Paystack above -- Moniepoint's
+// real webhook subscription (created through their own Settings UI, not
+// the API-key system) signs each delivery with HMAC-SHA256 over the raw
+// body (moniepoint-webhook-signature header), so this needs to move above
+// the global JSON parser too, same as Paystack's. Was below it, parsed by
+// express.json(), back when this route only checked Basic auth -- moved
+// once the real mechanism was confirmed.
+app.use('/webhook/moniepoint', moniepointWebhook);
 
 // Express's own default JSON body limit is 100kb -- far too small for any
 // of the data: URI image uploads this app already does (business logo,
@@ -52,10 +60,6 @@ app.use(express.urlencoded({ extended: false, limit: '20mb' }));
 // Public webhooks -- Meta and Paystack call these directly, no session.
 app.use('/webhook/whatsapp', whatsappWebhook);
 app.use('/webhook/instagram', instagramWebhook);
-// Moniepoint calls this directly too -- authenticated with Basic auth
-// checked inside the route itself, not a raw-body signature, so it's fine
-// below the global express.json() parser.
-app.use('/webhook/moniepoint', moniepointWebhook);
 // Public documents -- the invoice/receipt link sent to a customer over
 // WhatsApp has to open without a dashboard login.
 app.use('/documents', documentRoutes);

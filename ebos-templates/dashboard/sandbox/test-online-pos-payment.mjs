@@ -27,15 +27,32 @@ function assert(cond, msg) {
   else console.log('ok:', msg);
 }
 
+// Chidera, 2026-09-20: "how do we integrate the pos now" -- her real
+// Moniepoint account's own webhook subscription (created through their
+// Settings UI, not the never-working API-key system) authenticates with
+// HMAC-SHA256 over the raw body, not Basic auth.
+const WEBHOOK_SECRET = 'test-webhook-secret';
+
 async function postMoniepointWebhook(amountNaira, reference) {
-  const auth = Buffer.from('testuser:testpass').toString('base64');
+  const body = JSON.stringify({
+    eventId: `evt-${reference}`,
+    eventType: 'V1_POS_TRANSFER_TRANSACTION',
+    data: { transactionReference: reference, amount: amountNaira * 100, transactionTime: new Date().toISOString(), transactionStatus: 'COMPLETED' },
+    createdAt: new Date().toISOString(),
+  });
+  const webhookId = `wh-${reference}`;
+  const timestamp = String(Date.now());
+  const crypto = await import('node:crypto');
+  const signature = crypto.createHmac('sha256', WEBHOOK_SECRET).update(`${webhookId}__${timestamp}__${body}`).digest('base64');
   return fetch(`${BASE}/webhook/moniepoint`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', authorization: `Basic ${auth}` },
-    body: JSON.stringify({
-      eventType: 'POS_TRANSACTION_SUCCESSFUL',
-      data: { transactionReference: reference, actualAmount: amountNaira * 100, createdAt: new Date().toISOString() },
-    }),
+    headers: {
+      'Content-Type': 'application/json',
+      'moniepoint-webhook-id': webhookId,
+      'moniepoint-webhook-timestamp': timestamp,
+      'moniepoint-webhook-signature': signature,
+    },
+    body,
   });
 }
 
@@ -53,9 +70,9 @@ async function main() {
   // Moniepoint webhook creds -- same shape sandbox/test-dinein-pos-payment.mjs uses.
   const { rows: bizRows } = await pool.query(`select id from business limit 1`);
   await pool.query(
-    `insert into pos_sync_config (business_id, enabled, webhook_username, webhook_password) values ($1, true, 'testuser', 'testpass')
-     on conflict (business_id) do update set enabled = true, webhook_username = 'testuser', webhook_password = 'testpass'`,
-    [bizRows[0].id]
+    `insert into pos_sync_config (business_id, enabled, webhook_secret) values ($1, true, $2)
+     on conflict (business_id) do update set enabled = true, webhook_secret = $2`,
+    [bizRows[0].id, WEBHOOK_SECRET]
   );
 
   // Settings' own new "How you get paid" choice -- POS, with real transfer details.

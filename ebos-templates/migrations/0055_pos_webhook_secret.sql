@@ -1,0 +1,12 @@
+-- Chidera, 2026-09-20: "how do we integrate the pos now, we really need to
+-- figure that out." Her real Moniepoint account already has an ACTIVE
+-- webhook subscription, correctly pointed at era-demo's own
+-- /webhook/moniepoint -- created through Moniepoint's own Settings UI
+-- (atm.moniepoint.com), a genuinely different, simpler mechanism than the
+-- API-key-based "POS as a Platform" system add-pos-sync.mjs was built for
+-- (which every one of her 7 generated keys failed against, root cause
+-- never resolved). This one authenticates webhook deliveries with
+-- HMAC-SHA256 signature verification, not Basic auth -- one secret,
+-- retrieved once via "Re-Generate API Secret" on the subscription's own
+-- page, no Moniepoint API call needed at all to connect it.
+alter table pos_sync_config add column if not exists webhook_secret text;

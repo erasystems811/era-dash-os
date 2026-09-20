@@ -551,6 +551,27 @@ router.post('/pos-sync-config', requireEraAdmin, async (req, res) => {
 // (run once a client's real Moniepoint API access is in hand) ever calls
 // this, so a plain enable/disable click through the panel can never
 // accidentally wipe stored credentials by omitting them from the body.
+// Chidera, 2026-09-20: the real connection mechanism -- a webhook
+// subscription created through Moniepoint's own Settings UI (not the
+// API-key-based system /credentials above was built for, which never
+// actually worked) authenticates with an HMAC-SHA256 signature instead of
+// Basic auth, one secret, no Moniepoint API call needed to connect it at
+// all -- see engine/webhook-moniepoint.js's own comment for the full
+// mechanism. requireEraAdmin, same as /credentials -- POS sync stays an
+// ERA-switched add-on, not a self-service business-owner setting.
+router.post('/pos-sync-config/webhook-secret', requireEraAdmin, async (req, res) => {
+  const { secret } = req.body;
+  if (!secret) return res.status(400).json({ error: 'secret is required.' });
+  const { rows } = await pool.query(
+    `insert into pos_sync_config (business_id, enabled, provider, webhook_secret, connected_at)
+     values ((select id from business limit 1), true, 'moniepoint', $1, now())
+     on conflict (business_id) do update set webhook_secret = excluded.webhook_secret, enabled = true, connected_at = now()
+     returning business_id, enabled, provider, connected_at`,
+    [secret]
+  );
+  res.json(rows[0]);
+});
+
 router.post('/pos-sync-config/credentials', requireEraAdmin, async (req, res) => {
   const { provider, apiKey, webhookUsername, webhookPassword } = req.body;
   if (!webhookUsername || !webhookPassword) return res.status(400).json({ error: 'webhookUsername and webhookPassword are required.' });

@@ -1,14 +1,22 @@
 // Joint dine-in, Stage 3 (fancy-whistling-pearl.md): split/joint payment
 // picking on the pay page, and POS auto-confirm via the real Moniepoint
-// webhook route (Basic Auth included, not calling the matching logic
-// directly) -- covers a split payment across two guests, the order only
-// completing once BOTH are confirmed, a tied (same amount, same window)
-// pair of pending payments correctly NOT auto-confirming either, and a
-// whole-table payment covering everything in one shot regardless of
-// per-guest amounts. Same EBOS_TEST_PGLITE + EBOS_SANDBOX pattern as the
-// other dine-in tests -- zero real Meta/Paystack/Moniepoint credentials
-// touched (PAYMENT_PROVIDER is left unset, so Stage 3's own POS path,
-// which never depends on it, is what's actually being exercised).
+// webhook route (real HMAC-SHA256 signature verification included, not
+// calling the matching logic directly) -- covers a split payment across
+// two guests, the order only completing once BOTH are confirmed, a tied
+// (same amount, same window) pair of pending payments correctly NOT
+// auto-confirming either, and a whole-table payment covering everything
+// in one shot regardless of per-guest amounts. Same EBOS_TEST_PGLITE +
+// EBOS_SANDBOX pattern as the other dine-in tests -- zero real Meta/
+// Paystack/Moniepoint credentials touched (PAYMENT_PROVIDER is left
+// unset, so Stage 3's own POS path, which never depends on it, is what's
+// actually being exercised).
+//
+// Chidera, 2026-09-20: "how do we integrate the pos now" -- her real
+// Moniepoint account's own webhook subscription (created through their
+// Settings UI, not the never-working API-key system) authenticates with
+// HMAC-SHA256 over the raw body, not Basic auth -- webhook_secret +
+// signature headers replace the old webhook_username/password + Basic
+// auth this test used to exercise.
 process.env.EBOS_TEST_PGLITE = '1';
 process.env.EBOS_SANDBOX = '1';
 process.env.PORT = '3917';
@@ -25,15 +33,28 @@ function assert(cond, msg) {
 
 function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+const WEBHOOK_SECRET = 'test-webhook-secret';
+
 async function postMoniepointWebhook(amountNaira, reference) {
-  const auth = Buffer.from('testuser:testpass').toString('base64');
+  const body = JSON.stringify({
+    eventId: `evt-${reference}`,
+    eventType: 'V1_POS_TRANSFER_TRANSACTION',
+    data: { transactionReference: reference, amount: amountNaira * 100, transactionTime: new Date().toISOString(), transactionStatus: 'COMPLETED' },
+    createdAt: new Date().toISOString(),
+  });
+  const webhookId = `wh-${reference}`;
+  const timestamp = String(Date.now());
+  const crypto = await import('node:crypto');
+  const signature = crypto.createHmac('sha256', WEBHOOK_SECRET).update(`${webhookId}__${timestamp}__${body}`).digest('base64');
   return fetch(`${BASE}/webhook/moniepoint`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', authorization: `Basic ${auth}` },
-    body: JSON.stringify({
-      eventType: 'POS_TRANSACTION_SUCCESSFUL',
-      data: { transactionReference: reference, actualAmount: amountNaira * 100, createdAt: new Date().toISOString() },
-    }),
+    headers: {
+      'Content-Type': 'application/json',
+      'moniepoint-webhook-id': webhookId,
+      'moniepoint-webhook-timestamp': timestamp,
+      'moniepoint-webhook-signature': signature,
+    },
+    body,
   });
 }
 
@@ -51,9 +72,9 @@ async function main() {
   const businessId = bizRows[0].id;
   await pool.query(`insert into dinein_config (business_id, enabled) values ($1, true) on conflict (business_id) do update set enabled = true`, [businessId]);
   await pool.query(
-    `insert into pos_sync_config (business_id, enabled, webhook_username, webhook_password) values ($1, true, 'testuser', 'testpass')
-     on conflict (business_id) do update set enabled = true, webhook_username = 'testuser', webhook_password = 'testpass'`,
-    [businessId]
+    `insert into pos_sync_config (business_id, enabled, webhook_secret) values ($1, true, $2)
+     on conflict (business_id) do update set enabled = true, webhook_secret = $2`,
+    [businessId, WEBHOOK_SECRET]
   );
   await pool.query(`insert into staff (name, phone_number, order_alerts, role) values ('Kitchen', '2348033330003', true, 'staff')`);
   const { rows: existingBranch } = await pool.query(`select id from branch limit 1`);
