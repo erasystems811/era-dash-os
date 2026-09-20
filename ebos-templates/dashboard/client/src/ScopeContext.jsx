@@ -31,6 +31,25 @@ export function ScopeProvider({ children }) {
     if (staff) loadBranches();
   }, [staff]);
 
+  // Chidera, 2026-09-20: "why is my ipad orders page still showing me
+  // compare branches" -- real bug, not a stale bookmark (found nothing
+  // wrong in the earlier search because the switcher itself is invisible
+  // on a single-branch business, showScopeSwitcher below). scope is
+  // per-device localStorage (STORAGE_KEY's own comment) -- once it's
+  // stuck at 'all' or a branch id on a device, and the business later has
+  // only 1 branch (or always did, and this got set some other way), the
+  // ONLY UI that can ever change it back also stops rendering
+  // (Layout.jsx: branches.length > 1). A genuine dead end with no escape
+  // except clearing browser storage by hand. Self-heals here instead:
+  // once branches actually loads, a stuck scope on a business that no
+  // longer has anything to scope BY just gets cleared, same "genuinely
+  // inert while off" rule every other add-on in this file already
+  // follows.
+  useEffect(() => {
+    if (branches.length > 1) return;
+    if (scope) setScope(null);
+  }, [branches, scope]);
+
   useEffect(() => {
     if (!staff) return;
     // A staff member locked to a branch is hard-pinned to it -- never
