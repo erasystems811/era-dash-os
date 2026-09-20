@@ -87,11 +87,22 @@ export async function menuForBranch(branchId) {
   // alphabetical-fallback bug: Chidera, testing pomodoro's real web menu,
   // "why is drinks frist on the website tabs" -- category name order
   // wouldn't put Drinks first anywhere but alphabetically.
+  // questions: Chidera, 2026-09-17: "what if the whole order is taken on
+  // the site" -- the web menu page needs to ask the same per-item
+  // customization question (penne or spaghetti, room temp or cold) it
+  // used to only ask afterward in chat, right when an item's added to the
+  // basket. Same product_question rows the bot's own askNextItemQuestion
+  // already reads, just surfaced here too now.
   const { rows } = await pool.query(
-    `select id, name, description, price, category, image_data_url, availability
-     from product
-     where (branch_id = $1 or branch_id is null) and import_status is distinct from 'new'
-     order by position asc nulls last, category nulls last, name`,
+    `select p.id, p.name, p.description, p.price, p.category, p.image_data_url, p.availability,
+       coalesce(
+         (select json_agg(json_build_object('id', pq.id, 'question', pq.question) order by pq.position, pq.created_at)
+          from product_question pq where pq.product_id = p.id),
+         '[]'
+       ) as questions
+     from product p
+     where (p.branch_id = $1 or p.branch_id is null) and p.import_status is distinct from 'new'
+     order by p.position asc nulls last, p.category nulls last, p.name`,
     [branchId]
   );
   return rows;
@@ -132,7 +143,21 @@ router.post('/:qrToken/review', async (req, res) => {
     const p = byId.get(item.productId);
     if (!p || !p.availability) continue; // never trust the client's own price/availability claim
     const qty = Number(item.quantity) > 0 ? Number(item.quantity) : 1;
-    resolved.push({ productId: p.id, name: p.name, price: p.price, quantity: qty });
+    // Never trust the client's own answers object either -- only keep an
+    // answer for a question that genuinely belongs to this product, same
+    // "never trust the client's own claim" reasoning as price/availability
+    // just above. A question id the client made up (or one belonging to a
+    // different product) is silently dropped, not persisted.
+    const validQuestionIds = new Set((p.questions || []).map((q) => q.id));
+    const answers = {};
+    if (item.answers && typeof item.answers === 'object') {
+      for (const qid of Object.keys(item.answers)) {
+        if (validQuestionIds.has(qid) && String(item.answers[qid] || '').trim()) {
+          answers[qid] = String(item.answers[qid]).trim();
+        }
+      }
+    }
+    resolved.push({ productId: p.id, name: p.name, price: p.price, quantity: qty, answers });
   }
   if (!resolved.length) return res.status(400).json({ error: "Sorry, nothing in your basket is available right now." });
 
@@ -164,7 +189,16 @@ router.post('/:qrToken/review', async (req, res) => {
     order = orderRows[0];
   }
   for (const item of resolved) {
-    await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+    const { rows: itemRows } = await pool.query(
+      'insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4) returning id',
+      [order.id, item.productId, item.quantity, item.price]
+    );
+    for (const questionId of Object.keys(item.answers || {})) {
+      await pool.query(
+        'insert into order_item_answer (order_item_id, question_id, answer) values ($1, $2, $3)',
+        [itemRows[0].id, questionId, item.answers[questionId]]
+      );
+    }
   }
   const total = resolved.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
@@ -201,13 +235,23 @@ router.post('/:qrToken/review', async (req, res) => {
 async function pendingOrderPayload(customerId, tableId) {
   const order = await getOpenOrder(customerId);
   if (!order || order.status !== 'new' || order.table_id !== tableId) return null;
+  // answers -- Chidera, 2026-09-17: so a reopened table link's basket
+  // rebuilds the exact same distinct lines it left with (menu-page-
+  // template.js's own PENDING_ORDER pre-load), not one merged line that's
+  // lost which answer belonged to which unit. coalesce to '{}', not NULL,
+  // same reasoning as routes/menu-page.js's own pendingOrderPayload.
   const { rows: items } = await pool.query(
-    `select oi.product_id, oi.quantity, p.name from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+    `select oi.product_id, oi.quantity, p.name,
+       coalesce(
+         (select json_object_agg(oa.question_id, oa.answer) from order_item_answer oa where oa.order_item_id = oi.id),
+         '{}'
+       ) as answers
+     from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [order.id]
   );
   if (!items.length) return null;
   return {
-    items: items.map((i) => ({ productId: i.product_id, quantity: i.quantity, name: i.name })),
+    items: items.map((i) => ({ productId: i.product_id, quantity: i.quantity, name: i.name, answers: i.answers || {} })),
     total: Number(order.total) || 0,
   };
 }

@@ -43,7 +43,16 @@
 // request to defer and would have downloaded as part of this same HTML
 // regardless of the attribute. So the page paints instantly AND stays
 // light no matter how many photos a business has.
-export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory }) {
+// askFulfilment/deliveryMode/deliveryZones/deliveryQuotePath: Chidera,
+// 2026-09-17: "the extra penne or spagetti... could be on the site right?
+// ... lets keep thinking but keep that" -- the same reasoning extended to
+// delivery/pickup, address and (own_riders businesses only) which zone.
+// Dine-in never passes any of these (routes/dinein-menu.js) -- a table
+// order is always at_table payment, and handleCollectFulfilment
+// (engine/flow.js) never even asks delivery/pickup for one, so asking here
+// too would be a real, unwanted new question. Only routes/menu-page.js
+// (general ordering) passes askFulfilment: true.
+export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
   const lightProducts = products.map((p) => ({
     id: p.id,
@@ -53,6 +62,13 @@ export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, b
     category: p.category,
     availability: p.availability,
     hasPhoto: Boolean(p.image_data_url),
+    // Chidera, 2026-09-17: "what if the whole order is taken on the site"
+    // -- the same per-item question the bot used to only ask afterward in
+    // chat (penne or spaghetti, room temp or cold), now asked right here
+    // when the item's added. Empty for the (common) case a product has
+    // none -- those items keep the exact same plain +/- stepper as before
+    // this existed.
+    questions: p.questions || [],
   }));
   // /photo/cover, not the raw data: URI -- same reasoning as a product's
   // own photo (routes/product-photo.js): a real, separate image request
@@ -138,6 +154,10 @@ export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, b
   .sheetRow .nm{flex:1;font-size:14px}
   .sheetRow .pr{font-size:13px;color:var(--mid);min-width:70px;text-align:right}
   .sheetEmpty{padding:24px 0;text-align:center;color:var(--mid);font-size:13px}
+  .fulToggle{flex:1;padding:12px;border-radius:10px;border:1px solid var(--line);background:#fff;font-family:inherit;font-size:14px;font-weight:600;color:var(--ink);touch-action:manipulation}
+  .fulToggle.active{border-color:var(--hot);color:var(--hot)}
+  .fld label{display:block;font-size:13px;color:var(--mid);margin-bottom:4px}
+  .fld select,.fld textarea{width:100%;padding:12px;border-radius:10px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box;font-family:inherit}
 </style></head>
 <body>
 <div class="mtop${coverPhotoVersion ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
@@ -151,6 +171,35 @@ export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, b
 <div id="sheet" class="sheet" hidden>
   <div class="sheetHead"><h3>Your order</h3><button id="sheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
   <div id="sheetList"></div>
+  <div id="sheetFulfil" hidden style="margin-top:14px;padding-top:14px;border-top:1px solid #F0EBE2;font-size:13.5px;color:var(--mid)"></div>
+  <button id="sheetConfirm" hidden style="width:100%;margin-top:14px">Confirm order</button>
+</div>
+<div id="qSheet" class="sheet" hidden>
+  <div class="sheetHead"><h3 id="qSheetTitle"></h3><button id="qSheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
+  <div id="qSheetBody"></div>
+  <button id="qSheetAdd" style="width:100%;margin-top:12px">Add to order</button>
+</div>
+<div id="fulfilSheet" class="sheet" hidden>
+  <div class="sheetHead"><h3>Delivery or pickup?</h3><button id="fulSheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
+  <div style="display:flex;gap:8px;margin-bottom:14px">
+    <button id="fulPickup" class="fulToggle">Pickup</button>
+    <button id="fulDelivery" class="fulToggle">Delivery</button>
+  </div>
+  <div id="fulDeliveryFields" hidden>
+    <div id="fulZoneField" class="fld" hidden>
+      <label>Delivery area</label>
+      <select id="fulZone" style="margin-bottom:12px"></select>
+    </div>
+    <div class="fld">
+      <label>Delivery address</label>
+      <textarea id="fulAddress" rows="2"></textarea>
+    </div>
+    <div id="fulFeeCheckField" hidden>
+      <button id="fulCheckFee" style="width:100%;margin-top:8px">Check delivery fee</button>
+      <p id="fulFeeResult" style="font-size:13px;color:var(--mid);margin-top:8px"></p>
+    </div>
+  </div>
+  <button id="fulContinue" style="width:100%;margin-top:12px">Continue</button>
 </div>
 <div id="bdaySheet" class="sheet" hidden>
   <div class="sheetHead"><h3>When's your birthday?</h3><button id="bdaySheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
@@ -167,7 +216,27 @@ const REVIEW_PATH = ${JSON.stringify(reviewPath)};
 const BIRTHDAY_PATH = ${JSON.stringify(birthdayPath || null)};
 const SHOW_BIRTHDAY_PROMPT = ${JSON.stringify(Boolean(showBirthdayPrompt))};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
-let basket = {};
+const ASK_FULFILMENT = ${JSON.stringify(Boolean(askFulfilment))};
+const DELIVERY_MODE = ${JSON.stringify(deliveryMode || null)};
+const DELIVERY_ZONES = ${JSON.stringify(deliveryZones || [])};
+const DELIVERY_QUOTE_PATH = ${JSON.stringify(deliveryQuotePath || null)};
+// Restored from a reopened link exactly like the basket itself is above --
+// same "how are they aware it's already decided, how do they change it"
+// reasoning (Chidera 2026-09-10), just applied to delivery/pickup now.
+let fulfilment = (PENDING_ORDER && PENDING_ORDER.fulfilment) || null;
+// Chidera, 2026-09-17: "so if a person is pick 2 pasta itll have to ask
+// for each + and if they picked 2 different a - will have to know for
+// which" -- basket is keyed by product+answers together (JSON.stringify
+// of the answers object as part of the key), not just product id. Two
+// Pasta Alfredo with the SAME answer (both penne) land on the same key
+// and just increment quantity, same as any plain item; two with
+// DIFFERENT answers get two genuinely separate keys, each with its own
+// quantity and its own "-" -- no ambiguity about which one a tap on "-"
+// means, because there's no shared line to be ambiguous about. Items
+// with no questions at all get answers: {} always, so they behave
+// exactly as the single-line-per-product basket did before this existed.
+function lineKey(productId, answers) { return productId + '::' + JSON.stringify(answers || {}); }
+let basket = {}; // key -> { productId, quantity, answers }
 if (PENDING_ORDER && PENDING_ORDER.items) {
   // A guest reopening this link may already have an order sitting with us
   // -- pre-load it into the basket (steppers and all) instead of a page
@@ -175,7 +244,10 @@ if (PENDING_ORDER && PENDING_ORDER.items) {
   // pending is as direct as adding something new. Chidera 2026-09-10:
   // "how are they aware that the first one is still pending... how can
   // they remove as well?"
-  PENDING_ORDER.items.forEach(function (i) { basket[i.productId] = i.quantity; });
+  PENDING_ORDER.items.forEach(function (i) {
+    const answers = i.answers || {};
+    basket[lineKey(i.productId, answers)] = { productId: i.productId, quantity: i.quantity, answers: answers };
+  });
 }
 // Opens straight on the requested category (the "Special offers" button
 // links here with ?cat=) when the catalogue actually has it right now --
@@ -201,14 +273,32 @@ function renderCats() {
   document.querySelectorAll('#cats button').forEach(b => b.onclick = () => { cur = b.dataset.c; renderCats(); render(); });
 }
 
-function changeQty(id, delta) {
-  const next = (basket[id] || 0) + delta;
-  if (next <= 0) delete basket[id]; else basket[id] = next;
+function changeQty(key, delta, productId, answers) {
+  const existing = basket[key];
+  const nextQty = (existing ? existing.quantity : 0) + delta;
+  if (nextQty <= 0) delete basket[key];
+  // A brand-new line (no existing entry) has to take its answers from
+  // whoever's calling this, not from a line that doesn't exist yet --
+  // this used to silently drop them (always fell back to {}), so a
+  // question-having item's real answers never actually reached the
+  // server even though the basket KEY was already answer-aware.
+  else basket[key] = { productId: productId || (existing && existing.productId), quantity: nextQty, answers: existing ? existing.answers : (answers || {}) };
   render();
   updateBasket();
   if (!document.getElementById('sheet').hidden) renderSheet();
 }
 
+function totalQtyFor(productId) {
+  return Object.values(basket).filter(l => l.productId === productId).reduce((sum, l) => sum + l.quantity, 0);
+}
+
+// Chidera, 2026-09-17: "what if the whole order is taken on the site" --
+// a product with real customization questions always opens qSheet to ask
+// them (below), whether this is the first one added or another one --
+// never a plain +/- stepper for these, since a bare "+" tap has no way to
+// ask what this specific extra one should be. A product with no
+// questions at all keeps the exact same +/- stepper as before any of
+// this existed.
 function render() {
   const list = PRODUCTS.filter(p => (p.category || 'Menu') === cur);
   document.getElementById('sec').innerHTML = '<h2>' + cur + '</h2>';
@@ -216,30 +306,215 @@ function render() {
     const shot = p.hasPhoto
       ? '<div class="shot"><img loading="lazy" decoding="async" src="/photo/' + p.id + '" alt=""></div>'
       : '<div class="shot"><span>' + p.name.toUpperCase() + '</span></div>';
-    const qty = basket[p.id] || 0;
-    const control = !p.availability
-      ? '<span class="gone">Out of stock</span>'
-      : qty > 0
+    const hasQuestions = p.questions && p.questions.length > 0;
+    const qty = hasQuestions ? totalQtyFor(p.id) : (basket[lineKey(p.id, {})] ? basket[lineKey(p.id, {})].quantity : 0);
+    let control;
+    if (!p.availability) {
+      control = '<span class="gone">Out of stock</span>';
+    } else if (hasQuestions) {
+      control = '<button class="add qask" data-id="' + p.id + '">' + (qty > 0 ? qty + ' added \\u00b7 Add another' : 'Add') + '</button>';
+    } else {
+      control = qty > 0
         ? '<div class="qty"><button class="qm" data-id="' + p.id + '">\\u2212</button><span class="qn">' + qty + '</span><button class="qp" data-id="' + p.id + '">+</button></div>'
         : '<button class="add" data-id="' + p.id + '">Add</button>';
+    }
     return '<div class="item">' + shot +
       '<h3>' + p.name + '</h3>' +
       (p.description ? '<p class="d">' + p.description + '</p>' : '') +
       '<div class="ln"><span class="pr">' + naira(p.price) + '</span>' + control + '</div></div>';
   }).join('');
-  document.querySelectorAll('.add').forEach(b => b.onclick = () => changeQty(b.dataset.id, 1));
-  document.querySelectorAll('.qp').forEach(b => b.onclick = () => changeQty(b.dataset.id, 1));
-  document.querySelectorAll('.qm').forEach(b => b.onclick = () => changeQty(b.dataset.id, -1));
+  document.querySelectorAll('.add:not(.qask)').forEach(b => b.onclick = () => changeQty(lineKey(b.dataset.id, {}), 1, b.dataset.id));
+  document.querySelectorAll('.qask').forEach(b => b.onclick = () => openQuestionSheet(b.dataset.id));
+  document.querySelectorAll('.grid .qp').forEach(b => b.onclick = () => changeQty(lineKey(b.dataset.id, {}), 1, b.dataset.id));
+  document.querySelectorAll('.grid .qm').forEach(b => b.onclick = () => changeQty(lineKey(b.dataset.id, {}), -1));
 }
 
 function updateBasket() {
-  const count = Object.values(basket).reduce((a, b) => a + b, 0);
-  const total = Object.entries(basket).reduce((sum, [id, qty]) => {
-    const p = PRODUCTS.find(p => p.id === id);
-    return sum + (p ? Number(p.price) * qty : 0);
+  const lines = Object.values(basket);
+  const count = lines.reduce((a, l) => a + l.quantity, 0);
+  const total = lines.reduce((sum, l) => {
+    const p = PRODUCTS.find(p => p.id === l.productId);
+    return sum + (p ? Number(p.price) * l.quantity : 0);
   }, 0);
   document.getElementById('bc').textContent = count ? count + ' item' + (count > 1 ? 's' : '') + ' \\u00b7 ' + naira(total) : 'Nothing added yet';
 }
+
+function escapeAttr(s) {
+  return String(s || '').replace(/[&"<>]/g, function (c) { return { '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' }[c]; });
+}
+
+// Chidera, 2026-09-20: "let delivery/pickup details processing and details
+// of food specification eg. cold or room temp be processes in the flow on
+// the website to save cost" -- a customer who ordered by typing in the
+// chat can already have a real basket line sitting here with NO answers
+// yet (flow.js sends this same page's link instead of asking one Meta
+// message per question now). true only when this product genuinely has
+// questions this line hasn't answered yet -- never true for a plain item,
+// and never true once every question's been answered.
+function lineNeedsAnswer(line) {
+  const p = PRODUCTS.find(function (pr) { return pr.id === line.productId; });
+  if (!p || !p.questions.length) return false;
+  return p.questions.some(function (q) { return !(line.answers && line.answers[q.id]); });
+}
+function firstUnansweredKey() {
+  for (const key of Object.keys(basket)) {
+    if (lineNeedsAnswer(basket[key])) return key;
+  }
+  return null;
+}
+
+// One question sheet, reused for whichever product's "Add"/"Add another"
+// was just tapped -- collects a plain text answer per question (same
+// free-text shape the bot's own AI extraction already accepts in chat,
+// not a fixed multiple-choice list the product_question table has no
+// structured options for), then adds (or merges into an identical
+// existing line -- see lineKey's own comment) one unit.
+// editingKey: set only when completing an EXISTING line that's missing its
+// answer(s) (see lineNeedsAnswer above) -- Submit then replaces that same
+// line in place (same quantity, its key changes to match the real
+// answers) instead of adding a brand-new unit on top of it.
+let qSheetProductId = null;
+let qSheetEditingKey = null;
+function openQuestionSheet(productId, editingKey) {
+  hideAllSheets();
+  qSheetProductId = productId;
+  qSheetEditingKey = editingKey || null;
+  const p = PRODUCTS.find(p => p.id === productId);
+  if (!p) return;
+  const existingAnswers = (editingKey && basket[editingKey] && basket[editingKey].answers) || {};
+  document.getElementById('qSheetTitle').textContent = p.name;
+  document.getElementById('qSheetBody').innerHTML = p.questions.map((q, i) =>
+    '<div style="margin-bottom:12px">' +
+    '<label style="display:block;font-size:13px;color:var(--mid);margin-bottom:4px">' + q.question + '</label>' +
+    '<input data-qid="' + q.id + '" value="' + escapeAttr(existingAnswers[q.id]) + '" style="width:100%;padding:10px;border-radius:8px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box">' +
+    '</div>'
+  ).join('');
+  document.getElementById('backdrop').hidden = false;
+  document.getElementById('qSheet').hidden = false;
+}
+function closeQuestionSheet() {
+  document.getElementById('backdrop').hidden = true;
+  document.getElementById('qSheet').hidden = true;
+  qSheetProductId = null;
+  qSheetEditingKey = null;
+}
+document.getElementById('qSheetClose').onclick = closeQuestionSheet;
+document.getElementById('qSheetAdd').onclick = () => {
+  if (!qSheetProductId) return;
+  const inputs = document.querySelectorAll('#qSheetBody input');
+  const answers = {};
+  for (const inp of inputs) {
+    const val = inp.value.trim();
+    if (!val) { inp.focus(); return; } // every question needs an answer before adding, same as the bot would insist on in chat
+    answers[inp.dataset.qid] = val;
+  }
+  if (qSheetEditingKey) {
+    const existing = basket[qSheetEditingKey];
+    const key = lineKey(qSheetProductId, answers);
+    delete basket[qSheetEditingKey];
+    basket[key] = { productId: qSheetProductId, quantity: existing ? existing.quantity : 1, answers: answers };
+    render();
+    updateBasket();
+    if (!document.getElementById('sheet').hidden) renderSheet();
+  } else {
+    changeQty(lineKey(qSheetProductId, answers), 1, qSheetProductId, answers);
+  }
+  closeQuestionSheet();
+};
+
+// Delivery/pickup step -- opened by "Place order" itself (below) the first
+// time, not shown inline on the page, same "sheet, not permanent page
+// clutter" pattern as the basket review and question sheets above. Own-
+// riders businesses get a real dropdown of actual zone names/fees (no
+// guessing, unlike the WhatsApp path's text match) ON TOP OF the address
+// field, not instead of it -- the zone only decides the area/price, a
+// rider still needs the actual street/house address to find, same as
+// engine/delivery.js's ownRidersDelivery, which stores customer.address
+// as the delivery's own destination regardless of provider. Found via a
+// real run-through, 2026-09-17: picking a zone alone left customer.address
+// null, so missingFulfilmentFields (fields.js) kept seeing "delivery_
+// address" as outstanding and re-asked for it anyway -- silently
+// re-opening exactly the WhatsApp gate this feature exists to close.
+// Everyone else (chowdeck/manual) just gets the address field with a live
+// fee check, no zone dropdown at all.
+function openFulfilSheet() {
+  hideAllSheets();
+  const isDelivery = fulfilment && fulfilment.type === 'delivery';
+  document.getElementById('fulPickup').classList.toggle('active', fulfilment && fulfilment.type === 'pickup');
+  document.getElementById('fulDelivery').classList.toggle('active', isDelivery);
+  document.getElementById('fulDeliveryFields').hidden = !isDelivery;
+  document.getElementById('fulAddress').value = (isDelivery && fulfilment.address) || '';
+  if (DELIVERY_MODE === 'own_riders') {
+    document.getElementById('fulZoneField').hidden = false;
+    document.getElementById('fulFeeCheckField').hidden = true;
+    const zoneSelect = document.getElementById('fulZone');
+    if (!zoneSelect.options.length) {
+      zoneSelect.innerHTML = '<option value="">Choose your area...</option>' +
+        DELIVERY_ZONES.map(function (z) { return '<option value="' + z.id + '">' + z.name + ' \\u00b7 ' + naira(z.customer_fee) + '</option>'; }).join('');
+    }
+    zoneSelect.value = (isDelivery && fulfilment.zoneId) || '';
+  } else {
+    document.getElementById('fulZoneField').hidden = true;
+    document.getElementById('fulFeeCheckField').hidden = false;
+    document.getElementById('fulFeeResult').textContent = '';
+  }
+  document.getElementById('backdrop').hidden = false;
+  document.getElementById('fulfilSheet').hidden = false;
+}
+function closeFulfilSheet() {
+  document.getElementById('backdrop').hidden = true;
+  document.getElementById('fulfilSheet').hidden = true;
+}
+document.getElementById('fulSheetClose').onclick = closeFulfilSheet;
+document.getElementById('fulPickup').onclick = function () {
+  fulfilment = { type: 'pickup' };
+  document.getElementById('fulPickup').classList.add('active');
+  document.getElementById('fulDelivery').classList.remove('active');
+  document.getElementById('fulDeliveryFields').hidden = true;
+};
+document.getElementById('fulDelivery').onclick = function () {
+  fulfilment = { type: 'delivery' };
+  document.getElementById('fulDelivery').classList.add('active');
+  document.getElementById('fulPickup').classList.remove('active');
+  document.getElementById('fulDeliveryFields').hidden = false;
+};
+document.getElementById('fulCheckFee').onclick = async function () {
+  const address = document.getElementById('fulAddress').value.trim();
+  if (!address) { document.getElementById('fulFeeResult').textContent = 'Please enter an address first.'; return; }
+  const btn = document.getElementById('fulCheckFee');
+  btn.textContent = 'Checking...';
+  try {
+    const res = await fetch(DELIVERY_QUOTE_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address: address }) });
+    const data = await res.json();
+    const fee = Number(data.fee) || 0;
+    document.getElementById('fulFeeResult').textContent = fee > 0 ? ('Delivery fee: ' + naira(fee)) : 'Delivery fee will be confirmed with you.';
+  } catch (err) {
+    document.getElementById('fulFeeResult').textContent = 'Could not check the fee right now -- you can still continue.';
+  }
+  btn.textContent = 'Check delivery fee';
+};
+// Whichever function was waiting on this decision (submitOrder, below) --
+// set right before openFulfilSheet() opens, run once Continue is tapped.
+let afterFulfilment = null;
+document.getElementById('fulContinue').onclick = function () {
+  if (!fulfilment || !fulfilment.type) { alert('Please choose delivery or pickup.'); return; }
+  if (fulfilment.type === 'delivery') {
+    const address = document.getElementById('fulAddress').value.trim();
+    if (!address) { alert('Please enter your delivery address.'); return; }
+    if (DELIVERY_MODE === 'own_riders') {
+      const zoneId = document.getElementById('fulZone').value;
+      if (!zoneId) { alert('Please choose your delivery area.'); return; }
+      fulfilment = { type: 'delivery', zoneId: zoneId, address: address };
+    } else {
+      fulfilment = { type: 'delivery', address: address };
+    }
+  }
+  fulfilmentConfirmed = true;
+  closeFulfilSheet();
+  const run = afterFulfilment;
+  afterFulfilment = null;
+  if (run) run();
+};
 
 // A full itemized list lives here, opened by tapping the basket summary,
 // instead of inline on the page -- Chidera 2026-09-10: "if it list that
@@ -247,25 +522,90 @@ function updateBasket() {
 // see the list and adjust it directly from there". Reuses changeQty, so
 // adjusting a quantity here and adjusting it in the main grid are the
 // exact same action either way -- always in sync, nothing to reconcile.
+// Each distinct answer combination is its own row here now, labelled with
+// its own answers, so "which one does - remove" is never ambiguous --
+// every row only ever affects itself.
 function renderSheet() {
   const entries = Object.entries(basket);
   const list = document.getElementById('sheetList');
   if (!entries.length) {
     list.innerHTML = '<p class="sheetEmpty">Nothing added yet.</p>';
+    renderSheetFulfil();
     return;
   }
-  list.innerHTML = entries.map(([id, qty]) => {
-    const p = PRODUCTS.find(p => p.id === id);
+  list.innerHTML = entries.map(([key, line]) => {
+    const p = PRODUCTS.find(p => p.id === line.productId);
     if (!p) return '';
-    return '<div class="sheetRow"><span class="nm">' + p.name + '</span>' +
-      '<div class="qty"><button class="qm" data-id="' + id + '">\\u2212</button><span class="qn">' + qty + '</span><button class="qp" data-id="' + id + '">+</button></div>' +
-      '<span class="pr">' + naira(p.price * qty) + '</span></div>';
+    const needsAnswer = lineNeedsAnswer(line);
+    const answerText = Object.values(line.answers || {}).join(', ');
+    // needsAnswer -- Chidera, 2026-09-20: a line that arrived here already
+    // in the basket but never answered (typed in chat, then sent here to
+    // finish up) gets a clear "needs an answer" callout instead of looking
+    // like any other already-settled line -- tapping it reopens its own
+    // question sheet, pre-filled with whatever it already has.
+    const label = p.name + (needsAnswer ? ' \\u2014 needs an answer' : (answerText ? ' (' + answerText + ')' : ''));
+    const rowStyle = needsAnswer ? ' style="color:var(--hot);cursor:pointer"' : '';
+    return '<div class="sheetRow"' + (needsAnswer ? ' data-needs-answer-key="' + key + '"' : '') + '>' +
+      '<span class="nm"' + rowStyle + '>' + label + '</span>' +
+      '<div class="qty"><button class="qm" data-key="' + key + '">\\u2212</button><span class="qn">' + line.quantity + '</span><button class="qp" data-key="' + key + '">+</button></div>' +
+      '<span class="pr">' + naira(p.price * line.quantity) + '</span></div>';
   }).join('');
-  list.querySelectorAll('.qp').forEach(b => b.onclick = () => changeQty(b.dataset.id, 1));
-  list.querySelectorAll('.qm').forEach(b => b.onclick = () => changeQty(b.dataset.id, -1));
+  list.querySelectorAll('.qp').forEach(b => b.onclick = () => changeQty(b.dataset.key, 1));
+  list.querySelectorAll('.qm').forEach(b => b.onclick = () => changeQty(b.dataset.key, -1));
+  list.querySelectorAll('[data-needs-answer-key]').forEach(function (el) {
+    el.onclick = function () {
+      const key = el.dataset.needsAnswerKey;
+      const line = basket[key];
+      if (line) openQuestionSheet(line.productId, key);
+    };
+  });
+  renderSheetFulfil();
+}
+
+// Chidera, 2026-09-17: "lets think, ... could be on the site right? ...
+// lets keep thinking but keep that" -- the same basket sheet doubles as
+// the final review now: delivery/pickup (or a prompt to choose it, if
+// this sheet was opened before that) plus a real Confirm button, so
+// tapping Confirm here really is the informed final word this feature
+// was meant to make WhatsApp's own yes/no gate unnecessary for. Only
+// shown at all on the general-ordering route (ASK_FULFILMENT) -- dine-in
+// never had a confirm gate to replace in the first place (payment_mode
+// 'at_table' places the order immediately either way, see flow.js's
+// handleCollectFulfilment), so its own basket sheet stays exactly what it
+// always was: a plain editable list, no fulfilment section, no button.
+function renderSheetFulfil() {
+  const fulEl = document.getElementById('sheetFulfil');
+  const confirmBtn = document.getElementById('sheetConfirm');
+  if (!ASK_FULFILMENT) { fulEl.hidden = true; confirmBtn.hidden = true; return; }
+  fulEl.hidden = false;
+  confirmBtn.hidden = false;
+  if (!fulfilment || !fulfilment.type) {
+    fulEl.innerHTML = '<button id="sheetFulfilEdit" class="add">Choose delivery or pickup</button>';
+    document.getElementById('sheetFulfilEdit').onclick = function () { afterFulfilment = openSheet; openFulfilSheet(); };
+    return;
+  }
+  let line;
+  if (fulfilment.type === 'pickup') {
+    line = 'Pickup';
+  } else if (DELIVERY_MODE === 'own_riders' && fulfilment.zoneId) {
+    const zone = DELIVERY_ZONES.find(function (z) { return z.id === fulfilment.zoneId; });
+    const zoneLine = zone ? (zone.name + ' \\u00b7 ' + naira(zone.customer_fee)) : 'Delivery';
+    line = 'Delivery to ' + zoneLine + (fulfilment.address ? (' (' + fulfilment.address + ')') : '');
+  } else {
+    line = fulfilment.address ? ('Delivery to: ' + fulfilment.address) : 'Delivery';
+  }
+  fulEl.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px">' +
+    '<span>' + line + '</span>' +
+    '<button id="sheetFulfilEdit" style="background:none;border:0;color:var(--hot);font-family:inherit;font-size:13px;font-weight:600;padding:4px 0;flex:0 0 auto">Change</button></div>';
+  document.getElementById('sheetFulfilEdit').onclick = function () { afterFulfilment = openSheet; openFulfilSheet(); };
+}
+
+function hideAllSheets() {
+  ['sheet', 'qSheet', 'fulfilSheet', 'bdaySheet'].forEach(function (id) { document.getElementById(id).hidden = true; });
 }
 
 function openSheet() {
+  hideAllSheets();
   renderSheet();
   document.getElementById('backdrop').hidden = false;
   document.getElementById('sheet').hidden = false;
@@ -276,6 +616,7 @@ function closeSheet() {
 }
 document.getElementById('bc').onclick = openSheet;
 document.getElementById('sheetClose').onclick = closeSheet;
+document.getElementById('sheetConfirm').onclick = submitOrder;
 
 // Chidera, 2026-09-17: "the birthday pop up is meant to be on the
 // customers website they place others not the staff dashboard" -- schema.sql's
@@ -285,6 +626,7 @@ document.getElementById('sheetClose').onclick = closeSheet;
 // pattern as the basket review above for one consistent visual
 // language, not a second kind of popup on the same page.
 function openBdaySheet() {
+  hideAllSheets();
   document.getElementById('backdrop').hidden = false;
   document.getElementById('bdaySheet').hidden = false;
 }
@@ -307,15 +649,22 @@ document.getElementById('bdaySave').onclick = async () => {
 };
 document.getElementById('backdrop').onclick = () => {
   if (!document.getElementById('bdaySheet').hidden) closeBdaySheet();
+  else if (!document.getElementById('qSheet').hidden) closeQuestionSheet();
+  else if (!document.getElementById('fulfilSheet').hidden) closeFulfilSheet();
   else closeSheet();
 };
 
-document.getElementById('go').onclick = async () => {
-  const items = Object.entries(basket).map(([productId, quantity]) => ({ productId, quantity }));
+async function submitOrder() {
+  const items = Object.values(basket).map(function (l) { return { productId: l.productId, quantity: l.quantity, answers: l.answers || {} }; });
   if (!items.length) { document.getElementById('bc').textContent = 'Add something first'; return; }
-  const goBtn = document.getElementById('go');
+  // Whichever button is actually visible right now -- the bottom bar for
+  // dine-in's own unchanged one-tap flow, the sheet's own Confirm button
+  // for the general-ordering review flow above.
+  const goBtn = ASK_FULFILMENT ? document.getElementById('sheetConfirm') : document.getElementById('go');
   const originalLabel = goBtn.textContent;
   goBtn.textContent = 'Sending...';
+  const payload = { items: items };
+  if (ASK_FULFILMENT && fulfilment) payload.fulfilment = fulfilment;
   // A dropped connection right at the tap (Chidera 2026-09-11, right after
   // a "just white on bad network" complaint) used to fail this fetch with
   // nothing shown at all -- no alert, button just sitting there looking
@@ -323,7 +672,7 @@ document.getElementById('go').onclick = async () => {
   // visible alert now, never silence.
   let res, data;
   try {
-    res = await fetch(REVIEW_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
+    res = await fetch(REVIEW_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     data = await res.json();
   } catch (err) {
     goBtn.textContent = originalLabel;
@@ -336,18 +685,74 @@ document.getElementById('go').onclick = async () => {
   // leaving them stranded on this page -- wa.me is what WhatsApp's own
   // in-app browser intercepts and swaps back to the chat for.
   if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
+}
+
+// Chidera, 2026-09-17: "why is it restoring previous delivery choice? it
+// can only ask if theya re using same deliver or like an auto fill thing
+// cause people may have different delivery" -- a reopened link's old
+// fulfilment pre-fills the sheet (openFulfilSheet already does this) so a
+// repeat choice is a single tap, but it must never be silently reused
+// without a real chance to change it, since a different order can
+// genuinely go somewhere else. fulfilmentConfirmed (not the fulfilment
+// value itself) is what actually gates the sheet -- true only once THIS page
+// load has been through it once, so a pre-loaded fulfilment from
+// PENDING_ORDER still shows the sheet the first time "Place order" is
+// tapped, pre-filled, editable. Only skips on a second tap within the
+// same load, after they've already confirmed or changed it once.
+let fulfilmentConfirmed = false;
+// Chidera, 2026-09-17: "full review before submit... making the WhatsApp
+// confirm yes/no unnecessary." "Place order" no longer submits directly
+// on the general-ordering route -- it opens the same itemized sheet the
+// basket bar always opened, now also showing the delivery/pickup choice
+// and ending in a real "Confirm order" button (renderSheetFulfil,
+// above), so submitOrder only ever runs after the customer has actually
+// seen everything: items, answers, delivery/pickup, and (implicitly, via
+// the basket total) the price. flow.js's finishItemsCollection then skips
+// the WhatsApp yes/no ask for exactly this reason. Dine-in (ASK_FULFILMENT
+// false) never had a yes/no gate to replace -- ordering stays the
+// original single tap, unchanged.
+document.getElementById('go').onclick = () => {
+  if (!Object.keys(basket).length) { document.getElementById('bc').textContent = 'Add something first'; return; }
+  if (!ASK_FULFILMENT) { submitOrder(); return; }
+  if (!fulfilmentConfirmed) {
+    afterFulfilment = openSheet;
+    openFulfilSheet();
+    return;
+  }
+  openSheet();
 };
 
 renderCats();
 render();
 updateBasket();
-if (SHOW_BIRTHDAY_PROMPT) openBdaySheet();
+if (SHOW_BIRTHDAY_PROMPT) {
+  openBdaySheet();
 // A guest reopening this link may already have an order sitting with us --
 // basket is already pre-loaded from it above, and the basket bar itself
 // (never "Nothing added yet" when that's true) is the ambient signal;
 // opening the sheet once, right away, is what actually answers "how do I
-// know" and "how do I remove it" without any always-on inline list.
-if (PENDING_ORDER && PENDING_ORDER.items && PENDING_ORDER.items.length) openSheet();
+// know" and "how do I remove it" without any always-on inline list. Only
+// one sheet can ever be on screen at once now (hideAllSheets, above), so
+// this is skipped here, not layered underneath the birthday prompt --
+// closing that (Save or Not now) leaves the basket bar itself as the same
+// ambient reminder it always was; tapping it opens the review same as ever.
+} else {
+  // Chidera, 2026-09-20: a chat-originated order sent here specifically to
+  // finish up (flow.js's finishItemsCollection now links here instead of
+  // asking one item-question at a time in chat) needs that question
+  // actually surfaced the moment the page opens, not left sitting as an
+  // easy-to-miss line in a sheet nobody necessarily opens -- same ambient-
+  // signal reasoning as the birthday prompt and the pending-order sheet
+  // just above, just higher priority than the plain review (an unanswered
+  // question is the one thing actively blocking the order from going
+  // anywhere).
+  const unansweredKey = firstUnansweredKey();
+  if (unansweredKey) {
+    openQuestionSheet(basket[unansweredKey].productId, unansweredKey);
+  } else if (PENDING_ORDER && PENDING_ORDER.items && PENDING_ORDER.items.length) {
+    openSheet();
+  }
+}
 </script>
 </body></html>`;
 }

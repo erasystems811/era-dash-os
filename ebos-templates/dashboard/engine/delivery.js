@@ -145,6 +145,26 @@ export async function estimateDeliveryFee(order, customer) {
   }
 }
 
+// Chidera, 2026-09-17: the web menu page's own delivery/pickup step needs
+// a live fee for an address before an order even exists yet (still on the
+// basket page, deciding). quoteChowdeckFee only ever needed order.branch_id
+// (via resolveSource) and customer.address -- passing in bare {branch_id}/
+// {address} stand-ins gets a real quote without inventing a second copy of
+// this logic. Returns null (not 0) when there's genuinely no quote to give
+// (Chowdeck isn't configured for this business, or the quote itself failed)
+// so the web page can tell "no delivery fee, free" apart from "couldn't
+// check right now" -- 0 stays what it always meant elsewhere in this file.
+export async function estimateFeeForAddress(address, branchId) {
+  if (!(await chowdeckAvailable())) return null;
+  try {
+    const { feeNaira } = await quoteChowdeckFee({ branch_id: branchId }, { address });
+    return feeNaira;
+  } catch (err) {
+    console.error(`Chowdeck fee estimate (web) failed: ${err.message}`);
+    return null;
+  }
+}
+
 async function chowdeckDelivery(order, customer) {
   const merchantRef = process.env.CHOWDECK_MERCHANT_REFERENCE;
   const headers = await chowdeckHeaders();
