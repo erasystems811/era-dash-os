@@ -936,7 +936,7 @@ async function handleEnquiry(customer, text) {
   await reply(customer, "Let me check on that for you, one moment.", 'kb_miss');
 }
 
-async function summariseOrder(order) {
+export async function summariseOrder(order) {
   // Chidera, 2026-09-17: "when you ask those penne or spaghetti questions
   // or cold or room temperature, you dont record it anywhere??" -- it was
   // recorded (order_item_answer), just never read back into any message
@@ -2271,10 +2271,7 @@ async function applyOrderModifications(order, mods, { allowRemovals }) {
   // a dine-in order not yet served is already null. Chidera 2026-09-11:
   // "even if staff marks served and it goes to the next pipeline and they
   // still add it should go back to first pipeline."
-  if (mods.adds.length && order.channel === 'dinein' && order.served_at) {
-    await pool.query(`update "order" set served_at = null where id = $1`, [order.id]);
-    order.served_at = null;
-  }
+  if (mods.adds.length) await resetServedForAddOn(order);
   return { itemLines, total, addedValue };
 }
 
@@ -3124,10 +3121,21 @@ export async function upsertTableGuest(sessionId, customerId) {
 // receipts, feedback requests, the fulfilment status line) keeps working
 // unchanged; only line-level attribution is per-guest (order_item.
 // added_by_customer_id, set by the caller after this returns).
+// status not in ('completed', 'cancelled'), not status = 'new' -- Stage 2
+// (fancy-whistling-pearl.md): "they can also add to the order already
+// served and the waiter will get add on order notification... the bill
+// can pile up as conclusive," Chidera's own words for the joint dine-in
+// concept. A table reopening the web menu after being served (or even
+// after confirming, before serving) adds onto the SAME still-open bill,
+// not a second separate kitchen ticket -- matches the broader definition
+// getOpenOrder already uses for the chat-typed add path (engine_state not
+// in completed/cancelled), which is how applyOrderModifications' own
+// served_at reset could already reach a served order even before this
+// existed; this brings the web path in line with it, not a new rule.
 export async function getOrCreateTableOrder(session, table, customer) {
   await upsertTableGuest(session.id, customer.id);
   const { rows } = await pool.query(
-    `select * from "order" where session_id = $1 and status = 'new' order by created_at desc limit 1`,
+    `select * from "order" where session_id = $1 and status not in ('completed', 'cancelled') order by created_at desc limit 1`,
     [session.id]
   );
   if (rows[0]) return rows[0];
@@ -3295,6 +3303,95 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonId === 'dinein_specials' ? 'See specials' : 'View menu', url, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
+}
+
+// Joint dine-in, Stage 2: "food comes first before payment unlike normal
+// ordering... they can pay when ever they are ready." Called from
+// routes/dinein.js's POST /orders/:id/served the moment staff taps
+// "Served" -- every guest who's actually been part of this table's
+// sitting (table_session_guest, plus the original scanner as a defensive
+// fallback) gets their OWN "Ready to pay" link, same ?g=<menu_token>
+// per-guest identity mechanism as every other dine-in link (see
+// handleDineinButtonTap above). Stage 3 builds out the real split/joint
+// payment page this links to; for now it's a plain summary + "pay at the
+// counter" page (routes/dinein-menu.js's GET /:qrToken/pay) -- the
+// existing manual "Mark paid" dashboard button is still what actually
+// closes the order out, unchanged.
+export async function notifyGuestsReadyToPay(order) {
+  if (!process.env.PUBLIC_URL || order.channel !== 'dinein' || !order.table_id || !order.session_id) return;
+  const { rows: tableRows } = await pool.query('select label, qr_token, branch_id from restaurant_table where id = $1', [order.table_id]);
+  const table = tableRows[0];
+  if (!table) return;
+  const { rows: guests } = await pool.query(
+    `select c.* from customers c where c.id in (
+       select customer_id from table_session_guest where session_id = $1
+       union select customer_id from table_session where id = $1
+     )`,
+    [order.session_id]
+  );
+  if (!guests.length) return;
+  const { total } = await summariseOrder(order);
+  const credentials = await getWhatsAppCredentials(order.branch_id);
+  for (const guest of guests) {
+    try {
+      const token = await ensureMenuToken(guest);
+      const url = `${process.env.PUBLIC_URL}/t/${table.qr_token}/pay?g=${token}`;
+      await sendWhatsAppCtaUrl(recipientFor(guest), `Table ${table.label} is served! Total so far: NGN ${total}.`, 'Ready to pay', url, credentials);
+      await logMessage({ customerId: guest.id, direction: 'outbound', channel: guest.channel, sender: 'bot', body: `[ready to pay link sent: ${url}]`, trigger: 'dinein_ready_to_pay' });
+    } catch (err) {
+      // Best-effort, per guest -- one guest's send failing (a stale
+      // number, WhatsApp's 24h window) must never stop the others from
+      // getting told the table's ready.
+      console.error(`Failed to send ready-to-pay link to ${guest.id}:`, err.message);
+    }
+  }
+}
+
+// Joint dine-in, Stage 2: "even if staff marks served and it goes to the
+// next pipeline and they still add it should go back to first pipeline"
+// (the original chat-only version of this rule, applyOrderModifications
+// below) now also alerts staff -- "Table X added more after being
+// served" -- reusing orderAlertRecipients/sendStaffAlert exactly as
+// completePayment's own ready-to-prepare ping already does, not new
+// plumbing. Exported and shared between applyOrderModifications (typed-
+// chat adds) and routes/dinein-menu.js's web review route (which
+// replaces the whole basket rather than diffing adds/removes, so it
+// can't reuse applyOrderModifications itself) -- one place decides what
+// "served, then added to" means and what it does about it.
+// Joint dine-in, Stage 2: getOrCreateTableOrder can now reopen an order
+// that's already walked all the way through to 'fulfilment' (confirmed,
+// being prepared, or even already served) -- finishItemsCollection
+// unconditionally calls transitionOrder(order, 'check_availability'),
+// which the state machine only allows FROM 'collect_info'
+// (schema.sql's bot_state seed), so re-running it on a further-along order
+// threw "confirm_order -> check_availability is not an allowed move"
+// (found via the sandbox test's post-serve add-on case, not assumed).
+// This is a deliberate restart of the collection sub-cycle for the new
+// round of items, not a normal forward move the state machine's own
+// transition table should have to model -- same reasoning a brand-new
+// order already gets away with (INSERT sets engine_state = 'collect_info'
+// directly, no transitionOrder call at all). No-op when the order's
+// already there (the ordinary still-deciding-the-first-round case).
+export async function restartItemsCollection(order) {
+  if (order.engine_state === 'collect_info') return;
+  await pool.query(`update "order" set engine_state = 'collect_info' where id = $1`, [order.id]);
+  order.engine_state = 'collect_info';
+}
+
+export async function resetServedForAddOn(order) {
+  if (!(order.channel === 'dinein' && order.served_at)) return false;
+  await pool.query(`update "order" set served_at = null where id = $1`, [order.id]);
+  order.served_at = null;
+  const orderRecipients = await orderAlertRecipients();
+  if (orderRecipients.length && order.table_id) {
+    const { rows: tableRows } = await pool.query('select label from restaurant_table where id = $1', [order.table_id]);
+    const { itemLines } = await summariseOrder(order);
+    const alertText = `Table ${tableRows[0]?.label || '?'} added more after being served:\n${itemLines.join('\n')}`;
+    for (const { phoneNumber: to } of orderRecipients) {
+      await sendStaffAlert(to, alertText);
+    }
+  }
+  return true;
 }
 
 // Unified feedback -- replaces the old dine-in-only, table-close-delayed,
@@ -3806,10 +3903,7 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
 
     const { itemLines, total } = await summariseOrder(order);
     await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
-    if (adds.length && order.channel === 'dinein' && order.served_at) {
-      await pool.query(`update "order" set served_at = null where id = $1`, [order.id]);
-      order.served_at = null;
-    }
+    if (adds.length) await resetServedForAddOn(order);
 
     if (paid) {
       await sendTopupInvoice(customer, order, adds, addedValue);

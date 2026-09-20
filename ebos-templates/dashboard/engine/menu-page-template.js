@@ -880,3 +880,52 @@ if (POLL_PATH) {
 export function escapeHtml(s) {
   return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+
+// Joint dine-in, Stage 2: where the "Ready to pay" WhatsApp button
+// (flow.js's notifyGuestsReadyToPay) actually lands -- deliberately a
+// separate, simpler page from renderMenuPage above, not a mode of it:
+// this one has no ordering grid, no basket to build, just "here's the
+// bill, here's how to settle it." Same visual language (paper background,
+// Fraunces/Inter, --hot accent) so it doesn't feel like a different app
+// mid-flow. Split/joint payment picking and POS auto-confirm are Stage 3
+// -- for now this is a plain summary, and the existing dashboard "Mark
+// paid" button (unchanged) is still what actually closes the order out,
+// same as it already is for every dine-in order today.
+export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, itemLines, total }) {
+  const headerStyle = coverPhotoVersion
+    ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
+    : 'position:relative';
+  return `<!doctype html>
+<html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>${escapeHtml(businessName)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap"></noscript>
+<style>
+  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--hot:#C5452B}
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;background:#F6F1E8}
+  body{font-family:"Inter",system-ui,sans-serif;color:var(--ink);line-height:1.5;padding-bottom:env(safe-area-inset-bottom)}
+  .top{background:var(--ink);color:var(--paper);padding:38px 20px 20px;${headerStyle}}
+  .top .nm{font-family:"Fraunces",serif;font-size:21px;font-weight:700}
+  .top .mt{font-size:12.5px;color:#B3A597;margin-top:4px}
+  .card{margin:16px;background:#fff;border-radius:14px;padding:18px;border:1px solid var(--line)}
+  .row{display:flex;justify-content:space-between;gap:12px;font-size:14px;padding:7px 0;border-bottom:1px solid #F0EBE2}
+  .row:last-child{border-bottom:0}
+  .tot{display:flex;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:2px solid var(--ink);font-family:"Fraunces",serif;font-size:19px;font-weight:700}
+  .note{margin:0 16px 16px;background:#fff;border-radius:14px;padding:16px;border:1px solid var(--line);font-size:13.5px;color:var(--mid);line-height:1.55}
+  .note b{color:var(--ink)}
+</style></head>
+<body>
+<div class="top">
+  <div class="nm">${escapeHtml(businessName)}</div>
+  <div class="mt">Table ${escapeHtml(tableLabel)} · Ready to pay</div>
+</div>
+<div class="card">
+  ${itemLines.map((line) => `<div class="row"><span>${escapeHtml(line)}</span></div>`).join('')}
+  <div class="tot"><span>Total</span><span>NGN ${total}</span></div>
+</div>
+<div class="note"><b>Please pay at the counter or on the POS terminal.</b> A staff member will confirm your payment shortly. If you'd like to add anything else before paying, just message us on WhatsApp.</div>
+</body></html>`;
+}

@@ -12,6 +12,7 @@ import { randomBytes } from 'node:crypto';
 import { pool } from '../lib/db.js';
 import { requireEditorApi } from '../lib/auth.js';
 import { resolveWaNumber } from './dinein-menu.js';
+import { notifyGuestsReadyToPay } from '../engine/flow.js';
 
 export const router = express.Router();
 
@@ -179,6 +180,13 @@ router.post('/orders/:id/served', async (req, res) => {
   );
   if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
   res.json(rows[0]);
+  // Joint dine-in, Stage 2: "food comes first before payment... they can
+  // pay when ever they are ready" -- fires after the response so a slow
+  // WhatsApp send never holds up the staff member's own "Served" tap.
+  // Best-effort internally (see notifyGuestsReadyToPay) -- one guest's
+  // send failing never blocks another's, and this whole step failing
+  // never undoes the serve itself, which has already happened.
+  notifyGuestsReadyToPay(rows[0]).catch((err) => console.error('notifyGuestsReadyToPay failed:', err.message));
 });
 
 // Whether every order in a table_session is settled -- the single source

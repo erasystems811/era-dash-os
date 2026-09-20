@@ -1,8 +1,10 @@
-// Joint dine-in, Stage 1 (fancy-whistling-pearl.md): two guests scanning
-// the same table share one order, each attributed line correctly, and the
-// 15s poll picks up each other's additions without clobbering local edits.
-// Same EBOS_TEST_PGLITE + EBOS_SANDBOX pattern as sandbox/test-
-// conversation.mjs -- zero real Meta/AI credentials touched.
+// Joint dine-in, Stages 1-2 (fancy-whistling-pearl.md): two guests scanning
+// the same table share one order, each attributed line correctly, the 15s
+// poll picks up each other's additions without clobbering local edits
+// (Stage 1); serving triggers a per-guest "Ready to pay" link and a
+// post-serve add-on reuses the same order and alerts staff (Stage 2). Same
+// EBOS_TEST_PGLITE + EBOS_SANDBOX pattern as sandbox/test-conversation.mjs
+// -- zero real Meta/AI credentials touched.
 process.env.EBOS_TEST_PGLITE = '1';
 process.env.EBOS_SANDBOX = '1';
 process.env.PORT = '3912';
@@ -174,6 +176,59 @@ async function main() {
   const p1Line2 = poll1Data.pendingOrder.items.find((i) => i.productId === product2);
   assert(p1Line1?.addedByLabel === 'You', 'guest 1 sees their own line labelled "You"');
   assert(p1Line2?.addedByLabel !== 'You' && !!p1Line2?.addedByLabel, 'guest 1 sees guest 2\'s line labelled with something other than "You"');
+
+  // === Stage 2: serve-triggers-pay + add-on alerts ===
+
+  // A staff row with order_alerts on -- who notifyGuestsReadyToPay/
+  // resetServedForAddOn's own staff ping actually reaches.
+  await pool.query(`insert into staff (name, phone_number, order_alerts, role) values ('Kitchen', '2348033330003', true, 'staff')`);
+
+  // Simulate staff confirming + serving the order (the real confirm/
+  // engine_state walk is a separate, already-tested part of the engine --
+  // this test is only exercising what Stage 2 itself adds).
+  await pool.query(`update "order" set status = 'preparation' where id = $1`, [order.id]);
+  const { rows: servedRows } = await pool.query(`update "order" set served_at = now() where id = $1 returning *`, [order.id]);
+  const servedOrder = servedRows[0];
+
+  await flow.notifyGuestsReadyToPay(servedOrder);
+  const { rows: pay1Rows } = await pool.query(
+    `select body from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer1.id]
+  );
+  const { rows: pay2Rows } = await pool.query(
+    `select body from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer2.id]
+  );
+  assert(pay1Rows[0]?.body?.includes('/pay?g='), 'guest 1 got their own Ready-to-pay link');
+  assert(pay2Rows[0]?.body?.includes('/pay?g='), 'guest 2 got their own Ready-to-pay link');
+
+  const payPage = await fetch(`${BASE}/t/qrtest5/pay?g=${g1}`);
+  assert(payPage.status === 200, 'pay page loads');
+  const payHtml = await payPage.text();
+  assert(payHtml.includes('Jollof Rice') && payHtml.includes('Zobo Drink') && payHtml.includes('5900'), 'pay page shows the real order summary and total');
+
+  // Guest 2 orders MORE after being served ("in house people can be
+  // ordering in batch and based on mood... the bill can pile up as
+  // conclusive") -- should reopen the SAME order, not spawn a second one,
+  // reset served_at back to null, and alert staff.
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => { logs.push(args.join(' ')); originalLog(...args); };
+  const review3 = await fetch(`${BASE}/t/qrtest5/review?g=${g2}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      items: [
+        { productId: product1, quantity: 1, answers: {}, addedBy: customer1.id },
+        { productId: product2, quantity: 2, answers: {}, addedBy: customer2.id },
+        { productId: product2, quantity: 3, answers: {}, addedBy: customer2.id }, // guest 2 orders MORE zobo, based on mood
+      ],
+    }),
+  });
+  console.log = originalLog;
+  assert(review3.status === 200, 'post-serve add-on submit succeeds');
+
+  const { rows: orderRowsFinal } = await pool.query(`select * from "order" where session_id = $1`, [session.id]);
+  assert(orderRowsFinal.length === 1, 'STILL exactly one order for the table -- the post-serve add-on reused it, not a second kitchen ticket');
+  assert(orderRowsFinal[0].served_at === null, 'served_at reset back to null so the order returns to the Serving pipeline');
+  assert(logs.some((l) => l.includes('added more after being served')), 'staff got pinged about the post-serve add-on');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

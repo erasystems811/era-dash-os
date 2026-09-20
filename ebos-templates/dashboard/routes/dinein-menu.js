@@ -5,8 +5,8 @@
 // same as routes/documents.js and routes/tracking.js.
 import express from 'express';
 import { pool } from '../lib/db.js';
-import { renderMenuPage } from '../engine/menu-page-template.js';
-import { ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, upsertTableGuest } from '../engine/flow.js';
+import { renderMenuPage, renderPayPage } from '../engine/menu-page-template.js';
+import { ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, resetServedForAddOn, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
@@ -244,6 +244,17 @@ router.post('/:qrToken/review', async (req, res) => {
   // re-inserting all of `resolved` below is re-inserting everyone's items,
   // not dropping anyone else's.
   const order = await getOrCreateTableOrder(session, table, customer);
+  // Net-added, not just "resubmitted" -- joint dine-in, Stage 2: a guest
+  // reopening this page to only REMOVE something, or resubmitting with
+  // nothing actually changed, shouldn't ping staff or bump the order back
+  // to "Serving" -- only a genuine addition means "the kitchen has more to
+  // do," same distinction applyOrderModifications' own mods.adds already
+  // makes for the typed-chat path.
+  const { rows: beforeItems } = await pool.query('select product_id, quantity from order_item where order_id = $1', [order.id]);
+  const beforeQty = new Map();
+  for (const row of beforeItems) beforeQty.set(row.product_id, (beforeQty.get(row.product_id) || 0) + row.quantity);
+  const netAdded = resolved.some((item) => item.quantity > (beforeQty.get(item.productId) || 0));
+
   await pool.query('delete from order_item where order_id = $1', [order.id]);
   for (const item of resolved) {
     const { rows: itemRows } = await pool.query(
@@ -259,6 +270,14 @@ router.post('/:qrToken/review', async (req, res) => {
   }
   const total = resolved.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
+  if (netAdded) await resetServedForAddOn(order);
+  // Joint dine-in, Stage 2: this order may already be well past
+  // collect_info (confirmed, served, even already awaiting payment) --
+  // finishItemsCollection below assumes it's walking a still-undecided
+  // order forward and can't do that from most further-along states. See
+  // restartItemsCollection's own comment for why this is a deliberate
+  // reset, not a bug being papered over.
+  await restartItemsCollection(order);
 
   // The read-back happens in the chat, not on this page (spec 5.1/5.2) --
   // this page's own job is done once the order + items exist; dispatch()
@@ -278,17 +297,20 @@ router.post('/:qrToken/review', async (req, res) => {
 
 // Only while the current round is still being decided (status stays 'new'
 // through item questions, upsell, and confirm_order -- see the /review
-// route above -- and only flips to 'preparation' once the at-table
-// auto-transition actually fires) -- once confirmed it moves straight
-// through to preparation (payment_mode = 'at_table'), and reopening the
-// menu after that really is a fresh round (a table ordering drinks, then
-// food later, is two real separate kitchen tickets, not one growing
-// order), so this correctly returns null then, same as before. Chidera
-// 2026-09-11: "dine in didnt reserve my orders fo when i tapped change
-// it" -- this used to be hardcoded null unconditionally, so even a round
-// still being decided vanished from the basket the moment the menu
-// reopened (handleOrderConfirmNoTap's "No, change it" link, or just
-// scanning again before saying yes).
+// route above). Chidera 2026-09-11: "dine in didnt reserve my orders fo
+// when i tapped change it" -- this used to be hardcoded null
+// unconditionally, so even a round still being decided vanished from the
+// basket the moment the menu reopened (handleOrderConfirmNoTap's "No,
+// change it" link, or just scanning again before saying yes).
+//
+// status not in (completed, cancelled), not status = 'new' -- Stage 2
+// (fancy-whistling-pearl.md): once joint dine-in lets a table keep adding
+// after being served ("the bill can pile up as conclusive"), reopening
+// the menu post-confirm/post-serve needs to show that SAME still-open
+// order's basket too, same broadened definition getOrCreateTableOrder
+// itself now uses -- not just the pre-confirm 'new' case this originally
+// only had to handle.
+//
 // session-scoped, not customer-scoped -- joint dine-in, Stage 1: the ONE
 // shared order for the table's current sitting, same as everywhere else
 // this file resolves it (getOrCreateTableOrder). `actingCustomerId` is only
@@ -296,7 +318,7 @@ router.post('/:qrToken/review', async (req, res) => {
 async function pendingOrderPayload(session, table, actingCustomerId) {
   if (!session) return null;
   const { rows: orderRows } = await pool.query(
-    `select * from "order" where session_id = $1 and status = 'new' order by created_at desc limit 1`,
+    `select * from "order" where session_id = $1 and status not in ('completed', 'cancelled') order by created_at desc limit 1`,
     [session.id]
   );
   const order = orderRows[0];
@@ -380,6 +402,33 @@ router.get('/:qrToken', async (req, res) => {
       products,
       pendingOrder,
       initialCategory: req.query.cat || null,
+    })
+  );
+});
+
+// Joint dine-in, Stage 2: where the "Ready to pay" WhatsApp button
+// (flow.js's notifyGuestsReadyToPay, sent the moment staff taps "Served")
+// actually opens. Public, token-authenticated like every other route in
+// this file -- ?g= only picks which name the page could show in a future
+// split-payment step (Stage 3), it isn't needed to find the order itself,
+// since there's exactly one shared one per table sitting either way.
+router.get('/:qrToken/pay', async (req, res) => {
+  const table = await resolveTable(req.params.qrToken);
+  if (!table) return res.status(404).send('Table not found.');
+  const session = await openSessionFor(table);
+  const { rows: orderRows } = session
+    ? await pool.query(`select * from "order" where session_id = $1 and status not in ('completed', 'cancelled') order by created_at desc limit 1`, [session.id])
+    : { rows: [] };
+  const order = orderRows[0];
+  if (!order) return res.status(404).send('No open order for this table right now.');
+  const { itemLines, total } = await summariseOrder(order);
+  res.set('Content-Type', 'text/html').send(
+    renderPayPage({
+      businessName: table.business_name,
+      tableLabel: table.label,
+      coverPhotoVersion: table.cover_photo_version,
+      itemLines,
+      total,
     })
   );
 });
