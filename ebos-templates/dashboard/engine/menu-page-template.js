@@ -1015,6 +1015,7 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
   .primaryBtn{width:100%;margin-top:12px;background:var(--hot);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
   .secondaryBtn{width:100%;margin-top:10px;background:#fff;color:var(--ink);border:1px solid var(--line);font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
   .payChoice{display:flex;gap:10px;margin-top:14px}
+  .payChoice[hidden]{display:none}
   .payChoice button{flex:1;margin-top:0}
   .transferBox{text-align:left;margin-top:14px;background:#F6F1E8;border-radius:10px;padding:14px;font-size:13.5px}
   .transferBox .row{border-bottom:0;padding:4px 0}
@@ -1106,6 +1107,30 @@ function render() {
     document.getElementById('paymentsList').innerHTML = status.payments.map(function (p) {
       return '<div class="row"><span>' + p.coversLabel + '</span><span><span class="badge ' + p.status + '">' + (p.status === 'confirmed' ? 'Paid' : 'Pending') + '</span> ' + naira(p.amount) + '</span></div>';
     }).join('');
+  }
+
+  // Chidera, 2026-09-20, real report: "when i refreshed that payment page
+  // it accommodated a third pending payment that would cause an excess
+  // payout." A page load (or a hard refresh) always reset the DOM back to
+  // its static "Who are you paying for?" state regardless of whether this
+  // guest already had a real pending payment sitting server-side --
+  // tapping "Request payment amount" again there could create a second,
+  // differently-scoped one (createOrderPayment's own dedup only matches
+  // an EXACT same coverage). Opens straight into the amount/choice view
+  // instead whenever one already exists, so there's never a second chance
+  // to trigger a genuinely different request. Guarded on amountCard still
+  // being hidden so this only runs once per load, not on every 15s poll
+  // (which would otherwise keep resetting an already-made Transfer/Card
+  // selection back to the choice screen).
+  if (status.myPendingAmount != null && document.getElementById('amountCard').hidden) {
+    document.getElementById('amountValue').textContent = naira(status.myPendingAmount);
+    document.getElementById('amountCard').hidden = false;
+    document.getElementById('guestsCard').hidden = true;
+    if (POS_TRANSFER) {
+      document.getElementById('amountHint').textContent = 'How would you like to pay?';
+      document.getElementById('amountSub').hidden = true;
+      document.getElementById('payChoice').hidden = false;
+    }
   }
 }
 
@@ -1210,6 +1235,7 @@ export function renderSingleOrderPayPage({ businessName, amount, confirmed, posT
   .payAmount .big{font-family:"Fraunces",serif;font-size:28px;font-weight:700;margin:6px 0}
   .secondaryBtn{width:100%;margin-top:10px;background:#fff;color:var(--ink);border:1px solid var(--line);font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
   .payChoice{display:flex;gap:10px;margin-top:14px}
+  .payChoice[hidden]{display:none}
   .payChoice button{flex:1;margin-top:0}
   .transferBox{text-align:left;margin-top:14px;background:#F6F1E8;border-radius:10px;padding:14px;font-size:13.5px}
   .transferBox .row{display:flex;justify-content:space-between;gap:12px;padding:4px 0}

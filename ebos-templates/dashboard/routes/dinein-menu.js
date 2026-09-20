@@ -512,7 +512,7 @@ async function payStatusPayload(order, session, actingCustomerId) {
     return fallbackName || phone || 'a guest';
   };
   const { rows: payments } = await pool.query(
-    `select id, amount, status, covers_item_ids from order_payment where order_id = $1 order by created_at`,
+    `select id, amount, status, covers_item_ids, paid_by_customer_id from order_payment where order_id = $1 order by created_at`,
     [order.id]
   );
   const itemById = new Map(items.map((i) => [i.id, i]));
@@ -523,6 +523,23 @@ async function payStatusPayload(order, session, actingCustomerId) {
       if (p.covers_item_ids === null) return total; // a whole-order payment covers everything, regardless of amount rounding
       return sum + Number(p.amount);
     }, 0);
+
+  // Chidera, 2026-09-20, real report: "when i refreshed that payment page
+  // it accommodated a third pending payment that would cause an excess
+  // payout." Root cause: a refresh always reloaded the page back at "Who
+  // are you paying for?", with the guest-selection checkboxes reset to
+  // just this guest -- if they'd originally requested a DIFFERENT
+  // coverage (say, the whole table), tapping "Request payment amount"
+  // again after the reset created a genuinely different-shaped payment
+  // (createOrderPayment's own dedup only matches an EXACT same coverage),
+  // not a duplicate of the first. Two (or three) real pending payments
+  // then sit against the same order at once, any of which a real POS
+  // transaction could independently match and confirm -- exactly the
+  // "excess payout" risk. myPendingPayment is this guest's own most
+  // recent pending request, if any; the page now opens straight into
+  // showing it instead of the selection screen, so a refresh can never
+  // trigger a second, different request in the first place.
+  const myPendingPayment = payments.find((p) => p.status === 'pending' && p.paid_by_customer_id === actingCustomerId) || null;
 
   return {
     items: items.map((i) => ({
@@ -545,6 +562,7 @@ async function payStatusPayload(order, session, actingCustomerId) {
             .map((id) => nameFor(id, items.find((i) => i.added_by_customer_id === id)?.added_by_name))
             .join(' & ') || 'Some items',
     })),
+    myPendingAmount: myPendingPayment ? Number(myPendingPayment.amount) : null,
     total,
     outstanding: Math.max(0, total - confirmedTotal),
     completed: order.status === 'completed',
