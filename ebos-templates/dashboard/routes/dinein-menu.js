@@ -7,6 +7,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage } from '../engine/menu-page-template.js';
 import { getOpenOrder, finishItemsCollection } from '../engine/flow.js';
+import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
 
@@ -93,18 +94,33 @@ export async function menuForBranch(branchId) {
   // used to only ask afterward in chat, right when an item's added to the
   // basket. Same product_question rows the bot's own askNextItemQuestion
   // already reads, just surfaced here too now.
-  const { rows } = await pool.query(
-    `select p.id, p.name, p.description, p.price, p.category, p.image_data_url, p.availability,
+  //
+  // Chidera, 2026-09-20: "why is my era demo web menu only showing today
+  // specials" -- root cause was this query filtering by branch
+  // unconditionally, unlike fields.js's resolveMenu (the AI ordering
+  // engine's own menu read), which already treats sharing_mode='merged'
+  // as "branch is a no-op, show everything." era-demo's own branch_id
+  // handed in here was null for some customers (no branch_channel row to
+  // resolve one from), and `branch_id = null` never matches its own
+  // products in SQL -- so those customers saw only the one product with
+  // no branch_id at all. Mirroring resolveMenu's own merged-mode
+  // short-circuit fixes this at the root instead of just patching around
+  // one specific null-branchId shape of it.
+  const base = `select p.id, p.name, p.description, p.price, p.category, p.image_data_url, p.availability,
        coalesce(
          (select json_agg(json_build_object('id', pq.id, 'question', pq.question, 'options', pq.options) order by pq.position, pq.created_at)
           from product_question pq where pq.product_id = p.id),
          '[]'
        ) as questions
      from product p
-     where ($1::uuid is null or p.branch_id = $1 or p.branch_id is null) and p.import_status is distinct from 'new'
-     order by p.position asc nulls last, p.category nulls last, p.name`,
-    [branchId]
-  );
+     where p.import_status is distinct from 'new'`;
+  const order = `order by p.position asc nulls last, p.category nulls last, p.name`;
+  const sharingMode = branchId ? await getSharingMode() : 'merged';
+  if (sharingMode === 'merged') {
+    const { rows } = await pool.query(`${base} ${order}`);
+    return rows;
+  }
+  const { rows } = await pool.query(`${base} and (p.branch_id = $1 or p.branch_id is null) ${order}`, [branchId]);
   return rows;
 }
 
