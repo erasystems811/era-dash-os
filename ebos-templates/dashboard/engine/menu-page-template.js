@@ -212,6 +212,7 @@ export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, b
   <div class="sheetHead"><h3>When's your birthday?</h3><button id="bdaySheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
   <p style="color:var(--mid);font-size:13px;margin:0 0 14px">We like to make it a little special when it comes around.</p>
   <input id="bdayInput" type="date" style="width:100%;padding:12px;border-radius:10px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box">
+  <p id="bdayError" style="color:#C0392B;font-size:13px;margin:8px 0 0;display:none"></p>
   <button id="bdaySave" class="primaryBtn" style="margin-top:12px">Save</button>
   <button id="bdaySkip" style="width:100%;margin-top:8px;background:none;border:0;color:var(--mid);font-size:13px;padding:8px">Not now</button>
 </div>
@@ -694,16 +695,26 @@ function closeBdaySheet() {
 }
 document.getElementById('bdaySheetClose').onclick = closeBdaySheet;
 document.getElementById('bdaySkip').onclick = closeBdaySheet;
+// Chidera, 2026-09-20: "if a person has put their birthday before, why
+// does it keep asking over and over" -- this used to silently close the
+// sheet either way, so a failed save (or a date input that never got a
+// value -- some WhatsApp in-app browsers don't render the native date
+// picker) looked identical to a real one: no error, sheet just closed,
+// customer.birthday stayed null, and SHOW_BIRTHDAY_PROMPT (server-side,
+// !customer.birthday) asked again next visit with no way to tell why.
 document.getElementById('bdaySave').onclick = async () => {
+  const errEl = document.getElementById('bdayError');
+  errEl.style.display = 'none';
   const value = document.getElementById('bdayInput').value;
-  if (!value) return;
+  if (!value) { errEl.textContent = 'Please pick a date.'; errEl.style.display = 'block'; return; }
   try {
-    await fetch(BIRTHDAY_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ birthday: value }) });
+    const res = await fetch(BIRTHDAY_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ birthday: value }) });
+    if (!res.ok) throw new Error('save failed');
+    closeBdaySheet();
   } catch (err) {
-    // Silent -- this is a nice-to-have, not something worth blocking or
-    // alarming a guest mid-order over if their connection hiccups.
+    errEl.textContent = "Couldn't save that -- please try again.";
+    errEl.style.display = 'block';
   }
-  closeBdaySheet();
 };
 document.getElementById('backdrop').onclick = () => {
   if (!document.getElementById('bdaySheet').hidden) closeBdaySheet();

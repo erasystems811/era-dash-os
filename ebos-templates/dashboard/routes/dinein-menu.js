@@ -101,7 +101,7 @@ export async function menuForBranch(branchId) {
          '[]'
        ) as questions
      from product p
-     where (p.branch_id = $1 or p.branch_id is null) and p.import_status is distinct from 'new'
+     where ($1::uuid is null or p.branch_id = $1 or p.branch_id is null) and p.import_status is distinct from 'new'
      order by p.position asc nulls last, p.category nulls last, p.name`,
     [branchId]
   );
