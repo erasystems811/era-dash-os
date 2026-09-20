@@ -3450,8 +3450,18 @@ async function sendDineinWelcome(customer, table, { joiningActiveTable = false }
     // Chidera, 2026-09-20: "that see menu put 'tap here to see menu'" --
     // exactly 20 characters, Meta's own cap on a reply button's title too.
     { id: 'dinein_menu', title: 'Tap here to see menu' },
-    { id: 'dinein_specials', title: "Today's specials" },
   ];
+  // Chidera, 2026-09-20, real report: "there is no special currently on
+  // menu so why is today specials button still showing" -- this button
+  // was unconditional, always shown regardless of whether a real special
+  // actually exists right now. findSpecialsCategory (is_combo, the same
+  // deterministic signal handleDineinButtonTap's own tap already checks
+  // before building the specials link) is the real answer to "is there
+  // one" -- only shown when that's actually true, same as the general
+  // greeting's own logic already does.
+  if (await findSpecialsCategory(customer.branch_id)) {
+    buttons.push({ id: 'dinein_specials', title: "Today's specials" });
+  }
   // Same cover-photo mechanism the normal chat greeting already uses
   // (handleGreeting's businessCoverPhotoUrl) -- Chidera 2026-09-11: "why
   // does dine in not have the photo thing we did from normal conversation
