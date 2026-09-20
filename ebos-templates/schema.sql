@@ -543,7 +543,13 @@ create table if not exists order_item (
   product_id uuid not null references product(id),
   quantity integer not null default 1,
   price numeric(12, 2) not null,
-  modification text
+  modification text,
+  -- Chidera, 2026-09-20: joint dine-in ordering -- whoever added this
+  -- specific line, so a shared table order can later be billed together
+  -- or split by who actually ordered what. Null for every non-dine-in
+  -- order and for any dine-in line predating this. See
+  -- migrations/0050_joint_dinein.sql.
+  added_by_customer_id uuid references customers(id)
 );
 
 -- Per-item customization questions (water: room temp or cold, rice:
@@ -949,6 +955,34 @@ create table if not exists order_topup (
 );
 create index if not exists order_topup_order_idx on order_topup (order_id);
 
+-- Chidera, 2026-09-20: joint dine-in ordering, split/joint payment -- one
+-- row per actual charge attempt against an order, not one column on the
+-- order itself, so a table's bill can be paid as one whole-order charge
+-- (covers_item_ids null) or as one-or-more group charges, each covering
+-- only the items its own payers actually ordered. reference is our own
+-- bookkeeping id (order.reference + '-P' + n), never sent to Moniepoint --
+-- confirmation is matched by amount/time against real pos_transaction rows
+-- (engine/webhook-moniepoint.js), not by reference. provider defaults to
+-- 'pos' -- "i said use pos not paystack," the whole point being the bot
+-- auto-confirms a real POS transaction (card or transfer to the
+-- terminal's linked account) with no staff step, closing a real staff-
+-- fraud vector (staff redirecting customers to their own personal account
+-- number instead). See migrations/0050_joint_dinein.sql.
+create table if not exists order_payment (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references "order"(id) on delete cascade,
+  provider text not null default 'pos' check (provider in ('pos', 'paystack', 'manual')),
+  reference text not null unique,
+  amount numeric(12, 2) not null,
+  status text not null default 'pending' check (status in ('pending', 'confirmed', 'failed')),
+  covers_item_ids uuid[],
+  paid_by_customer_id uuid references customers(id),
+  created_at timestamptz not null default now(),
+  confirmed_at timestamptz
+);
+create index if not exists order_payment_order_idx on order_payment (order_id);
+create index if not exists order_payment_pending_amount_idx on order_payment (amount) where status = 'pending';
+
 -- Every payment-proof image a customer sends, kept -- not overwritten the
 -- way order.payment_proof_url used to be. A top-up after the original
 -- payment needs its own proof without losing the first one. Chidera
@@ -1030,6 +1064,20 @@ create table if not exists table_session (
 );
 create unique index if not exists table_session_one_open_idx on table_session (table_id) where closed_at is null;
 create index if not exists table_session_branch_idx on table_session (branch_id);
+
+-- Chidera, 2026-09-20: joint dine-in ordering -- who's currently part of
+-- an open table sitting, recorded the first time each guest actually
+-- interacts with the table (scans, or the shared order page loads for
+-- them), not a roster they have to explicitly join. See
+-- migrations/0050_joint_dinein.sql.
+create table if not exists table_session_guest (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references table_session(id) on delete cascade,
+  customer_id uuid not null references customers(id) on delete cascade,
+  joined_at timestamptz not null default now(),
+  unique (session_id, customer_id)
+);
+create index if not exists table_session_guest_session_idx on table_session_guest (session_id);
 
 create table if not exists waiter_call (
   id uuid primary key default gen_random_uuid(),
