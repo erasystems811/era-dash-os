@@ -168,9 +168,30 @@ async function renderPdf(html) {
   return Buffer.from(await res.arrayBuffer());
 }
 
+// Chidera, 2026-09-20: "when i changed the order the invoice did not
+// update it was still the old order" -- all four routes below already
+// re-read order_item live on every single request (loadOrderForDocument),
+// no caching, no stored PDF file, so an edit really is reflected the next
+// time any of these actually runs on the server. Never found a server-
+// side reason it wouldn't -- but neither this route nor Express set any
+// cache header at all, which leaves the door open for the browser (or
+// WhatsApp's own in-app browser, already known to cache a media URL
+// harder than a normal browser does -- see businessCoverPhotoUrl's own
+// comment on the exact same class of problem) to just serve back whatever
+// it fetched from this same URL the first time, never asking the server
+// again. Explicit no-store closes that off regardless of which browser is
+// asking. Doesn't help a PDF that was already generated and sent/
+// downloaded before the edit, though -- that's a real, separate file by
+// then, not a link, and no server-side change can make an already-
+// delivered file update itself.
+function noStore(res) {
+  res.set('Cache-Control', 'no-store');
+}
+
 router.get('/invoice/:orderId', async (req, res) => {
   const data = await loadOrderForDocument(req.params.orderId);
   if (!data) return res.status(404).send('Not found.');
+  noStore(res);
   res.send(documentPage({ title: 'Invoice', ...data }));
 });
 
@@ -183,6 +204,7 @@ router.get('/invoice/:orderId/pdf', async (req, res) => {
   const data = await loadOrderForDocument(req.params.orderId);
   if (!data) return res.status(404).send('Not found.');
   const pdf = await renderPdf(documentPage({ title: 'Invoice', ...data }));
+  noStore(res);
   res.set('Content-Type', 'application/pdf');
   res.set('Content-Disposition', `inline; filename="invoice-${data.order.reference}.pdf"`);
   res.send(pdf);
@@ -191,6 +213,7 @@ router.get('/invoice/:orderId/pdf', async (req, res) => {
 router.get('/topup/:topupId', async (req, res) => {
   const data = await loadTopupForDocument(req.params.topupId);
   if (!data) return res.status(404).send('Not found.');
+  noStore(res);
   res.send(documentPage({ title: 'Top-up invoice', ...data }));
 });
 
@@ -198,6 +221,7 @@ router.get('/topup/:topupId/pdf', async (req, res) => {
   const data = await loadTopupForDocument(req.params.topupId);
   if (!data) return res.status(404).send('Not found.');
   const pdf = await renderPdf(documentPage({ title: 'Top-up invoice', ...data }));
+  noStore(res);
   res.set('Content-Type', 'application/pdf');
   res.set('Content-Disposition', `inline; filename="topup-${data.order.reference}.pdf"`);
   res.send(pdf);
