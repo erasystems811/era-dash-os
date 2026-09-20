@@ -404,6 +404,44 @@ export async function getOpenOrder(customerId) {
   return order;
 }
 
+// Joint dine-in, Stage 1 gap -- confirmed live, 2026-09-20 (Table 1, Chidera:
+// "for delivery and pick up why is jv on my table already ordering through
+// table qr and bot start process an online delivery for him?"). getOpenOrder
+// above is customer_id-scoped, but a joint dine-in order's customer_id is
+// ALWAYS the original table scanner (getOrCreateTableOrder below never
+// changes it) -- so every OTHER guest at the table got null back from every
+// caller still using getOpenOrder(customer.id) directly, no matter how many
+// of the specific web-link call sites already learned to route around it
+// earlier this session. Real cost: a non-owner guest's own "Yes, confirm"
+// reply found no order here, fell through handlePendingBatch's dispatch gate
+// into fresh-inquiry handling, and created a brand new, unrelated online
+// order -- confirmed against the real order rows (bfe3a420 stuck at
+// confirm_order, never reaching the kitchen; 8c9e8a55 the rogue separate
+// order that got the real Paystack link instead). Falls back to the same
+// table_session_guest membership check currentDineinSession already uses
+// (further below), joined through session_id the same way
+// getOrCreateTableOrder resolves the shared order -- so a guest's plain
+// text/button reply reaches their REAL shared order exactly like their
+// web-link taps already do. Every existing non-dine-in caller is unaffected:
+// the direct lookup either succeeds (nothing changes) or there's no open
+// table_session to fall back to either (still null, same as before).
+export async function resolveCustomerOrder(customer) {
+  const direct = await getOpenOrder(customer.id);
+  if (direct) return direct;
+  const { rows } = await pool.query(
+    `select o.* from "order" o
+     join table_session ts on ts.id = o.session_id
+     where ts.closed_at is null
+       and o.status not in ('completed', 'cancelled')
+       and (ts.customer_id = $1 or exists (select 1 from table_session_guest g where g.session_id = ts.id and g.customer_id = $1))
+     order by o.created_at desc limit 1`,
+    [customer.id]
+  );
+  const order = rows[0] || null;
+  if (order) await pool.query(`update "order" set updated_at = now() where id = $1`, [order.id]);
+  return order;
+}
+
 // Drives the 24h "want to order again?" window (Chidera's call,
 // 2026-09-03): once completed_at is more than 24h old, this returns null
 // and a bare greeting goes back to the normal cold-open flow -- exactly
@@ -1564,7 +1602,7 @@ async function handlePendingUpsell(customer, order, text) {
 // from that one.
 export async function handleUpsellListTap({ phoneNumber, channelId, rowId, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  const order = await getOpenOrder(customer.id);
+  const order = await resolveCustomerOrder(customer);
   // A stale tap on an old list (the offer's already been answered another
   // way, or the order's moved on/gone) -- nothing to do, and nothing to
   // clear that isn't already cleared.
@@ -3246,7 +3284,7 @@ export async function resumeBotControl(customerId) {
 
   let previousMarker = null;
   for (let i = 0; i < 6; i++) {
-    const order = await getOpenOrder(customer.id);
+    const order = await resolveCustomerOrder(customer);
     const marker = order ? `${order.id}:${order.engine_state}` : 'no-order';
     if (marker === previousMarker) break;
     previousMarker = marker;
@@ -3808,7 +3846,7 @@ async function handlePendingBatch(customer, text) {
   // it universally before it gets a chance to run.
   const ackType = classifyPureAck(text);
   if (ackType === 'ack') {
-    const openOrder = await getOpenOrder(customer.id);
+    const openOrder = await resolveCustomerOrder(customer);
     if (!openOrder) return;
   } else if (ackType === 'thanks') {
     await reply(customer, `You're welcome!`, 'thanks_ack');
@@ -3851,7 +3889,7 @@ async function handlePendingBatch(customer, text) {
     return;
   }
 
-  const order = await getOpenOrder(customer.id);
+  const order = await resolveCustomerOrder(customer);
 
   if (order) {
     if (await detectWantsHuman(text)) {
@@ -3859,6 +3897,35 @@ async function handlePendingBatch(customer, text) {
       return;
     }
     await dispatch(customer, order, text);
+    return;
+  }
+
+  // Chidera, 2026-09-20 (same JV report): "just seperate dine in and
+  // online order, a person already on dine in shouldnt transition to
+  // online same with online." resolveCustomerOrder above already fixes
+  // the case where the guest's own shared order exists but couldn't be
+  // found -- this covers the earlier moment too, before any order exists
+  // yet for them (a guest who's scanned but not ordered anything, then
+  // types something free-text instead of tapping the menu link). Without
+  // this, that message fell straight into classifyIntent below, which
+  // only ever knows how to build a normal WhatsApp/online order -- the
+  // exact mechanism that created JV's rogue pickup order. A guest already
+  // seated at an open table stays inside dine-in no matter what they
+  // type; they're pointed back at their table's own page, never routed
+  // into a fresh online order.
+  const dineinSession = await currentDineinSession(customer);
+  if (dineinSession && process.env.PUBLIC_URL) {
+    const guestToken = await ensureMenuToken(customer);
+    const url = `${process.env.PUBLIC_URL}/t/${dineinSession.qr_token}?g=${guestToken}`;
+    const credentials = await getWhatsAppCredentials(customer.branch_id);
+    await sendWhatsAppCtaUrl(
+      recipientFor(customer),
+      `You're at Table ${dineinSession.table_label}. Tap below to see the menu or what's already been ordered.`,
+      'Tap here to see menu',
+      url,
+      credentials
+    );
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
     return;
   }
 
@@ -4079,8 +4146,10 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
   // normal WhatsApp order -- silently diverting her into a dine-in re-order
   // (no payment step) while the real order she was actually confirming sat
   // abandoned mid-flow. Resolved directly off THIS order's own table_id
-  // now, never a customer-wide session lookup.
-  const order = await getOpenOrder(customer.id);
+  // now, never a customer-wide session lookup. resolveCustomerOrder (not
+  // getOpenOrder) so a non-owner dine-in guest's own "No, change it" tap
+  // still resolves to their real shared table order, same JV-report fix.
+  const order = await resolveCustomerOrder(customer);
   let tableToken = null;
   if (order?.channel === 'dinein' && order.table_id) {
     const { rows } = await pool.query('select qr_token from restaurant_table where id = $1', [order.table_id]);
@@ -4336,7 +4405,7 @@ export async function handleMenuItemTap({ phoneNumber, channelId, product, chann
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${product.name}]` , processed: true });
 
-  let order = await getOpenOrder(customer.id);
+  let order = await resolveCustomerOrder(customer);
   const item = { productId: product.id, name: product.name, price: product.price, quantity: 1 };
 
   if (order && ['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
@@ -4620,7 +4689,7 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
     }
   }
 
-  const order = await getOpenOrder(customer.id);
+  const order = await resolveCustomerOrder(customer);
   const awaitingPayment = order && order.engine_state === 'confirm_payment' && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted';
   // A top-up (sendTopupInvoice, for items added after the original payment)
   // leaves the order itself alone (engine_state/payment_status don't change
