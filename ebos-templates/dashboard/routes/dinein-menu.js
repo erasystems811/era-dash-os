@@ -6,7 +6,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderPayPage } from '../engine/menu-page-template.js';
-import { ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, resetServedForAddOn, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
+import { createOrderPayment, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, resetServedForAddOn, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
@@ -406,29 +406,141 @@ router.get('/:qrToken', async (req, res) => {
   );
 });
 
+async function findOpenOrderForSession(session) {
+  if (!session) return null;
+  const { rows } = await pool.query(
+    `select * from "order" where session_id = $1 and status not in ('completed', 'cancelled') order by created_at desc limit 1`,
+    [session.id]
+  );
+  return rows[0] || null;
+}
+
+// Joint dine-in, Stage 3: everything the pay page (and its poll) needs to
+// show who's here, what they each added, who's already paid for what,
+// and what's genuinely still outstanding. Shared between the initial GET
+// render and the JSON poll below -- one place computing this, not two
+// that could drift.
+async function payStatusPayload(order, session, actingCustomerId) {
+  const { rows: items } = await pool.query(
+    `select oi.id, oi.quantity, oi.price, p.name, oi.added_by_customer_id,
+       coalesce(c.name, c.preferred_name) as added_by_name
+     from order_item oi
+       join product p on p.id = oi.product_id
+       left join customers c on c.id = oi.added_by_customer_id
+     where oi.order_id = $1`,
+    [order.id]
+  );
+  const { rows: guestRows } = await pool.query(
+    `select c.id, coalesce(c.name, c.preferred_name) as name
+     from customers c
+     where c.id in (
+       select customer_id from table_session_guest where session_id = $1
+       union select customer_id from table_session where id = $1
+     )`,
+    [session.id]
+  );
+  const nameFor = (id, fallbackName) => {
+    if (id === actingCustomerId) return 'You';
+    return fallbackName || 'a guest';
+  };
+  const { rows: payments } = await pool.query(
+    `select id, amount, status, covers_item_ids from order_payment where order_id = $1 order by created_at`,
+    [order.id]
+  );
+  const itemById = new Map(items.map((i) => [i.id, i]));
+  const total = items.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
+  const confirmedTotal = payments
+    .filter((p) => p.status === 'confirmed')
+    .reduce((sum, p) => {
+      if (p.covers_item_ids === null) return total; // a whole-order payment covers everything, regardless of amount rounding
+      return sum + Number(p.amount);
+    }, 0);
+
+  return {
+    items: items.map((i) => ({
+      id: i.id,
+      name: i.name,
+      price: Number(i.price),
+      quantity: i.quantity,
+      addedBy: i.added_by_customer_id,
+      addedByLabel: nameFor(i.added_by_customer_id, i.added_by_name),
+    })),
+    guests: guestRows.map((g) => ({ id: g.id, label: nameFor(g.id, g.name) })),
+    selfId: actingCustomerId,
+    payments: payments.map((p) => ({
+      id: p.id,
+      amount: Number(p.amount),
+      status: p.status,
+      coversLabel: p.covers_item_ids === null
+        ? 'Whole table'
+        : [...new Set(p.covers_item_ids.map((id) => itemById.get(id)?.added_by_customer_id).filter(Boolean))]
+            .map((id) => nameFor(id, items.find((i) => i.added_by_customer_id === id)?.added_by_name))
+            .join(' & ') || 'Some items',
+    })),
+    total,
+    outstanding: Math.max(0, total - confirmedTotal),
+    completed: order.status === 'completed',
+  };
+}
+
 // Joint dine-in, Stage 2: where the "Ready to pay" WhatsApp button
 // (flow.js's notifyGuestsReadyToPay, sent the moment staff taps "Served")
 // actually opens. Public, token-authenticated like every other route in
-// this file -- ?g= only picks which name the page could show in a future
-// split-payment step (Stage 3), it isn't needed to find the order itself,
-// since there's exactly one shared one per table sitting either way.
+// this file. Stage 3: the guest here picks who they're paying for (just
+// themselves, or grouped with other guests already at the table) and
+// requests a POS amount to actually pay -- no Paystack link anywhere in
+// this flow, the guest pays a real POS terminal and Moniepoint's webhook
+// (engine/webhook-moniepoint.js) auto-confirms the match.
 router.get('/:qrToken/pay', async (req, res) => {
   const table = await resolveTable(req.params.qrToken);
   if (!table) return res.status(404).send('Table not found.');
   const session = await openSessionFor(table);
-  const { rows: orderRows } = session
-    ? await pool.query(`select * from "order" where session_id = $1 and status not in ('completed', 'cancelled') order by created_at desc limit 1`, [session.id])
-    : { rows: [] };
-  const order = orderRows[0];
+  const order = await findOpenOrderForSession(session);
   if (!order) return res.status(404).send('No open order for this table right now.');
-  const { itemLines, total } = await summariseOrder(order);
+  const actingCustomer = await resolveActingCustomer(session, req);
+  const status = await payStatusPayload(order, session, actingCustomer?.id || null);
+  const guestToken = actingCustomer ? await ensureMenuToken(actingCustomer) : null;
+  const qs = guestToken ? `?g=${guestToken}` : '';
   res.set('Content-Type', 'text/html').send(
     renderPayPage({
       businessName: table.business_name,
       tableLabel: table.label,
       coverPhotoVersion: table.cover_photo_version,
-      itemLines,
-      total,
+      status,
+      statusPath: `/t/${req.params.qrToken}/pay/status${qs}`,
+      createPath: `/t/${req.params.qrToken}/pay/create${qs}`,
     })
   );
+});
+
+// Polled every 15s by the pay page itself, same pattern as the shared
+// order page's own poll (Stage 1) -- so a guest sees "Payment confirmed!"
+// the moment Moniepoint's webhook auto-matches their POS payment, without
+// having to refresh.
+router.get('/:qrToken/pay/status', async (req, res) => {
+  const table = await resolveTable(req.params.qrToken);
+  if (!table) return res.status(404).json({ error: 'Table not found.' });
+  const session = await openSessionFor(table);
+  const order = await findOpenOrderForSession(session);
+  if (!order) return res.json({ completed: true, items: [], guests: [], payments: [], total: 0, outstanding: 0 });
+  const actingCustomer = await resolveActingCustomer(session, req);
+  res.json(await payStatusPayload(order, session, actingCustomer?.id || null));
+});
+
+// The tapping guest's own selection of who they're paying for -- never
+// trusted as-is (guestIds is validated against real table_session_guest
+// membership inside createOrderPayment, same "never trust the client's
+// own claim" discipline as every basket submit in this file).
+router.post('/:qrToken/pay/create', async (req, res) => {
+  const table = await resolveTable(req.params.qrToken);
+  if (!table) return res.status(404).json({ error: 'Table not found.' });
+  const session = await openSessionFor(table);
+  const order = await findOpenOrderForSession(session);
+  if (!order) return res.status(404).json({ error: 'No open order for this table right now.' });
+  const actingCustomer = await resolveActingCustomer(session, req);
+  if (!actingCustomer) return res.status(404).json({ error: 'Customer not found.' });
+  const requested = Array.isArray(req.body?.guestIds) ? req.body.guestIds.map(String) : [];
+  const guestIds = requested.includes(actingCustomer.id) ? requested : [...requested, actingCustomer.id];
+  const payment = await createOrderPayment(order, guestIds, actingCustomer.id);
+  res.json({ ok: true, amount: Number(payment.amount), status: payment.status });
 });

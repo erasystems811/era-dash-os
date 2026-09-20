@@ -939,17 +939,27 @@ export function escapeHtml(s) {
   return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// Joint dine-in, Stage 2: where the "Ready to pay" WhatsApp button
+// Joint dine-in, Stage 2-3: where the "Ready to pay" WhatsApp button
 // (flow.js's notifyGuestsReadyToPay) actually lands -- deliberately a
-// separate, simpler page from renderMenuPage above, not a mode of it:
-// this one has no ordering grid, no basket to build, just "here's the
-// bill, here's how to settle it." Same visual language (paper background,
-// Fraunces/Inter, --hot accent) so it doesn't feel like a different app
-// mid-flow. Split/joint payment picking and POS auto-confirm are Stage 3
-// -- for now this is a plain summary, and the existing dashboard "Mark
-// paid" button (unchanged) is still what actually closes the order out,
-// same as it already is for every dine-in order today.
-export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, itemLines, total }) {
+// separate, simpler page from renderMenuPage above, not a mode of it: no
+// ordering grid, no basket to build, just "here's the bill, here's who
+// owes what, here's how to settle it." Same visual language (paper
+// background, Fraunces/Inter, --hot accent) so it doesn't feel like a
+// different app mid-flow.
+//
+// Stage 3: "they can choose pay together or split payment so each pay
+// their own... they can pick whose bill too can be joint" -- the tapping
+// guest checks off who they're paying for (themselves always included,
+// pre-checked and locked), sees a live subtotal as they check others,
+// and requests a POS amount for exactly that group. No Paystack link
+// anywhere here -- the guest pays a real POS terminal, and Moniepoint's
+// webhook (engine/webhook-moniepoint.js, matchPosTransactionToPayment)
+// auto-confirms the match; this page polls every 15s (same pattern as
+// the shared order page's own poll) so "Payment confirmed!" shows up
+// live without a manual refresh. The existing dashboard "Mark paid"
+// button stays as a real fallback (cash, or anything that doesn't
+// reconcile automatically) -- never removed.
+export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, status, statusPath, createPath }) {
   const headerStyle = coverPhotoVersion
     ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : 'position:relative';
@@ -961,29 +971,134 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, ite
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap"></noscript>
 <style>
-  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--hot:#C5452B}
+  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--hot:#C5452B;--ok:#0F7A5A}
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%;background:#F6F1E8}
-  body{font-family:"Inter",system-ui,sans-serif;color:var(--ink);line-height:1.5;padding-bottom:env(safe-area-inset-bottom)}
+  body{font-family:"Inter",system-ui,sans-serif;color:var(--ink);line-height:1.5;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
   .top{background:var(--ink);color:var(--paper);padding:38px 20px 20px;${headerStyle}}
   .top .nm{font-family:"Fraunces",serif;font-size:21px;font-weight:700}
   .top .mt{font-size:12.5px;color:#B3A597;margin-top:4px}
   .card{margin:16px;background:#fff;border-radius:14px;padding:18px;border:1px solid var(--line)}
+  .card h3{font-family:"Fraunces",serif;font-size:15px;font-weight:600;margin-bottom:10px}
   .row{display:flex;justify-content:space-between;gap:12px;font-size:14px;padding:7px 0;border-bottom:1px solid #F0EBE2}
   .row:last-child{border-bottom:0}
+  .row .who{color:var(--mid);font-size:12px}
   .tot{display:flex;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:2px solid var(--ink);font-family:"Fraunces",serif;font-size:19px;font-weight:700}
+  .guest{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #F0EBE2;font-size:14px}
+  .guest:last-child{border-bottom:0}
+  .guest input{width:18px;height:18px;accent-color:var(--hot)}
+  .sub{display:flex;justify-content:space-between;margin-top:12px;padding-top:10px;border-top:1px solid var(--line);font-size:14.5px;font-weight:600}
+  .primaryBtn{width:100%;margin-top:12px;background:var(--hot);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
+  .payAmount{text-align:center;margin:16px;background:#fff;border-radius:14px;padding:20px;border:1px solid var(--line)}
+  .payAmount .big{font-family:"Fraunces",serif;font-size:28px;font-weight:700;margin:6px 0}
+  .badge{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px}
+  .badge.pending{background:#FBEFE3;color:#B5651D}
+  .badge.confirmed{background:#E1F3EA;color:var(--ok)}
   .note{margin:0 16px 16px;background:#fff;border-radius:14px;padding:16px;border:1px solid var(--line);font-size:13.5px;color:var(--mid);line-height:1.55}
   .note b{color:var(--ink)}
+  .done{margin:16px;background:var(--ok);color:#fff;border-radius:14px;padding:18px;text-align:center;font-family:"Fraunces",serif;font-size:17px;font-weight:700}
 </style></head>
 <body>
 <div class="top">
   <div class="nm">${escapeHtml(businessName)}</div>
   <div class="mt">Table ${escapeHtml(tableLabel)} · Ready to pay</div>
 </div>
-<div class="card">
-  ${itemLines.map((line) => `<div class="row"><span>${escapeHtml(line)}</span></div>`).join('')}
-  <div class="tot"><span>Total</span><span>NGN ${total}</span></div>
+<div id="doneBanner" class="done" hidden>All paid up -- thank you!</div>
+<div id="mainContent">
+  <div class="card" id="itemsCard"></div>
+  <div class="card" id="guestsCard">
+    <h3>Who are you paying for?</h3>
+    <div id="guestList"></div>
+    <div class="sub"><span>Selected subtotal</span><span id="subtotal"></span></div>
+    <button id="requestBtn" class="primaryBtn">Request payment amount</button>
+  </div>
+  <div id="amountCard" class="payAmount" hidden>
+    <div style="color:var(--mid);font-size:13px">Please pay this amount at the counter or on the POS terminal</div>
+    <div class="big" id="amountValue"></div>
+    <div style="color:var(--mid);font-size:12.5px">We'll confirm automatically the moment it clears.</div>
+  </div>
+  <div class="card" id="paymentsCard" hidden>
+    <h3>Payments so far</h3>
+    <div id="paymentsList"></div>
+  </div>
 </div>
-<div class="note"><b>Please pay at the counter or on the POS terminal.</b> A staff member will confirm your payment shortly. If you'd like to add anything else before paying, just message us on WhatsApp.</div>
+<div class="note"><b>Already paid for something else?</b> If you'd like to add more before paying, just message us on WhatsApp.</div>
+<script>
+const STATUS_PATH = ${JSON.stringify(statusPath)};
+const CREATE_PATH = ${JSON.stringify(createPath)};
+let status = ${JSON.stringify(status)};
+let selected = new Set([status.selfId]);
+
+function naira(n) { return 'NGN ' + Number(n).toLocaleString(); }
+
+function render() {
+  if (status.completed) {
+    document.getElementById('doneBanner').hidden = false;
+    document.getElementById('mainContent').hidden = true;
+    return;
+  }
+  document.getElementById('itemsCard').innerHTML = status.items.map(function (i) {
+    return '<div class="row"><span>' + i.quantity + 'x ' + i.name + ' <span class="who">\\u00b7 ' + i.addedByLabel + '</span></span><span>' + naira(i.price * i.quantity) + '</span></div>';
+  }).join('') + '<div class="tot"><span>Table total</span><span>' + naira(status.total) + '</span></div>';
+
+  document.getElementById('guestList').innerHTML = status.guests.map(function (g) {
+    const isSelf = g.id === status.selfId;
+    return '<label class="guest"><input type="checkbox" data-guest="' + g.id + '" ' + (selected.has(g.id) ? 'checked' : '') + ' ' + (isSelf ? 'disabled' : '') + '>' + g.label + '</label>';
+  }).join('');
+  document.querySelectorAll('[data-guest]').forEach(function (el) {
+    el.onchange = function () {
+      if (el.checked) selected.add(el.dataset.guest); else selected.delete(el.dataset.guest);
+      updateSubtotal();
+    };
+  });
+  updateSubtotal();
+
+  if (status.payments.length) {
+    document.getElementById('paymentsCard').hidden = false;
+    document.getElementById('paymentsList').innerHTML = status.payments.map(function (p) {
+      return '<div class="row"><span>' + p.coversLabel + '</span><span><span class="badge ' + p.status + '">' + (p.status === 'confirmed' ? 'Paid' : 'Pending') + '</span> ' + naira(p.amount) + '</span></div>';
+    }).join('');
+  }
+}
+
+function updateSubtotal() {
+  const sum = status.items.filter(function (i) { return selected.has(i.addedBy); }).reduce(function (s, i) { return s + i.price * i.quantity; }, 0);
+  document.getElementById('subtotal').textContent = naira(sum);
+}
+
+document.getElementById('requestBtn').onclick = async () => {
+  const btn = document.getElementById('requestBtn');
+  const original = btn.textContent;
+  btn.textContent = 'Requesting...';
+  try {
+    const res = await fetch(CREATE_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ guestIds: [...selected] }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+    document.getElementById('amountValue').textContent = naira(data.amount);
+    document.getElementById('amountCard').hidden = false;
+    document.getElementById('guestsCard').hidden = true;
+  } catch (err) {
+    alert(err.message || 'Could not request a payment amount -- please try again.');
+  } finally {
+    btn.textContent = original;
+  }
+};
+
+render();
+
+// Same 15s-poll pattern as the shared order page (Stage 1) -- so
+// "Payment confirmed!" (or another guest's own payment showing up) never
+// needs a manual refresh to notice.
+setInterval(async function () {
+  try {
+    const res = await fetch(STATUS_PATH);
+    if (!res.ok) return;
+    status = await res.json();
+    render();
+  } catch (err) {
+    // a dropped connection here is silently skipped -- there's always another poll in 15s
+  }
+}, 15000);
+</script>
 </body></html>`;
 }

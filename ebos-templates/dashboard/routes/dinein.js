@@ -12,7 +12,7 @@ import { randomBytes } from 'node:crypto';
 import { pool } from '../lib/db.js';
 import { requireEditorApi } from '../lib/auth.js';
 import { resolveWaNumber } from './dinein-menu.js';
-import { notifyGuestsReadyToPay } from '../engine/flow.js';
+import { notifyGuestsReadyToPay, closeTableSessionIfSettled } from '../engine/flow.js';
 
 export const router = express.Router();
 
@@ -188,34 +188,6 @@ router.post('/orders/:id/served', async (req, res) => {
   // never undoes the serve itself, which has already happened.
   notifyGuestsReadyToPay(rows[0]).catch((err) => console.error('notifyGuestsReadyToPay failed:', err.message));
 });
-
-// Whether every order in a table_session is settled -- the single source
-// of truth for "can this table close", shared between the manual
-// Close-table button below and closeTableSessionIfSettled's automatic
-// trigger (routes/api.js's POST /orders/:id/status, fired when marking the
-// last outstanding order paid).
-async function sessionIsSettled(sessionId) {
-  const { rows } = await pool.query(
-    `select count(*) from "order" where session_id = $1 and status not in ('completed', 'cancelled')`,
-    [sessionId]
-  );
-  return Number(rows[0].count) === 0;
-}
-
-// Closes an open table_session if -- and only if -- every order in it is
-// settled; a no-op (returns null) otherwise. closedBy distinguishes who
-// actually closed it ('staff' for the manual button, 'auto' for the
-// automatic trigger) -- both valid per schema.sql's check constraint on
-// table_session.closed_by.
-export async function closeTableSessionIfSettled(sessionId, { closedBy, staffId = null } = {}) {
-  if (!(await sessionIsSettled(sessionId))) return null;
-  const { rows } = await pool.query(
-    `update table_session set closed_at = now(), closed_by = $1, closed_by_staff = $2
-     where id = $3 and closed_at is null returning *`,
-    [closedBy, staffId, sessionId]
-  );
-  return rows[0] || null;
-}
 
 // Stage 6 -- the dashboard fallback for closing a table (spec 6.2: build
 // this regardless of POS access, it's the only close path a client with no

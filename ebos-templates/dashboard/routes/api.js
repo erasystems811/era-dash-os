@@ -24,7 +24,7 @@ import {
   magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
@@ -33,7 +33,7 @@ import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../en
 import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort, deleteBestEffort } from '../engine/whatsapp-catalog.js';
 import { router as deliveryRoutes } from './delivery.js';
 import { router as voiceRoutes } from './voice.js';
-import { router as dineinRoutes, closeTableSessionIfSettled } from './dinein.js';
+import { router as dineinRoutes } from './dinein.js';
 import { encrypt } from '../lib/crypto.js';
 import { maybeDispatchOwnRiders, manuallyRingForRider } from '../engine/delivery-dispatch.js';
 import { offerBus } from '../engine/offer-bus.js';

@@ -3355,6 +3355,178 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
   await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
 }
 
+// Whether every order in a table_session is settled -- the single source
+// of truth for "can this table close", shared between the manual
+// Close-table button (routes/dinein.js) and closeTableSessionIfSettled's
+// automatic trigger below (both the manual "Mark paid" path in
+// routes/api.js and, joint dine-in Stage 3, a POS transaction
+// auto-confirming an order_payment).
+async function sessionIsSettled(sessionId) {
+  const { rows } = await pool.query(
+    `select count(*) from "order" where session_id = $1 and status not in ('completed', 'cancelled')`,
+    [sessionId]
+  );
+  return Number(rows[0].count) === 0;
+}
+
+// Closes an open table_session if -- and only if -- every order in it is
+// settled; a no-op (returns null) otherwise. closedBy distinguishes who
+// actually closed it ('staff' for the manual button, 'auto' for an
+// automatic trigger -- either the last order being marked paid, or Stage
+// 3's own POS auto-confirm) -- both valid per schema.sql's check
+// constraint on table_session.closed_by. Moved here from routes/dinein.js
+// (Stage 3) so engine/webhook-moniepoint.js -- which has no HTTP request/
+// staff session of its own to route through -- can call it directly,
+// same layer completePayment/completeTopupPayment already live in.
+export async function closeTableSessionIfSettled(sessionId, { closedBy, staffId = null } = {}) {
+  if (!(await sessionIsSettled(sessionId))) return null;
+  const { rows } = await pool.query(
+    `update table_session set closed_at = now(), closed_by = $1, closed_by_staff = $2
+     where id = $3 and closed_at is null returning *`,
+    [closedBy, staffId, sessionId]
+  );
+  return rows[0] || null;
+}
+
+// Joint dine-in, Stage 3: "they can choose pay together or split payment
+// so each pay their own but its like a table open order, and they can
+// pick whose bill too can be joint." guestIds is who this particular
+// group is paying for (always includes the tapping guest themselves,
+// validated by the caller against table_session_guest same as every
+// other guest-claim in this file) -- covers_item_ids is every order_item
+// any of those guests added. null (not an array) specifically means
+// "every guest who has anything on the order is included," matching
+// schema.sql's own "null = whole order" convention, so a single
+// confirmed payment with covers_item_ids null is recognized as full
+// settlement without needing every item id spelled out.
+//
+// Reuses an existing PENDING payment for the exact same guest set instead
+// of creating a new one each time the pay page reloads -- a guest
+// refreshing (or two guests on the same phone somehow both landing here)
+// must not spawn duplicate POS amounts waiting to be matched.
+export async function createOrderPayment(order, guestIds, actingCustomerId) {
+  const { rows: allItems } = await pool.query('select id, product_id, quantity, price, added_by_customer_id from order_item where order_id = $1', [order.id]);
+  const { rows: allGuestRows } = await pool.query(
+    `select customer_id from table_session_guest where session_id = $1
+     union select customer_id from table_session where id = $1`,
+    [order.session_id]
+  );
+  const allGuestIds = allGuestRows.map((g) => g.customer_id);
+  const wholeOrder = allGuestIds.length > 0 && allGuestIds.every((id) => guestIds.includes(id));
+
+  const coveredItems = wholeOrder ? allItems : allItems.filter((i) => guestIds.includes(i.added_by_customer_id));
+  const amount = coveredItems.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
+  const coversItemIds = wholeOrder ? null : coveredItems.map((i) => i.id);
+
+  // Same-shape existing pending payment -- exact same coverage, still
+  // pending -- gets reused rather than duplicated. Array comparison via a
+  // sorted-JSON string is enough here (small arrays, no real risk of a
+  // false match) -- null vs null (whole order) also matches correctly
+  // since both stringify the same way.
+  const key = JSON.stringify((coversItemIds || []).slice().sort());
+  const { rows: pendingRows } = await pool.query(`select * from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
+  const existing = pendingRows.find((p) => {
+    const pKey = JSON.stringify((p.covers_item_ids || []).slice().sort());
+    return (p.covers_item_ids === null) === (coversItemIds === null) && pKey === key;
+  });
+  if (existing) return existing;
+
+  // Our own bookkeeping id, never sent to Moniepoint (schema.sql's own
+  // comment on this table) -- confirmation is matched by amount/time
+  // against real pos_transaction rows, not by reference.
+  const reference = `${order.reference}-P${randomBytes(3).toString('hex').toUpperCase()}`;
+  const { rows: created } = await pool.query(
+    `insert into order_payment (order_id, provider, reference, amount, covers_item_ids, paid_by_customer_id)
+     values ($1, 'pos', $2, $3, $4, $5) returning *`,
+    [order.id, reference, amount, coversItemIds, actingCustomerId]
+  );
+  return created[0];
+}
+
+// Confirms one order_payment (POS auto-match below, or a future staff
+// tie-break resolution) -- then checks whether the ORDER itself is now
+// fully covered by every confirmed payment together (a single whole-order
+// one, or the union of split/joint groups covering every real item),
+// completing it exactly the same way the manual "Mark paid" dashboard
+// button already does (routes/api.js's POST /orders/:id/status) so
+// nothing downstream (feedback, table auto-close) has to know which path
+// got it there. Partial settlement -- some groups paid, one hasn't --
+// leaves the order open, still visibly "awaiting payment" for the rest.
+export async function confirmOrderPayment(orderPaymentId) {
+  const { rows } = await pool.query(
+    `update order_payment set status = 'confirmed', confirmed_at = now() where id = $1 and status = 'pending' returning *`,
+    [orderPaymentId]
+  );
+  const payment = rows[0];
+  if (!payment) return null;
+
+  const { rows: allItems } = await pool.query('select id from order_item where order_id = $1', [payment.order_id]);
+  const { rows: confirmedPayments } = await pool.query(
+    `select covers_item_ids from order_payment where order_id = $1 and status = 'confirmed'`,
+    [payment.order_id]
+  );
+  const wholeOrderPaid = confirmedPayments.some((p) => p.covers_item_ids === null);
+  const covered = new Set();
+  for (const p of confirmedPayments) for (const id of p.covers_item_ids || []) covered.add(id);
+  const fullyCovered = wholeOrderPaid || (allItems.length > 0 && allItems.every((i) => covered.has(i.id)));
+  if (!fullyCovered) return payment;
+
+  const { rows: orderRows } = await pool.query(
+    `update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1 returning *`,
+    [payment.order_id]
+  );
+  const order = orderRows[0];
+  if (order) {
+    sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
+    if (order.session_id) {
+      closeTableSessionIfSettled(order.session_id, { closedBy: 'auto' }).catch((err) => console.error('closeTableSessionIfSettled failed:', err.message));
+    }
+  }
+  return payment;
+}
+
+// Joint dine-in, Stage 3: "if there is an exact amount sent at same time
+// then staff should be asked which table" -- Chidera's own call, confirmed
+// as the right approach. Called right after engine/webhook-moniepoint.js
+// inserts a new pos_transaction -- matches it against every PENDING
+// order_payment with the same amount inside a short recent window (a few
+// minutes: long enough for someone to actually walk up and tap the
+// terminal after requesting payment, short enough that two genuinely
+// unrelated transactions at the same amount rarely land in it together).
+// Zero matches -- nothing to reconcile automatically, the transaction
+// stays logged as-is (a non-order sale, or paid a way not expected here).
+// Exactly one -- auto-confirm it, no staff involved, which is the entire
+// point (closes the staff-fraud gap this whole plan started from). Two
+// or more -- a genuine tie, never guessed at with real money: staff gets
+// asked which one instead.
+export async function matchPosTransactionToPayment(transaction) {
+  const { rows: candidates } = await pool.query(
+    `select op.*, o.table_id, rt.label as table_label
+     from order_payment op
+       join "order" o on o.id = op.order_id
+       left join restaurant_table rt on rt.id = o.table_id
+     where op.status = 'pending' and op.amount = $1
+       and op.created_at > now() - interval '15 minutes'`,
+    [transaction.amount]
+  );
+  if (candidates.length === 1) {
+    await confirmOrderPayment(candidates[0].id);
+    return;
+  }
+  if (candidates.length > 1) {
+    const orderRecipients = await orderAlertRecipients();
+    if (orderRecipients.length) {
+      // No " -- " / standalone dash -- bot-engine/send.js's sanitizeText
+      // rejects that as banned formatting (found live, via this exact
+      // alert, not assumed). Line breaks + "label: value" instead, same
+      // convention every other structured staff alert in this file uses.
+      const list = candidates.map((c) => `Table ${c.table_label || '?'}: NGN ${c.amount}`).join('\n');
+      const alertText = `A POS payment of NGN ${transaction.amount} matched more than one table waiting to pay:\n${list}\n\nNot auto-confirmed, to avoid crediting the wrong table. Please confirm the right one from In House, Awaiting payment, Mark paid.`;
+      for (const { phoneNumber: to } of orderRecipients) await sendStaffAlert(to, alertText);
+    }
+  }
+}
+
 // Joint dine-in, Stage 2: "food comes first before payment unlike normal
 // ordering... they can pay when ever they are ready." Called from
 // routes/dinein.js's POST /orders/:id/served the moment staff taps
@@ -3363,10 +3535,7 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
 // fallback) gets their OWN "Ready to pay" link, same ?g=<menu_token>
 // per-guest identity mechanism as every other dine-in link (see
 // handleDineinButtonTap above). Stage 3 builds out the real split/joint
-// payment page this links to; for now it's a plain summary + "pay at the
-// counter" page (routes/dinein-menu.js's GET /:qrToken/pay) -- the
-// existing manual "Mark paid" dashboard button is still what actually
-// closes the order out, unchanged.
+// payment page this links to.
 export async function notifyGuestsReadyToPay(order) {
   if (!process.env.PUBLIC_URL || order.channel !== 'dinein' || !order.table_id || !order.session_id) return;
   const { rows: tableRows } = await pool.query('select label, qr_token, branch_id from restaurant_table where id = $1', [order.table_id]);
