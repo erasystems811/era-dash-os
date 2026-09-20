@@ -988,6 +988,34 @@ label {
   color: var(--warn);
   font-weight: 600;
 }
+/* Chidera, 2026-09-20: "that new sign on kanban should keep showing when
+   kanban is tapped open... a sub section of add on" -- the same served-
+   vs-new demarcation, now also on OrderDetail.jsx's own item table (the
+   page a kanban card actually opens into), not scoped to .docket so it
+   works there too. */
+.new-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: var(--warn);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 4px;
+}
+.new-part {
+  color: var(--warn);
+  font-weight: 600;
+}
+.addon-section-head td {
+  padding-top: 14px !important;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--warn);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border) !important;
+}
 .docket .foot {
   display: flex;
   align-items: center;

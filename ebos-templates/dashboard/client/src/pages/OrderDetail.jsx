@@ -22,6 +22,27 @@ export default function OrderDetail() {
   if (!data) return <Loading />;
   const { order, items, customer, topups = [], paymentProofs = [], delivery, deliveryAssignment } = data;
 
+  // Chidera, 2026-09-20: "that new sign on kanban should keep showing when
+  // kanban is tapped open na so they can clarify... a sub section of add
+  // on." The kanban card's own served-vs-new demarcation (InHouse.jsx/
+  // Orders.jsx) was lost the moment staff actually tapped into an order's
+  // full detail page -- same served_item_snapshot diff, reused here
+  // instead of invented fresh, so the two views never disagree. A whole
+  // line added since "Served" was last tapped goes in its own "Add on"
+  // section; a mixed line (some already out, more just ordered) stays in
+  // the main Items list with the same inline "(N new)" callout the kanban
+  // card already uses, since splitting a single real line across two
+  // sections would misstate what's actually one order for one dish.
+  const snapshot = order.served_item_snapshot;
+  const mainItems = [];
+  const addOnItems = [];
+  for (const item of items) {
+    const servedQty = snapshot ? Number(snapshot[item.product_id] || 0) : item.quantity;
+    const newQty = Math.max(0, item.quantity - servedQty);
+    if (snapshot && newQty === item.quantity) addOnItems.push({ ...item, newQty: 0 });
+    else mainItems.push({ ...item, newQty });
+  }
+
   async function releaseDelivery(e) {
     e.preventDefault();
     setOverrideError(null);
@@ -93,10 +114,35 @@ export default function OrderDetail() {
             </tr>
           </thead>
           <tbody>
-            {items.map((i) => (
+            {mainItems.map((i) => (
               <tr key={i.id}>
                 <td>
                   {i.name}
+                  {i.newQty > 0 && <span className="new-part"> ({i.newQty} new)</span>}
+                  {i.answers?.length > 0 && (
+                    <div className="hint" style={{ marginTop: 2 }}>
+                      {i.answers.map((a, idx) => (
+                        <div key={idx}>
+                          {a.question}: <strong>{a.answer}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </td>
+                <td>{i.quantity}</td>
+                <td>{Number(i.price).toFixed(2)}</td>
+              </tr>
+            ))}
+            {addOnItems.length > 0 && (
+              <tr className="addon-section-head">
+                <td colSpan={3}>Add on (after serving)</td>
+              </tr>
+            )}
+            {addOnItems.map((i) => (
+              <tr key={i.id}>
+                <td>
+                  {i.name}
+                  <span className="new-badge">NEW</span>
                   {i.answers?.length > 0 && (
                     <div className="hint" style={{ marginTop: 2 }}>
                       {i.answers.map((a, idx) => (
