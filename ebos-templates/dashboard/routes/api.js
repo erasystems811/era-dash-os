@@ -1980,8 +1980,17 @@ router.delete('/customers/:id', requireEditorApi, async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Not found.' });
     }
+    // Chidera, 2026-09-20: real bug, found from a real report ("i tried to
+    // delete the conversation... it didn't delete") -- table_session used
+    // to be deleted here BEFORE "order", but order.session_id/table_id
+    // (schema.sql) reference table_session/restaurant_table with NO
+    // cascade. Any customer with even one dine-in order still referencing
+    // that session hit a foreign-key violation the instant table_session
+    // was removed out from under it, rolling back the whole delete with
+    // nothing actually gone -- exactly what a real dine-in customer's
+    // delete attempt would always do. order now goes first; table_session
+    // (which nothing else here still points at once order is gone) after.
     await client.query(`delete from waiter_call where session_id in (select id from table_session where customer_id = $1)`, [id]);
-    await client.query(`delete from table_session where customer_id = $1`, [id]);
     await client.query(`delete from callback_task where customer_id = $1 or call_id in (select id from voice_call where customer_id = $1)`, [id]);
     await client.query(`delete from call_turn where call_id in (select id from voice_call where customer_id = $1)`, [id]);
     await client.query(`delete from voice_call where customer_id = $1`, [id]);
@@ -1989,6 +1998,7 @@ router.delete('/customers/:id', requireEditorApi, async (req, res) => {
     await client.query(`delete from delivery_offer where order_id in (select id from "order" where customer_id = $1)`, [id]);
     await client.query(`delete from booking where customer_id = $1`, [id]);
     await client.query(`delete from "order" where customer_id = $1`, [id]);
+    await client.query(`delete from table_session where customer_id = $1`, [id]);
     await client.query(`delete from message where customer_id = $1`, [id]);
     await client.query(`delete from customers where id = $1`, [id]);
     await client.query('COMMIT');

@@ -158,6 +158,13 @@ export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, b
   .fulToggle.active{border-color:var(--hot);color:var(--hot)}
   .fld label{display:block;font-size:13px;color:var(--mid);margin-bottom:4px}
   .fld select,.fld textarea{width:100%;padding:12px;border-radius:10px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box;font-family:inherit}
+  /* Chidera, 2026-09-20: "that button that has confirm order at the
+     bottom is too thin, i need it slightly bigger" -- every primary
+     sheet button (Confirm order, Continue, Add to order, Save) was
+     relying on the bare browser default button box, no real padding or
+     font-size of its own. One shared class instead of four separate
+     inline styles quietly drifting apart. */
+  .primaryBtn{width:100%;padding:14px;border-radius:10px;border:0;background:var(--ink);color:#fff;font-family:inherit;font-size:15.5px;font-weight:600;touch-action:manipulation}
 </style></head>
 <body>
 <div class="mtop${coverPhotoVersion ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
@@ -172,12 +179,12 @@ export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, b
   <div class="sheetHead"><h3>Your order</h3><button id="sheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
   <div id="sheetList"></div>
   <div id="sheetFulfil" hidden style="margin-top:14px;padding-top:14px;border-top:1px solid #F0EBE2;font-size:13.5px;color:var(--mid)"></div>
-  <button id="sheetConfirm" hidden style="width:100%;margin-top:14px">Confirm order</button>
+  <button id="sheetConfirm" class="primaryBtn" hidden style="margin-top:14px">Confirm order</button>
 </div>
 <div id="qSheet" class="sheet" hidden>
   <div class="sheetHead"><h3 id="qSheetTitle"></h3><button id="qSheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
   <div id="qSheetBody"></div>
-  <button id="qSheetAdd" style="width:100%;margin-top:12px">Add to order</button>
+  <button id="qSheetAdd" class="primaryBtn" style="margin-top:12px">Add to order</button>
 </div>
 <div id="fulfilSheet" class="sheet" hidden>
   <div class="sheetHead"><h3>Delivery or pickup?</h3><button id="fulSheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
@@ -199,13 +206,13 @@ export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, b
       <p id="fulFeeResult" style="font-size:13px;color:var(--mid);margin-top:8px"></p>
     </div>
   </div>
-  <button id="fulContinue" style="width:100%;margin-top:12px">Continue</button>
+  <button id="fulContinue" class="primaryBtn" style="margin-top:12px">Continue</button>
 </div>
 <div id="bdaySheet" class="sheet" hidden>
   <div class="sheetHead"><h3>When's your birthday?</h3><button id="bdaySheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
   <p style="color:var(--mid);font-size:13px;margin:0 0 14px">We like to make it a little special when it comes around.</p>
   <input id="bdayInput" type="date" style="width:100%;padding:12px;border-radius:10px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box">
-  <button id="bdaySave" style="width:100%;margin-top:12px">Save</button>
+  <button id="bdaySave" class="primaryBtn" style="margin-top:12px">Save</button>
   <button id="bdaySkip" style="width:100%;margin-top:8px;background:none;border:0;color:var(--mid);font-size:13px;padding:8px">Not now</button>
 </div>
 <script>
@@ -307,10 +314,23 @@ function render() {
       ? '<div class="shot"><img loading="lazy" decoding="async" src="/photo/' + p.id + '" alt=""></div>'
       : '<div class="shot"><span>' + p.name.toUpperCase() + '</span></div>';
     const hasQuestions = p.questions && p.questions.length > 0;
+    // Chidera, 2026-09-20: "im tapping - to remove an already selected
+    // order but its not removing it only wants me to add ... not working
+    // for [items with a question], only drinks" -- a question-having
+    // product only ever showed "Add"/"Add another" here, never a way to
+    // remove one -- the only place that worked was the review sheet.
+    // Exactly one distinct answer-line for this product is unambiguous
+    // (there's only one thing "-" could possibly mean), so that case gets
+    // a real minus right here too; two+ distinct lines stays "Add another"
+    // only -- genuinely ambiguous which one "-" would mean without opening
+    // the review sheet and picking the actual line.
+    const ownLines = Object.keys(basket).filter(function (k) { return basket[k].productId === p.id; });
     const qty = hasQuestions ? totalQtyFor(p.id) : (basket[lineKey(p.id, {})] ? basket[lineKey(p.id, {})].quantity : 0);
     let control;
     if (!p.availability) {
       control = '<span class="gone">Out of stock</span>';
+    } else if (hasQuestions && qty > 0 && ownLines.length === 1) {
+      control = '<div class="qty"><button class="qm" data-key="' + escapeAttr(ownLines[0]) + '">\\u2212</button><span class="qn">' + qty + '</span><button class="add qask" data-id="' + p.id + '">+</button></div>';
     } else if (hasQuestions) {
       control = '<button class="add qask" data-id="' + p.id + '">' + (qty > 0 ? qty + ' added \\u00b7 Add another' : 'Add') + '</button>';
     } else {
@@ -326,7 +346,12 @@ function render() {
   document.querySelectorAll('.add:not(.qask)').forEach(b => b.onclick = () => changeQty(lineKey(b.dataset.id, {}), 1, b.dataset.id));
   document.querySelectorAll('.qask').forEach(b => b.onclick = () => openQuestionSheet(b.dataset.id));
   document.querySelectorAll('.grid .qp').forEach(b => b.onclick = () => changeQty(lineKey(b.dataset.id, {}), 1, b.dataset.id));
-  document.querySelectorAll('.grid .qm').forEach(b => b.onclick = () => changeQty(lineKey(b.dataset.id, {}), -1));
+  // A question-having product's own single-line minus carries its real
+  // lineKey directly (data-key) -- a no-question item's still carries a
+  // bare product id (data-id), resolved to its lineKey(id, {}) same as
+  // always.
+  document.querySelectorAll('.grid .qm[data-key]').forEach(b => b.onclick = () => changeQty(b.dataset.key, -1));
+  document.querySelectorAll('.grid .qm[data-id]').forEach(b => b.onclick = () => changeQty(lineKey(b.dataset.id, {}), -1));
 }
 
 function updateBasket() {
@@ -545,9 +570,9 @@ function renderSheet() {
     // question sheet, pre-filled with whatever it already has.
     const label = p.name + (needsAnswer ? ' \\u2014 needs an answer' : (answerText ? ' (' + answerText + ')' : ''));
     const rowStyle = needsAnswer ? ' style="color:var(--hot);cursor:pointer"' : '';
-    return '<div class="sheetRow"' + (needsAnswer ? ' data-needs-answer-key="' + key + '"' : '') + '>' +
+    return '<div class="sheetRow"' + (needsAnswer ? ' data-needs-answer-key="' + escapeAttr(key) + '"' : '') + '>' +
       '<span class="nm"' + rowStyle + '>' + label + '</span>' +
-      '<div class="qty"><button class="qm" data-key="' + key + '">\\u2212</button><span class="qn">' + line.quantity + '</span><button class="qp" data-key="' + key + '">+</button></div>' +
+      '<div class="qty"><button class="qm" data-key="' + escapeAttr(key) + '">\\u2212</button><span class="qn">' + line.quantity + '</span><button class="qp" data-key="' + escapeAttr(key) + '">+</button></div>' +
       '<span class="pr">' + naira(p.price * line.quantity) + '</span></div>';
   }).join('');
   list.querySelectorAll('.qp').forEach(b => b.onclick = () => changeQty(b.dataset.key, 1));
