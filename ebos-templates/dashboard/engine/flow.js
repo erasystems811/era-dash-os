@@ -2587,7 +2587,7 @@ async function handleFulfilmentStageMessage(customer, order, text) {
 // never silence, never pretending nothing happened -- but always hands the
 // actual logistics off to a person rather than silently re-booking a rider
 // or charging more on its own.
-async function handlePostPaymentFulfilmentChange(customer, order, newType) {
+export async function handlePostPaymentFulfilmentChange(customer, order, newType) {
   const previousType = order.fulfilment_type;
   await pool.query(`update "order" set fulfilment_type = $1 where id = $2`, [newType, order.id]);
   order.fulfilment_type = newType;
@@ -2598,15 +2598,37 @@ async function handlePostPaymentFulfilmentChange(customer, order, newType) {
   // pickup line completePayment already sends. Switching the other way
   // (to delivery) still genuinely needs a person (a rider to book, a real
   // delivery fee to work out), so that keeps the handover below.
+  //
+  // Chidera, 2026-09-20: real report -- "i changed to pick up why wasnt
+  // the order recalculated to take out delivery fee." Root cause: this
+  // used to only update fulfilment_type, never delivery_fee/total, unlike
+  // the pre-payment version of this same switch (handleFulfilmentChange
+  // above). Since the order's ALREADY paid, silently shrinking total
+  // would misrepresent what actually got collected -- the real fact is a
+  // refund is owed. delivery_fee/total are still corrected here (so the
+  // dashboard/invoice reflect what the order is genuinely worth now, not
+  // a stale delivery-inclusive figure), and the handover below names the
+  // exact refund amount instead of a vague "sort that out."
   if (newType === 'pickup') {
+    const oldFee = Number(order.delivery_fee || 0);
+    if (oldFee > 0) {
+      const newTotal = Number(order.total) - oldFee;
+      await pool.query(`update "order" set delivery_fee = 0, total = $1 where id = $2`, [newTotal, order.id]);
+      order.delivery_fee = 0;
+      order.total = newTotal;
+    }
     const { rows: bizRows } = await pool.query('select address, phone_number from business limit 1');
     const biz = bizRows[0] || {};
     const branchRows = order.branch_id ? (await pool.query('select address, phone_number from branch where id = $1', [order.branch_id])).rows : [];
     const b = branchRows[0] || {};
+    const refundLine = oldFee > 0 ? ` Since you'd already paid the delivery fee, we'll refund you NGN ${oldFee} for that.` : '';
     await reply(
       customer,
-      `Okay, this is the pickup address: ${b.address || biz.address || 'our location'}. When your order is ready I'll let you know so you can pick it up.`
+      `Okay, this is the pickup address: ${b.address || biz.address || 'our location'}. When your order is ready I'll let you know so you can pick it up.${refundLine}`
     );
+    if (oldFee > 0) {
+      await handover(customer, `Customer switched an already-paid order from delivery to pickup -- they're owed a NGN ${oldFee} delivery fee refund`, null, false);
+    }
     return;
   }
 
