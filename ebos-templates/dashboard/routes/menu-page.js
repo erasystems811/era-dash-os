@@ -88,6 +88,20 @@ router.post('/:token/birthday', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Chidera, 2026-09-20: "we agreed a name so bot can refer to customer" --
+// same shape/placement as the birthday popup just above (public, token-
+// authenticated, the customer's own web menu rather than the staff
+// dashboard). flow.js's handleGreeting is the one place this is actually
+// read back so far -- "Hello [Name]!" instead of a plain "Hello!" once set.
+router.post('/:token/name', async (req, res) => {
+  const customer = await resolveCustomer(req.params.token);
+  if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  const name = String(req.body?.name || '').trim().slice(0, 100);
+  if (!name) return res.status(400).json({ error: 'A name is required.' });
+  await pool.query('update customers set name = $1 where id = $2', [name, customer.id]);
+  res.json({ ok: true });
+});
+
 // Chowdeck/manual mode -- the own_riders case never needs a live quote
 // (the page already has every zone's real fee embedded, see GET /:token
 // below), so this only ever runs for the address+"Check delivery fee"
@@ -158,7 +172,7 @@ router.get('/:token', async (req, res) => {
     menuForBranch(customer.branch_id),
     pendingOrderPayload(customer.id),
     resolveWaNumber(customer.branch_id),
-    pool.query('select enabled, birthday_prompt_enabled from crm_config limit 1'),
+    pool.query('select enabled, birthday_prompt_enabled, name_prompt_enabled from crm_config limit 1'),
     getDeliveryConfig(),
   ]);
   // Zones embedded up front, real names and real fees -- own_riders
@@ -180,11 +194,13 @@ router.get('/:token', async (req, res) => {
     renderMenuPage({
       reviewPath: `/m/${req.params.token}/review`,
       birthdayPath: `/m/${req.params.token}/birthday`,
+      namePath: `/m/${req.params.token}/name`,
       askFulfilment: true,
       deliveryQuotePath: `/m/${req.params.token}/delivery-quote`,
       deliveryMode: deliveryConfig.mode,
       deliveryZones,
       showBirthdayPrompt: Boolean(crmRows.rows[0]?.enabled) && crmRows.rows[0]?.birthday_prompt_enabled !== false && !customer.birthday,
+      showNamePrompt: Boolean(crmRows.rows[0]?.enabled) && crmRows.rows[0]?.name_prompt_enabled !== false && !customer.name,
       businessName: branding.business_name || '',
       subtitle: 'Pick what you would like, then review your order.',
       coverPhotoVersion: branding.cover_photo_version,

@@ -1198,7 +1198,10 @@ create index if not exists hours_notify_request_branch_idx on hours_notify_reque
 create table if not exists crm_config (
   business_id uuid primary key references business(id),
   enabled boolean not null default false,
-  birthday_prompt_enabled boolean not null default true
+  birthday_prompt_enabled boolean not null default true,
+  -- 0051, Chidera 2026-09-20: "we agreed a name so bot can refer to
+  -- customer" -- same toggle shape as birthday_prompt_enabled just above.
+  name_prompt_enabled boolean not null default true
 );
 alter table customers add column if not exists birthday date;
 

@@ -838,9 +838,19 @@ async function handleGreeting(customer, text) {
   // that hey there" -- and then: "add hello before the welcome". Plain
   // "Hello!", not greetingAckFor's tone-matching (that's the "hey there"
   // that was already turned down).
+  //
+  // Chidera, 2026-09-20: "we agreed a name so bot can refer to customer"
+  // -- customer.name is only ever set via the web menu's own name popup
+  // (routes/menu-page.js's POST /:token/name), never invented or guessed;
+  // this is the first place it's actually read back. Falls back to the
+  // exact same plain wording as before when it isn't set, which is still
+  // the common case until a business turns the popup on and customers
+  // start filling it in.
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const businessName = bizRows[0]?.name || 'us';
-  const message = `Hello! Welcome to ${businessName}, what would you like to order?`;
+  const message = customer.name
+    ? `Hello ${customer.name}! Welcome to ${businessName}, what would you like to order?`
+    : `Hello! Welcome to ${businessName}, what would you like to order?`;
   if (customer.channel !== 'whatsapp') {
     await reply(customer, message, 'greeting');
     return;

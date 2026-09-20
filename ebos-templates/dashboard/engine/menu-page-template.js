@@ -52,7 +52,7 @@
 // (engine/flow.js) never even asks delivery/pickup for one, so asking here
 // too would be a real, unwanted new question. Only routes/menu-page.js
 // (general ordering) passes askFulfilment: true.
-export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthdayPrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
+export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthdayPrompt, namePath, showNamePrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
   const lightProducts = products.map((p) => ({
     id: p.id,
@@ -208,6 +208,14 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
   </div>
   <button id="fulContinue" class="primaryBtn" style="margin-top:12px">Continue</button>
 </div>
+<div id="nameSheet" class="sheet" hidden>
+  <div class="sheetHead"><h3>What should we call you?</h3><button id="nameSheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
+  <p style="color:var(--mid);font-size:13px;margin:0 0 14px">So we can greet you by name next time.</p>
+  <input id="nameInput" type="text" maxlength="100" placeholder="Your name" style="width:100%;padding:12px;border-radius:10px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box">
+  <p id="nameError" style="color:#C0392B;font-size:13px;margin:8px 0 0;display:none"></p>
+  <button id="nameSave" class="primaryBtn" style="margin-top:12px">Save</button>
+  <button id="nameSkip" style="width:100%;margin-top:8px;background:none;border:0;color:var(--mid);font-size:13px;padding:8px">Not now</button>
+</div>
 <div id="bdaySheet" class="sheet" hidden>
   <div class="sheetHead"><h3>When's your birthday?</h3><button id="bdaySheetClose" class="sheetClose" aria-label="Close">&times;</button></div>
   <p style="color:var(--mid);font-size:13px;margin:0 0 14px">We like to make it a little special when it comes around.</p>
@@ -229,6 +237,8 @@ const REVIEW_PATH = ${JSON.stringify(reviewPath)};
 const POLL_PATH = ${JSON.stringify(pollPath || null)};
 const BIRTHDAY_PATH = ${JSON.stringify(birthdayPath || null)};
 const SHOW_BIRTHDAY_PROMPT = ${JSON.stringify(Boolean(showBirthdayPrompt))};
+const NAME_PATH = ${JSON.stringify(namePath || null)};
+const SHOW_NAME_PROMPT = ${JSON.stringify(Boolean(showNamePrompt))};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
 const ASK_FULFILMENT = ${JSON.stringify(Boolean(askFulfilment))};
 const DELIVERY_MODE = ${JSON.stringify(deliveryMode || null)};
@@ -685,7 +695,7 @@ function renderSheetFulfil() {
 }
 
 function hideAllSheets() {
-  ['sheet', 'qSheet', 'fulfilSheet', 'bdaySheet'].forEach(function (id) { document.getElementById(id).hidden = true; });
+  ['sheet', 'qSheet', 'fulfilSheet', 'bdaySheet', 'nameSheet'].forEach(function (id) { document.getElementById(id).hidden = true; });
 }
 
 function openSheet() {
@@ -741,8 +751,44 @@ document.getElementById('bdaySave').onclick = async () => {
     errEl.style.display = 'block';
   }
 };
+
+// Chidera, 2026-09-20: "we agreed a name so bot can refer to customer" --
+// same shape as the birthday popup just above (own error handling per
+// the same "why does it keep asking" lesson, applied from the start
+// rather than found live a second time). afterNamePrompt (set just
+// before this opens, in the sequencing block at the bottom) is what runs
+// next -- the birthday prompt when that's also due, otherwise nothing.
+let afterNamePrompt = null;
+function openNameSheet() {
+  hideAllSheets();
+  document.getElementById('backdrop').hidden = false;
+  document.getElementById('nameSheet').hidden = false;
+}
+function closeNameSheet() {
+  document.getElementById('backdrop').hidden = true;
+  document.getElementById('nameSheet').hidden = true;
+  if (afterNamePrompt) { const next = afterNamePrompt; afterNamePrompt = null; next(); }
+}
+document.getElementById('nameSheetClose').onclick = closeNameSheet;
+document.getElementById('nameSkip').onclick = closeNameSheet;
+document.getElementById('nameSave').onclick = async () => {
+  const errEl = document.getElementById('nameError');
+  errEl.style.display = 'none';
+  const value = document.getElementById('nameInput').value.trim();
+  if (!value) { errEl.textContent = 'Please enter a name.'; errEl.style.display = 'block'; return; }
+  try {
+    const res = await fetch(NAME_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: value }) });
+    if (!res.ok) throw new Error('save failed');
+    closeNameSheet();
+  } catch (err) {
+    errEl.textContent = "Couldn't save that -- please try again.";
+    errEl.style.display = 'block';
+  }
+};
+
 document.getElementById('backdrop').onclick = () => {
-  if (!document.getElementById('bdaySheet').hidden) closeBdaySheet();
+  if (!document.getElementById('nameSheet').hidden) closeNameSheet();
+  else if (!document.getElementById('bdaySheet').hidden) closeBdaySheet();
   else if (!document.getElementById('qSheet').hidden) closeQuestionSheet();
   else if (!document.getElementById('fulfilSheet').hidden) closeFulfilSheet();
   else closeSheet();
@@ -819,18 +865,24 @@ document.getElementById('go').onclick = () => {
 renderCats();
 render();
 updateBasket();
-if (SHOW_BIRTHDAY_PROMPT) {
-  openBdaySheet();
-// A guest reopening this link may already have an order sitting with us --
-// basket is already pre-loaded from it above, and the basket bar itself
-// (never "Nothing added yet" when that's true) is the ambient signal;
-// opening the sheet once, right away, is what actually answers "how do I
-// know" and "how do I remove it" without any always-on inline list. Only
-// one sheet can ever be on screen at once now (hideAllSheets, above), so
-// this is skipped here, not layered underneath the birthday prompt --
-// closing that (Save or Not now) leaves the basket bar itself as the same
-// ambient reminder it always was; tapping it opens the review same as ever.
-} else {
+// Chidera, 2026-09-20: name prompt takes priority over birthday (asked
+// first, "so bot can refer to customer" is the more fundamental of the
+// two), which in turn takes priority over the unanswered-question/
+// pending-order sheet -- same ambient-signal reasoning as before, just a
+// three-deep queue now instead of two. Only one sheet is ever on screen
+// at once (hideAllSheets), so each prompt closing (Save or Not now) is
+// what hands off to the next one due, via afterNamePrompt.
+function showAfterPrompts() {
+  if (SHOW_BIRTHDAY_PROMPT) {
+    openBdaySheet();
+    // A guest reopening this link may already have an order sitting with
+    // us -- basket is already pre-loaded from it above, and the basket
+    // bar itself (never "Nothing added yet" when that's true) is the
+    // ambient signal; opening the sheet once, right away, is what
+    // actually answers "how do I know" and "how do I remove it" without
+    // any always-on inline list.
+    return;
+  }
   // Chidera, 2026-09-20: a chat-originated order sent here specifically to
   // finish up (flow.js's finishItemsCollection now links here instead of
   // asking one item-question at a time in chat) needs that question
@@ -846,6 +898,12 @@ if (SHOW_BIRTHDAY_PROMPT) {
   } else if (PENDING_ORDER && PENDING_ORDER.items && PENDING_ORDER.items.length) {
     openSheet();
   }
+}
+if (SHOW_NAME_PROMPT) {
+  afterNamePrompt = showAfterPrompts;
+  openNameSheet();
+} else {
+  showAfterPrompts();
 }
 
 // Joint dine-in, Stage 1: "let everyone on that table... see each other."
