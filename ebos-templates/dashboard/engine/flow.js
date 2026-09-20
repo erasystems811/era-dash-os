@@ -611,7 +611,18 @@ const SYSTEM_ERROR_HANDOVER_REASON = 'Unexpected error while processing customer
 // handover that isn't really about confirming anything -- e.g. the bot
 // itself broke (see the error-recovery catch in scheduleDebouncedProcessing)
 // and that phrasing reads as evasive rather than honest about what happened.
-async function handover(customer, reason, extra, ackText) {
+// primaryLink: Chidera, 2026-09-20: "when you sent handover for receipt
+// confirmation the board opened the conversation instead of where the
+// receipt actually is" -- the payment-proof handover already built a real
+// `confirm: .../orders/<id>` link (straight into the order card, see its
+// own 2026-09-03 comment on that), but only ever as a plain text LINE
+// inside the alert body -- the actual tappable BUTTON below was hardcoded
+// to the generic /conversations/<id> board regardless, so that's the one
+// staff actually tapped. { path, title } overrides both the magic-link
+// destination and the button's own title; every other call site passes
+// nothing and keeps getting the generic conversation link exactly as
+// before, since none of them have anywhere more specific to send staff.
+async function handover(customer, reason, extra, ackText, primaryLink) {
   await pool.query(`update customers set handled_by = 'staff', handover_at = now(), handover_reason = $1 where id = $2`, [reason, customer.id]);
 
   // Voice add-on only (spec A8, Phase 1/call-forwarding -- no live transfer
@@ -709,11 +720,13 @@ async function handover(customer, reason, extra, ackText) {
     // recipient has no staffId, since business.handover_number's fallback
     // isn't a real staff account with a session to bind a token to.
     if (!process.env.PUBLIC_URL) continue;
+    const path = primaryLink?.path || `/conversations/${customer.id}`;
+    const title = primaryLink?.title || 'Open Conversation';
     const link = staffId
-      ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/conversations/${customer.id}`)}`
-      : `${process.env.PUBLIC_URL}/conversations/${customer.id}`;
+      ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
+      : `${process.env.PUBLIC_URL}${path}`;
     try {
-      await sendWhatsAppCtaUrl(to, `Tap below to open this conversation.`, 'Open Conversation', link, credentials);
+      await sendWhatsAppCtaUrl(to, `Tap below to open this conversation.`, title, link, credentials);
     } catch (err) {
       console.error(`Failed to send handover conversation link to ${to}:`, err.message);
     }
@@ -1239,11 +1252,17 @@ function catalogueOptions(menu, keywords) {
 // either satisfied or already declined.
 async function nextUpsellGroup(order, orderItems) {
   if (!orderItems.length) return null;
+  // Chidera, 2026-09-20: "only upsell once" -- this used to track each
+  // group (drink/protein/snack) separately, so a single order could get
+  // offered a drink, then later a protein, then later a snack, up to
+  // three separate upsell messages. One upsell offer per order, total,
+  // regardless of category -- any prior offer at all (accepted or
+  // declined) means none of this runs again for this order.
+  const offered = order.upsell_offered || [];
+  if (offered.length) return null;
   const menu = await resolveMenu(order.branch_id);
   const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
-  const offered = order.upsell_offered || [];
   for (const group of UPSELL_GROUPS) {
-    if (offered.includes(group.key)) continue;
     const options = catalogueOptions(menu, group.keywords);
     if (!options.length) continue;
     const orderHasIt = orderedCategories.some((c) => categoryMatchesGroup(c, group.keywords));
@@ -2499,8 +2518,29 @@ function fulfilmentStatusLine(order) {
 // needs no reply at all -- repeating "already paid and being prepared"
 // after every acknowledgment reads as not listening, not as helpful.
 async function handleFulfilmentStageMessage(customer, order, text) {
-  // Pure ack/thanks is already handled once, universally, at the top of
-  // handlePendingBatch -- text never reaches here if it was one.
+  // Chidera, 2026-09-20: "if customer just says okay or alright or all
+  // these reply that means okay or agreement, bot doesnt need to say
+  // anything again, save my api" -- this comment used to claim pure ack/
+  // thanks was already filtered out upstream (handlePendingBatch), but
+  // that filter only stays silent when there's NO open order at all --
+  // deliberately, so a plain "okay" while payment is still outstanding
+  // still gets the payment nudge (see its own comment). An order sitting
+  // here, already paid and just being prepared, always HAS an open order,
+  // so a plain "okay" always fell through to this function anyway, which
+  // never actually checked for one itself -- burning a delay-complaint AI
+  // call, an answerOrThenShowMenu AI call, and a repeated "already being
+  // prepared" message on every single acknowledgment. This is the one
+  // place that comment's own claim needed to actually be true.
+  const ackType = classifyPureAck(text);
+  if (ackType === 'ack') return;
+  if (ackType === 'thanks') {
+    await reply(customer, `You're welcome!`, 'thanks_ack');
+    return;
+  }
+  if (ackType === 'decline') {
+    await reply(customer, `Okay!`, 'decline_ack');
+    return;
+  }
 
   // Repeated frustration about the wait is a real complaint, not a status
   // question -- answering it with delivery/pickup facts misses that they're
@@ -4081,7 +4121,8 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
         // find it first.
         confirm: process.env.PUBLIC_URL ? `Confirm payment: ${process.env.PUBLIC_URL}/orders/${order.id}` : null,
       },
-      false // already sent its own ack ("Noted, I will confirm...") above
+      false, // already sent its own ack ("Noted, I will confirm...") above
+      { path: `/orders/${order.id}`, title: 'Confirm payment' }
     );
   } catch (err) {
     console.error(`Failed to download payment proof ${kind}:`, err);
