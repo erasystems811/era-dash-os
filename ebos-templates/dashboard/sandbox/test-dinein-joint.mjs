@@ -217,8 +217,7 @@ async function main() {
     body: JSON.stringify({
       items: [
         { productId: product1, quantity: 1, answers: {}, addedBy: customer1.id },
-        { productId: product2, quantity: 2, answers: {}, addedBy: customer2.id },
-        { productId: product2, quantity: 3, answers: {}, addedBy: customer2.id }, // guest 2 orders MORE zobo, based on mood
+        { productId: product2, quantity: 5, answers: {}, addedBy: customer2.id }, // guest 2 orders MORE zobo, based on mood (was 2, now 5)
       ],
     }),
   });
@@ -229,6 +228,17 @@ async function main() {
   assert(orderRowsFinal.length === 1, 'STILL exactly one order for the table -- the post-serve add-on reused it, not a second kitchen ticket');
   assert(orderRowsFinal[0].served_at === null, 'served_at reset back to null so the order returns to the Serving pipeline');
   assert(logs.some((l) => l.includes('added more after being served')), 'staff got pinged about the post-serve add-on');
+
+  // Chidera, 2026-09-20: "dont send the whole menu to the customer again,
+  // just send the add on to the staff and just top up" -- guest 2 should
+  // get a short "added on" note naming just the delta (3 more zobo), NOT
+  // the full item-question/upsell/confirm-order cycle with the whole
+  // running bill read back and a fresh yes/no gate.
+  const { rows: guest2LastMsg } = await pool.query(
+    `select body from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`, [customer2.id]
+  );
+  assert(guest2LastMsg[0]?.body?.includes('3x Zobo Drink'), 'guest 2 told exactly the delta added (3 more zobo), not the running total quantity');
+  assert(!/To confirm|Yes, confirm/i.test(guest2LastMsg[0]?.body || ''), 'guest 2 did NOT get the full re-confirm cycle for a post-serve add-on');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

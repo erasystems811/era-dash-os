@@ -154,6 +154,8 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
   .sheetRow .nm{flex:1;font-size:14px}
   .sheetRow .pr{font-size:13px;color:var(--mid);min-width:70px;text-align:right}
   .sheetEmpty{padding:24px 0;text-align:center;color:var(--mid);font-size:13px}
+  .sheetGroupHead{font-family:"Fraunces",serif;font-size:13.5px;font-weight:600;color:var(--mid);padding:14px 0 4px}
+  .sheetGroupHead:first-child{padding-top:2px}
   .fulToggle{flex:1;padding:12px;border-radius:10px;border:1px solid var(--line);background:#fff;font-family:inherit;font-size:14px;font-weight:600;color:var(--ink);touch-action:manipulation}
   .fulToggle.active{border-color:var(--hot);color:var(--hot)}
   .fld label{display:block;font-size:13px;color:var(--mid);margin-bottom:4px}
@@ -614,6 +616,24 @@ document.getElementById('fulContinue').onclick = function () {
 // Each distinct answer combination is its own row here now, labelled with
 // its own answers, so "which one does - remove" is never ambiguous --
 // every row only ever affects itself.
+function sheetRowHtml(key, line) {
+  const p = PRODUCTS.find(p => p.id === line.productId);
+  if (!p) return '';
+  const needsAnswer = lineNeedsAnswer(line);
+  const answerText = Object.values(line.answers || {}).join(', ');
+  // needsAnswer -- Chidera, 2026-09-20: a line that arrived here already
+  // in the basket but never answered (typed in chat, then sent here to
+  // finish up) gets a clear "needs an answer" callout instead of looking
+  // like any other already-settled line -- tapping it reopens its own
+  // question sheet, pre-filled with whatever it already has.
+  const label = p.name + (needsAnswer ? ' \\u2014 needs an answer' : (answerText ? ' (' + answerText + ')' : ''));
+  const rowStyle = needsAnswer ? ' style="color:var(--hot);cursor:pointer"' : '';
+  return '<div class="sheetRow"' + (needsAnswer ? ' data-needs-answer-key="' + escapeAttr(key) + '"' : '') + '>' +
+    '<span class="nm"' + rowStyle + '>' + label + '</span>' +
+    '<div class="qty"><button class="qm" data-key="' + escapeAttr(key) + '">\\u2212</button><span class="qn">' + line.quantity + '</span><button class="qp" data-key="' + escapeAttr(key) + '">+</button></div>' +
+    '<span class="pr">' + naira(p.price * line.quantity) + '</span></div>';
+}
+
 function renderSheet() {
   const entries = Object.entries(basket);
   const list = document.getElementById('sheetList');
@@ -622,28 +642,30 @@ function renderSheet() {
     renderSheetFulfil();
     return;
   }
-  list.innerHTML = entries.map(([key, line]) => {
-    const p = PRODUCTS.find(p => p.id === line.productId);
-    if (!p) return '';
-    const needsAnswer = lineNeedsAnswer(line);
-    const answerText = Object.values(line.answers || {}).join(', ');
-    // needsAnswer -- Chidera, 2026-09-20: a line that arrived here already
-    // in the basket but never answered (typed in chat, then sent here to
-    // finish up) gets a clear "needs an answer" callout instead of looking
-    // like any other already-settled line -- tapping it reopens its own
-    // question sheet, pre-filled with whatever it already has.
-    // addedByLabel -- joint dine-in, Stage 1: only ever set on the shared
-    // table page (POLL_PATH), and only for a line that's actually synced
-    // from the server -- a line this guest just added locally shows no tag
-    // at all (it's obviously theirs, nothing to label yet).
-    const addedByText = POLL_PATH && line.addedByLabel ? ' \\u00b7 ' + line.addedByLabel : '';
-    const label = p.name + (needsAnswer ? ' \\u2014 needs an answer' : (answerText ? ' (' + answerText + ')' : '')) + addedByText;
-    const rowStyle = needsAnswer ? ' style="color:var(--hot);cursor:pointer"' : '';
-    return '<div class="sheetRow"' + (needsAnswer ? ' data-needs-answer-key="' + escapeAttr(key) + '"' : '') + '>' +
-      '<span class="nm"' + rowStyle + '>' + label + '</span>' +
-      '<div class="qty"><button class="qm" data-key="' + escapeAttr(key) + '">\\u2212</button><span class="qn">' + line.quantity + '</span><button class="qp" data-key="' + escapeAttr(key) + '">+</button></div>' +
-      '<span class="pr">' + naira(p.price * line.quantity) + '</span></div>';
-  }).join('');
+  // Joint dine-in, Stage 1 (only ever true on the shared table page,
+  // POLL_PATH is set): Chidera, 2026-09-20: "the meals there are meant to
+  // show and be classified by the names of people on the table and what
+  // they picked" -- grouped by who added each line, not a flat list with
+  // a name tagged onto each row. 'You' always sorts first; a line this
+  // guest just added locally has no addedByLabel synced from the server
+  // yet, which also correctly falls under 'You' (it's obviously theirs).
+  // The general (non-dine-in) page keeps the exact same flat list as
+  // always -- there's only ever one person's own order there, nothing to
+  // group by.
+  if (POLL_PATH) {
+    const groups = new Map();
+    for (const [key, line] of entries) {
+      const label = line.addedByLabel || 'You';
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label).push([key, line]);
+    }
+    const orderedLabels = [...groups.keys()].sort((a, b) => (a === 'You' ? -1 : b === 'You' ? 1 : a.localeCompare(b)));
+    list.innerHTML = orderedLabels.map((label) =>
+      '<div class="sheetGroupHead">' + label + '</div>' + groups.get(label).map(([key, line]) => sheetRowHtml(key, line)).join('')
+    ).join('');
+  } else {
+    list.innerHTML = entries.map(([key, line]) => sheetRowHtml(key, line)).join('');
+  }
   list.querySelectorAll('.qp').forEach(b => b.onclick = () => changeQty(b.dataset.key, 1));
   list.querySelectorAll('.qm').forEach(b => b.onclick = () => changeQty(b.dataset.key, -1));
   list.querySelectorAll('[data-needs-answer-key]').forEach(function (el) {

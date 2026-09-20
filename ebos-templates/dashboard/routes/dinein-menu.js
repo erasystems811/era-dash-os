@@ -6,7 +6,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderPayPage } from '../engine/menu-page-template.js';
-import { createOrderPayment, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, resetServedForAddOn, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
+import { createOrderPayment, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, reply, resetServedForAddOn, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
@@ -254,6 +254,13 @@ router.post('/:qrToken/review', async (req, res) => {
   const beforeQty = new Map();
   for (const row of beforeItems) beforeQty.set(row.product_id, (beforeQty.get(row.product_id) || 0) + row.quantity);
   const netAdded = resolved.some((item) => item.quantity > (beforeQty.get(item.productId) || 0));
+  // Pure addition only, same reasoning as handleOrderModification's own
+  // "adds only, no removes/sets" gate -- a resubmit that ALSO took
+  // something off deserves the fuller read-back below, not a quick
+  // "added on" note that would silently skip over what was removed.
+  const afterQty = new Map();
+  for (const item of resolved) afterQty.set(item.productId, (afterQty.get(item.productId) || 0) + item.quantity);
+  const anyRemoved = [...beforeQty.entries()].some(([productId, qty]) => (afterQty.get(productId) || 0) < qty);
 
   await pool.query('delete from order_item where order_id = $1', [order.id]);
   for (const item of resolved) {
@@ -270,13 +277,37 @@ router.post('/:qrToken/review', async (req, res) => {
   }
   const total = resolved.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
-  if (netAdded) await resetServedForAddOn(order);
+  // wasPostServeAddOn -- resetServedForAddOn's own return value says
+  // whether this genuinely was one (order.channel dinein and it had
+  // actually been served), not just whether netAdded is true.
+  const wasPostServeAddOn = netAdded ? await resetServedForAddOn(order) : false;
+
+  // Chidera, 2026-09-20: "when the customer add something in dine in
+  // after theyve been served the first one, dont send the whole menu to
+  // the customer again, just send the add on to the staff and just top
+  // up." A table that's already eating doesn't need to re-run the whole
+  // item-question/upsell/confirm-order cycle (and see their ENTIRE running
+  // bill read back at them) just because they want another drink -- staff
+  // already got told via resetServedForAddOn's own alert just above; the
+  // customer gets a short, focused "added on" line, same spirit as
+  // sendTopupInvoice's own top-up acknowledgment for delivery/pickup
+  // orders, not the full order-engine walk.
+  if (wasPostServeAddOn && !anyRemoved) {
+    const addedLines = resolved
+      .map((item) => ({ ...item, addedQty: item.quantity - (beforeQty.get(item.productId) || 0) }))
+      .filter((item) => item.addedQty > 0)
+      .map((item) => `${item.addedQty}x ${item.name}`);
+    await reply(customer, `Got it, added on:\n${addedLines.join('\n')}\n\nYour table's total is now NGN ${total}.`);
+    res.json({ ok: true });
+    return;
+  }
+
   // Joint dine-in, Stage 2: this order may already be well past
-  // collect_info (confirmed, served, even already awaiting payment) --
-  // finishItemsCollection below assumes it's walking a still-undecided
-  // order forward and can't do that from most further-along states. See
-  // restartItemsCollection's own comment for why this is a deliberate
-  // reset, not a bug being papered over.
+  // collect_info (confirmed, before being served) -- finishItemsCollection
+  // below assumes it's walking a still-undecided order forward and can't
+  // do that from most further-along states. See restartItemsCollection's
+  // own comment for why this is a deliberate reset, not a bug being
+  // papered over.
   await restartItemsCollection(order);
 
   // The read-back happens in the chat, not on this page (spec 5.1/5.2) --
@@ -332,13 +363,16 @@ async function pendingOrderPayload(session, table, actingCustomerId) {
   // addedByName/addedByCustomerId -- Chidera's joint dine-in concept:
   // "let everyone on that table be able to join in and see each other" --
   // coalesce(name, preferred_name) same as anywhere else a customer's own
-  // display name is shown, 'a guest' when neither's ever been set (name
-  // is dashboard-editable only, preferred_name is voice-only -- neither is
-  // ever written by any WhatsApp/web ordering code, so this is genuinely
-  // the common case, not a fallback for rare data).
+  // display name is shown. Chidera, 2026-09-20: "classified by the names
+  // of people on the table and what they picked or their number when
+  // they dont put a name" -- name is dashboard-editable only, preferred_
+  // name is voice-only, neither is ever written by any WhatsApp/web
+  // ordering code, so a nameless guest is genuinely the common case here,
+  // not a fallback for rare data -- their own phone number identifies
+  // them at the table just as well as "a guest" never did.
   const { rows: items } = await pool.query(
-    `select oi.product_id, oi.quantity, p.name, oi.added_by_customer_id,
-       coalesce(c.name, c.preferred_name) as added_by_name,
+    `select oi.id, oi.product_id, oi.quantity, p.name, oi.added_by_customer_id,
+       coalesce(c.name, c.preferred_name) as added_by_name, c.phone_number as added_by_phone,
        coalesce(
          (select json_object_agg(oa.question_id, oa.answer) from order_item_answer oa where oa.order_item_id = oi.id),
          '{}'
@@ -350,14 +384,19 @@ async function pendingOrderPayload(session, table, actingCustomerId) {
     [order.id]
   );
   if (!items.length) return null;
+  const labelFor = (customerId, name, phone) => {
+    if (customerId === actingCustomerId) return 'You';
+    return name || phone || 'a guest';
+  };
   return {
     items: items.map((i) => ({
+      id: i.id,
       productId: i.product_id,
       quantity: i.quantity,
       name: i.name,
       answers: i.answers || {},
       addedBy: i.added_by_customer_id || null,
-      addedByLabel: i.added_by_customer_id === actingCustomerId ? 'You' : (i.added_by_name || 'a guest'),
+      addedByLabel: labelFor(i.added_by_customer_id, i.added_by_name, i.added_by_phone),
     })),
     total: Number(order.total) || 0,
   };
@@ -423,7 +462,7 @@ async function findOpenOrderForSession(session) {
 async function payStatusPayload(order, session, actingCustomerId) {
   const { rows: items } = await pool.query(
     `select oi.id, oi.quantity, oi.price, p.name, oi.added_by_customer_id,
-       coalesce(c.name, c.preferred_name) as added_by_name
+       coalesce(c.name, c.preferred_name) as added_by_name, c.phone_number as added_by_phone
      from order_item oi
        join product p on p.id = oi.product_id
        left join customers c on c.id = oi.added_by_customer_id
@@ -431,7 +470,7 @@ async function payStatusPayload(order, session, actingCustomerId) {
     [order.id]
   );
   const { rows: guestRows } = await pool.query(
-    `select c.id, coalesce(c.name, c.preferred_name) as name
+    `select c.id, coalesce(c.name, c.preferred_name) as name, c.phone_number
      from customers c
      where c.id in (
        select customer_id from table_session_guest where session_id = $1
@@ -439,9 +478,12 @@ async function payStatusPayload(order, session, actingCustomerId) {
      )`,
     [session.id]
   );
-  const nameFor = (id, fallbackName) => {
+  // Chidera, 2026-09-20: "classified by the names of people on the
+  // table... or their number when they dont put a name" -- same as
+  // pendingOrderPayload above.
+  const nameFor = (id, fallbackName, phone) => {
     if (id === actingCustomerId) return 'You';
-    return fallbackName || 'a guest';
+    return fallbackName || phone || 'a guest';
   };
   const { rows: payments } = await pool.query(
     `select id, amount, status, covers_item_ids from order_payment where order_id = $1 order by created_at`,
@@ -463,9 +505,9 @@ async function payStatusPayload(order, session, actingCustomerId) {
       price: Number(i.price),
       quantity: i.quantity,
       addedBy: i.added_by_customer_id,
-      addedByLabel: nameFor(i.added_by_customer_id, i.added_by_name),
+      addedByLabel: nameFor(i.added_by_customer_id, i.added_by_name, i.added_by_phone),
     })),
-    guests: guestRows.map((g) => ({ id: g.id, label: nameFor(g.id, g.name) })),
+    guests: guestRows.map((g) => ({ id: g.id, label: nameFor(g.id, g.name, g.phone_number) })),
     selfId: actingCustomerId,
     payments: payments.map((p) => ({
       id: p.id,

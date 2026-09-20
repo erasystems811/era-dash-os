@@ -135,7 +135,7 @@ function normalizeDashes(text) {
 // `logTag` is our own bookkeeping (message.trigger, any string), separate
 // from bot-engine/send.js's ALLOWED_TRIGGERS, which every real send here
 // satisfies with 'bot_flow_step'.
-async function reply(customer, text, logTag = 'bot_flow_step') {
+export async function reply(customer, text, logTag = 'bot_flow_step') {
   const clean = normalizeDashes(text);
   const sendResult = await botEngine.sendMessage({ trigger: 'bot_flow_step', to: recipientFor(customer), text: clean, whatsappSend: await senderFor(customer) });
   await logMessage({
@@ -1392,7 +1392,7 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
     // regardless, so a customer who ignores the link and just types an
     // answer anyway (handlePendingItemQuestion) still works exactly as
     // before -- the link is the cheaper default, never the only path.
-    const shownLink = await sendWebMenuLink(customer, `${prefix}Just need a couple more details on your order -- tap below to finish up.`, 'Finish my order');
+    const shownLink = await sendWebMenuLink(customer, `${prefix}Just need a couple more details on your order -- tap below to finish up.`, 'Finish my order', null, null, order);
     if (shownLink) return;
     const soFar = await orderSoFarSummary(order);
     await reply(customer, `${prefix}${soFar}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
@@ -1764,7 +1764,7 @@ async function handleCollectFulfilment(customer, order, text) {
     // link and just types an answer anyway still works exactly as before
     // (the `text !== null` block above this one is untouched) -- this is
     // the cheaper default, never the only path.
-    const shownLink = await sendWebMenuLink(customer, 'Just need your delivery/pickup details -- tap below to finish up.', 'Finish my order');
+    const shownLink = await sendWebMenuLink(customer, 'Just need your delivery/pickup details -- tap below to finish up.', 'Finish my order', null, null, order);
     if (shownLink) return;
     const fields = await loadBotFields();
     const nextField = fields.find((f) => f.key === stillOutstanding[0]);
@@ -2359,6 +2359,20 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
 
 async function handleOrderModification(customer, order, mods) {
   const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
+  // Captured BEFORE applyOrderModifications, whose own resetServedForAddOn
+  // call resets served_at to null as a side effect -- Chidera, 2026-09-20:
+  // "when the customer add something in dine in after theyve been served
+  // the first one, dont send the whole menu to the customer again, just
+  // send the add on to the staff and just top up." Dine-in never sets
+  // payment_status to confirmed/accepted until it's actually marked paid
+  // post-serving (payment happens AFTER eating, not before) -- so `paid`
+  // above is always false for a served-but-unpaid table, and this used to
+  // fall all the way through to the same full "Got it, your order: [the
+  // WHOLE running bill] New total... confirm?" re-ask every other pre-
+  // payment edit gets, even though staff already got the real, actionable
+  // alert (resetServedForAddOn's own). Same short top-up acknowledgment
+  // as the web-menu review route now sends for the identical case.
+  const wasServed = order.channel === 'dinein' && Boolean(order.served_at);
 
   if (paid && (mods.removes.length || mods.sets.length)) {
     // A change/removal after payment needs a real person -- Chidera
@@ -2378,6 +2392,16 @@ async function handleOrderModification(customer, order, mods) {
 
   if (paid) {
     await sendTopupInvoice(customer, order, mods.adds, addedValue);
+    return;
+  }
+
+  // Pure addition only -- a removal or change alongside it is a rarer,
+  // more substantial edit that still deserves the fuller read-back below,
+  // not folded into a quick "added on" note that would silently skip
+  // over what was taken off.
+  if (wasServed && mods.adds.length && !mods.removes.length && !mods.sets.length) {
+    const addedLines = mods.adds.map((i) => `${i.quantity}x ${i.name}`).join('\n');
+    await reply(customer, `Got it, added on:\n${addedLines}\n\nYour table's total is now NGN ${total}.`);
     return;
   }
 
@@ -3883,8 +3907,41 @@ async function menuGreetingBody() {
   return `Hello! Welcome to ${businessName},\n\nHere's our menu, take a look and pick what you like.`;
 }
 
-async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null, headerImageUrl = null) {
+// order -- optional, and the fix for a real gap found live, 2026-09-20,
+// Chidera: "i tapped the finish my order to add, i saw an empty cart."
+// Every caller here used to build /m/<this customer's own token> no
+// matter what order it was actually about -- fine for a normal order
+// (order.customer_id IS this customer), but wrong for a joint dine-in
+// order (Stage 1): order.customer_id is always the table's ORIGINAL
+// scanner, never whichever guest is currently mid-conversation, so
+// routes/menu-page.js's pendingOrderPayload(customer.id) found nothing
+// for any other guest -- a real, correctly-answered item question landed
+// on a page showing an empty basket. Passing the order here (when the
+// caller has one) routes a dine-in order to its own /t/:qrToken page
+// instead, with THIS guest's own ?g= token -- the one page that already
+// resolves the shared order by session, not by whose customer_id happens
+// to be on it (see routes/dinein-menu.js's resolveActingCustomer).
+async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null, headerImageUrl = null, order = null) {
   if (!process.env.PUBLIC_URL) return false;
+  if (order?.channel === 'dinein' && order.table_id) {
+    const { rows } = await pool.query('select qr_token from restaurant_table where id = $1', [order.table_id]);
+    const qrToken = rows[0]?.qr_token;
+    if (qrToken) {
+      const guestToken = await ensureMenuToken(customer);
+      const params = new URLSearchParams({ g: guestToken });
+      if (category) params.set('cat', category);
+      const dineinUrl = `${process.env.PUBLIC_URL}/t/${qrToken}?${params.toString()}`;
+      const dineinCredentials = await getWhatsAppCredentials(customer.branch_id);
+      try {
+        await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, dineinUrl, dineinCredentials, headerImageUrl || (await businessCoverPhotoUrl()));
+      } catch (err) {
+        console.error(`sendWebMenuLink (dinein) failed, falling back to text: ${err.message}`);
+        return false;
+      }
+      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${dineinUrl}]`, trigger: 'menu_shown', processed: true });
+      return true;
+    }
+  }
   const token = await ensureMenuToken(customer);
   const url = `${process.env.PUBLIC_URL}/m/${token}${category ? `?cat=${encodeURIComponent(category)}` : ''}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
@@ -3954,7 +4011,16 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
     tableToken = rows[0]?.qr_token || null;
   }
   if (tableToken && process.env.PUBLIC_URL) {
-    const url = `${process.env.PUBLIC_URL}/t/${tableToken}`;
+    // ?g= -- Chidera, 2026-09-20: same empty-cart class of bug as
+    // finishItemsCollection's own "Finish my order" link (see
+    // sendWebMenuLink's comment) -- this link predates the joint dine-in
+    // guest-identity mechanism (Stage 1) and never carried this guest's
+    // own token, so a non-owner guest tapping "No, change it" landed on
+    // the table's shared page resolved back to the ORIGINAL scanner
+    // (resolveActingCustomer's own fallback), seeing that guest's basket
+    // instead of their own.
+    const guestToken = await ensureMenuToken(customer);
+    const url = `${process.env.PUBLIC_URL}/t/${tableToken}?g=${guestToken}`;
     const credentials = await getWhatsAppCredentials(customer.branch_id);
     await sendWhatsAppCtaUrl(recipientFor(customer), message, 'See the menu', url, credentials);
     await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'order_confirm_no', processed: true });
