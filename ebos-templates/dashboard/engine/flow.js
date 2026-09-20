@@ -3279,8 +3279,21 @@ async function handleDineinScan(customer, text) {
   // own tables had a stray leading space in their stored label, which
   // \s+ above strips out of the scanned text but never out of the stored
   // value, so an exact match against the untrimmed label failed forever).
+  //
+  // $1::uuid is null or branch_id = $1 -- Chidera, 2026-09-20, real
+  // report: "why does it still ask me what table am i on" even scanning a
+  // real, correctly-labelled QR. Root cause, confirmed against era-demo's
+  // real data: this was a strict branch_id = $1 match, and
+  // customer.branch_id is null for era-demo's real customers (no
+  // branch_channel mapping to resolve one from -- the exact same class of
+  // bug already fixed today in menuForBranch/resolveMenu). NULL never
+  // equals anything in SQL, so this could never find ANY table for those
+  // customers, no matter how correct their scan was -- every real "Menu
+  // Table 1" landed here and fell straight to "Please, what table are you
+  // at?" This was never a QR-stability problem; the qr_token (and the
+  // label it encodes) were already fixed and correct the whole time.
   const { rows: tableRows } = await pool.query(
-    `select * from restaurant_table where branch_id = $1 and lower(trim(label)) = lower($2) and status = 'active'`,
+    `select * from restaurant_table where ($1::uuid is null or branch_id = $1) and lower(trim(label)) = lower($2) and status = 'active'`,
     [customer.branch_id, label]
   );
   const table = tableRows[0];
