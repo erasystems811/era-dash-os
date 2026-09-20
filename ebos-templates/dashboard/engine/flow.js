@@ -2035,44 +2035,25 @@ async function createSingleOrderPayment(order, customerId) {
   return rows[0];
 }
 
-async function sendPosPaymentChoice(customer, order, amountLabel) {
+// Chidera, 2026-09-20 (a second pass on the same feature): "when pos is
+// selected the whole thing will still be inside the web na, for dine in
+// it can be where the shared order ready to pay lives... make it 'ready
+// to pay? click here'." The Transfer/Card choice itself lives on a real
+// web page now (routes/menu-page.js's own /:token/pay, same shape as
+// dine-in's own pay page), not WhatsApp quick-reply buttons -- this just
+// sends the link into it, same CTA-URL pattern dine-in's own
+// notifyGuestsReadyToPay already uses for its own "Ready to pay" button.
+async function sendPosPaymentChoice(customer, order) {
   await createSingleOrderPayment(order, customer.id);
-  const bodyText = `Your total is NGN ${amountLabel}. How would you like to pay?`;
-  if (customer.channel !== 'whatsapp') {
-    await reply(customer, `${bodyText} Reply "transfer" for our account details, or "card" if you'll tap a card on our POS terminal.`, 'pos_pay_choice');
+  if (!process.env.PUBLIC_URL) {
+    await reply(customer, `Your order is ready to pay. Please ask a staff member for payment details.`, 'pos_pay_choice');
     return;
   }
+  const token = await ensureMenuToken(customer);
+  const url = `${process.env.PUBLIC_URL}/m/${token}/pay`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  const buttons = [
-    { id: 'pos_pay_transfer', title: "I'll transfer" },
-    { id: 'pos_pay_card', title: "I'll tap my card" },
-  ];
-  await sendWhatsAppButtons(recipientFor(customer), bodyText, buttons, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger: 'pos_pay_choice' });
-}
-
-// The reply to whichever of the two buttons above got tapped -- same
-// resolveCustomerOrder fix as every other dispatch-adjacent handler
-// (2026-09-20's JV report), so a dine-in guest's own tap here still finds
-// their real shared order rather than risking the rogue-order bug that
-// started this.
-export async function handlePosPayMethodTap({ phoneNumber, channelId, buttonId, channel = 'whatsapp', branchId }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${buttonId}]`, processed: true });
-  const order = await resolveCustomerOrder(customer);
-  // A stale tap -- the order's since moved on/gone, or already paid
-  // another way -- nothing to do.
-  if (!order) return;
-  if (buttonId === 'pos_pay_transfer') {
-    const config = await getPaymentConfig();
-    const hasTransferDetails = config?.transfer_account_number && config?.transfer_account_name && config?.transfer_bank_name;
-    const text = hasTransferDetails
-      ? `Please transfer to:\n\nBank: ${config.transfer_bank_name}\nAccount number: ${config.transfer_account_number}\nAccount name: ${config.transfer_account_name}\n\nWe'll confirm automatically once it clears, no need to send proof.`
-      : `Sorry, transfer details aren't set up yet, please ask a staff member.`;
-    await reply(customer, text, 'pos_pay_transfer_details');
-  } else if (buttonId === 'pos_pay_card') {
-    await reply(customer, `Please tap your card on our POS terminal. We'll confirm automatically the moment it clears.`, 'pos_pay_card_instructions');
-  }
+  await sendWhatsAppCtaUrl(recipientFor(customer), 'Ready to pay?', 'Click here', url, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice' });
 }
 
 async function buildPayLine(order, customer, { amount, amountLabel }) {
@@ -2175,7 +2156,7 @@ export async function sendPaymentInstructions(customer, order) {
     // buttons message -- sent separately, same multi-message shape the
     // invoice PDF + payment link already use today.
     await reply(customer, invoiceLine);
-    await sendPosPaymentChoice(customer, order, `${total}${deliveryFeeLine}`);
+    await sendPosPaymentChoice(customer, order);
     return;
   }
   if (paymentUrl) {

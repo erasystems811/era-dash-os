@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, handlePosPayMethodTap, retryFailedSendAsTemplate, handleStaffCommand } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, retryFailedSendAsTemplate, handleStaffCommand } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -169,12 +169,6 @@ router.post('/', async (req, res) => {
               // button's own title works for both Yes and No here, same
               // "real text pipeline" reasoning as fulfilment_delivery above.
               await handleInboundMessage({ phoneNumber: message.from, text: buttonTitle, channel: 'whatsapp', messageId: message.id, branchId });
-            } else if (buttonId === 'pos_pay_transfer' || buttonId === 'pos_pay_card') {
-              // flow.js's sendPosPaymentChoice -- 2026-09-20, "i want them
-              // to be able to pick transfer or card." Handled directly
-              // (not the normal text pipeline) since the reply is fixed
-              // instructions, not something needing AI extraction.
-              await handlePosPayMethodTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
             }
             continue;
           }

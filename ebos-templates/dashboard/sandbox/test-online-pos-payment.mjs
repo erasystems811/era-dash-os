@@ -3,19 +3,21 @@
 // auto confirm payment...i need pos to work now for both online and in
 // house" -- dine-in's own Stage 3 (order_payment + matchPosTransactionToPayment)
 // was already real and tested (sandbox/test-dinein-pos-payment.mjs); this
-// confirms the SAME mechanism now works for a normal online order too:
-// buildPayLine's new 'pos' branch sends a real Transfer/Card button choice
-// (not Paystack, not the generic bank-details fallback) once Settings'
-// payment_config.provider is 'pos', a tap on either button gets the right
-// reply, and a matching Moniepoint transaction auto-confirms the payment
-// AND moves the order into 'fulfilment' (kitchen preparing) -- NOT
-// straight to 'completed' the way dine-in's own confirmOrderPayment
+// confirms the SAME mechanism now works for a normal online order too.
+// Chidera corrected the first pass ("when pos is selected the whole thing
+// will still be inside the web na... make it 'ready to pay? click here'")
+// -- the choice itself lives on a real web page (routes/menu-page.js's
+// /:token/pay), reached by a plain CTA-URL link, not WhatsApp quick-reply
+// buttons. A matching Moniepoint transaction still auto-confirms the
+// payment AND moves the order into 'fulfilment' (kitchen preparing) --
+// NOT straight to 'completed' the way dine-in's own confirmOrderPayment
 // branch does, since an online order is only just STARTING once it's
 // paid, unlike a table that's already eaten.
 process.env.EBOS_TEST_PGLITE = '1';
 process.env.EBOS_SANDBOX = '1';
 process.env.PORT = '3928';
 process.env.SESSION_SECRET = 'testsecret';
+process.env.PUBLIC_URL = 'http://localhost:3928';
 process.env.EBOS_ADMIN_TOKEN = 'testadmin';
 
 const BASE = 'http://localhost:3928';
@@ -81,8 +83,8 @@ async function main() {
     `select body, trigger from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`,
     [customer.id]
   );
-  assert(choiceMsg[0]?.trigger === 'pos_pay_choice', 'POS provider sends the real Transfer/Card choice, not a Paystack link or bank details');
-  assert(choiceMsg[0]?.body?.includes('How would you like to pay'), 'the choice message actually asks how they want to pay');
+  assert(choiceMsg[0]?.trigger === 'pos_pay_choice', 'POS provider sends the real "Ready to pay" link, not a Paystack link or bank details');
+  assert(choiceMsg[0]?.body?.includes('[pay link sent:'), 'the message actually carries a real pay-page link');
 
   const { rows: paymentRows } = await pool.query(`select * from order_payment where order_id = $1`, [order.id]);
   assert(paymentRows.length === 1, 'exactly one order_payment row created for the whole order');
@@ -90,12 +92,17 @@ async function main() {
   assert(Number(paymentRows[0].amount) === total, 'amount matches the order total');
   assert(paymentRows[0].status === 'pending', 'starts pending, not auto-confirmed');
 
-  await flow.handlePosPayMethodTap({ phoneNumber: '2348012341111', channelId: '2348012341111', buttonId: 'pos_pay_transfer', channel: 'whatsapp' });
-  const { rows: transferMsg } = await pool.query(
-    `select body from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`,
-    [customer.id]
-  );
-  assert(transferMsg[0]?.body?.includes('1234567890') && transferMsg[0]?.body?.includes('Moniepoint MFB'), 'tapping Transfer gives the real account details from Settings');
+  const { rows: tokenRows } = await pool.query(`select menu_token from customers where id = $1`, [customer.id]);
+  const token = tokenRows[0].menu_token;
+  const payPageRes = await fetch(`${BASE}/m/${token}/pay`);
+  const payPageHtml = await payPageRes.text();
+  assert(payPageRes.status === 200, 'the real pay page loads');
+  assert(payPageHtml.includes(Number(total).toLocaleString()), 'shows the real amount owed');
+  assert(payPageHtml.includes('1234567890') && payPageHtml.includes('Moniepoint MFB'), 'carries the real transfer details from Settings, ready for the customer to reveal by tapping Transfer');
+  assert(payPageHtml.includes('Tap card'), 'the Card option is offered too');
+
+  const statusBefore = await (await fetch(`${BASE}/m/${token}/pay/status`)).json();
+  assert(statusBefore.confirmed === false, 'not confirmed yet before any real POS transaction arrives');
 
   const webhookRes = await postMoniepointWebhook(total, 'MP-ONLINE-1');
   assert(webhookRes.status === 200, 'Moniepoint webhook accepted');
@@ -108,6 +115,9 @@ async function main() {
   assert(reloadedOrder[0].engine_state === 'fulfilment', 'order moves to fulfilment (kitchen preparing), same as a Paystack/proof confirm would');
   assert(reloadedOrder[0].status === 'preparation', 'status also reflects preparation, not completed');
   assert(reloadedOrder[0].completed_at === null, 'never silently marked completed -- that\'s dine-in-only behaviour, an online order still has delivery/pickup ahead of it');
+
+  const statusAfter = await (await fetch(`${BASE}/m/${token}/pay/status`)).json();
+  assert(statusAfter.confirmed === true, 'the pay page itself now reports confirmed, so the customer sees "Payment confirmed" without refreshing manually');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

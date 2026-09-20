@@ -6,11 +6,12 @@
 // table here -- public, no login, mounted at /m in server.js.
 import express from 'express';
 import { pool } from '../lib/db.js';
-import { renderMenuPage } from '../engine/menu-page-template.js';
+import { renderMenuPage, renderSingleOrderPayPage } from '../engine/menu-page-template.js';
 import { menuForBranch, resolveMenuBranding, resolveWaNumber } from './dinein-menu.js';
 import { handleWebMenuOrder, getOpenOrder } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { estimateFeeForAddress } from '../engine/delivery.js';
+import { getPaymentConfig } from '../engine/payment.js';
 
 export const router = express.Router();
 
@@ -210,4 +211,57 @@ router.get('/:token', async (req, res) => {
       initialCategory: req.query.cat || null,
     })
   );
+});
+
+// Chidera, 2026-09-20: "when pos is selected the whole thing will still be
+// inside the web na, for dine in it can be where the shared order ready to
+// pay lives... make it 'ready to pay? click here'." flow.js's
+// sendPosPaymentChoice sends a link straight here instead of WhatsApp
+// quick-reply buttons -- one customer, the whole order, no guest-selection
+// step (unlike dine-in's own /pay, which is genuinely per-table/joint).
+async function findPayment(order) {
+  const { rows } = await pool.query(
+    `select * from order_payment where order_id = $1 and covers_item_ids is null order by created_at desc limit 1`,
+    [order.id]
+  );
+  return rows[0] || null;
+}
+
+router.get('/:token/pay', async (req, res) => {
+  const customer = await resolveCustomer(req.params.token);
+  if (!customer) return res.status(404).send('Link not found.');
+  const { rows: bizRows } = await pool.query('select name from business limit 1');
+  const order = await getOpenOrder(customer.id);
+  const payment = order ? await findPayment(order) : null;
+  const paymentConfig = await getPaymentConfig();
+  const posTransfer =
+    paymentConfig?.provider === 'pos' && paymentConfig.transfer_account_number && paymentConfig.transfer_account_name && paymentConfig.transfer_bank_name
+      ? {
+          accountNumber: paymentConfig.transfer_account_number,
+          accountName: paymentConfig.transfer_account_name,
+          bankName: paymentConfig.transfer_bank_name,
+        }
+      : null;
+  res.set('Content-Type', 'text/html').send(
+    renderSingleOrderPayPage({
+      businessName: bizRows[0]?.name || '',
+      amount: payment ? Number(payment.amount) : Number(order?.total || 0),
+      confirmed: payment?.status === 'confirmed',
+      posTransfer,
+      statusPath: `/m/${req.params.token}/pay/status`,
+    })
+  );
+});
+
+router.get('/:token/pay/status', async (req, res) => {
+  const customer = await resolveCustomer(req.params.token);
+  if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  const order = await getOpenOrder(customer.id);
+  // No open order left for this customer any more -- either paid and
+  // moved on (getOpenOrder still returns a non-completed order right
+  // through 'fulfilment', so this really means gone/cancelled) or nothing
+  // ever existed -- either way, nothing left to poll for.
+  if (!order) return res.json({ confirmed: true });
+  const payment = await findPayment(order);
+  res.json({ confirmed: payment?.status === 'confirmed' });
 });
