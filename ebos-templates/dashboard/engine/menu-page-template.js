@@ -408,12 +408,43 @@ function openQuestionSheet(productId, editingKey) {
   if (!p) return;
   const existingAnswers = (editingKey && basket[editingKey] && basket[editingKey].answers) || {};
   document.getElementById('qSheetTitle').textContent = p.name;
-  document.getElementById('qSheetBody').innerHTML = p.questions.map((q, i) =>
-    '<div style="margin-bottom:12px">' +
-    '<label style="display:block;font-size:13px;color:var(--mid);margin-bottom:4px">' + q.question + '</label>' +
-    '<input data-qid="' + q.id + '" value="' + escapeAttr(existingAnswers[q.id]) + '" style="width:100%;padding:10px;border-radius:8px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box">' +
-    '</div>'
-  ).join('');
+  // Chidera, 2026-09-20: "should not be a text thing they should pick
+  // from dropdown and still be able to write extra note(optional), so it
+  // can be faster" -- a question with real options (set in Catalogue) now
+  // gets a select plus a separate optional note field instead of one
+  // free-text box; a question with none keeps the exact same free-text
+  // input it always had. The stored answer is still just one plain
+  // string either way (order_item_answer.answer) -- "Cold (extra ice)"
+  // when a note was added, just the picked option when it wasn't.
+  document.getElementById('qSheetBody').innerHTML = p.questions.map(function (q) {
+    const existing = existingAnswers[q.id] || '';
+    if (q.options && q.options.length) {
+      // Best-effort split of a previously-saved "Option (note)" back into
+      // its two fields when reopening an already-answered line -- a
+      // stored answer that doesn't match this shape (e.g. saved back when
+      // this question had no options yet) just leaves the note blank and
+      // the dropdown unselected rather than guessing wrong.
+      let selected = '';
+      let note = '';
+      const match = q.options.find(function (opt) { return existing === opt || existing.indexOf(opt + ' (') === 0; });
+      if (match) {
+        selected = match;
+        note = existing.length > match.length ? existing.slice(match.length + 2, -1) : '';
+      }
+      const optionsHtml = '<option value="">Choose...</option>' + q.options.map(function (opt) {
+        return '<option value="' + escapeAttr(opt) + '"' + (opt === selected ? ' selected' : '') + '>' + opt + '</option>';
+      }).join('');
+      return '<div style="margin-bottom:12px">' +
+        '<label style="display:block;font-size:13px;color:var(--mid);margin-bottom:4px">' + q.question + '</label>' +
+        '<select data-qid="' + q.id + '" style="width:100%;padding:10px;border-radius:8px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box;margin-bottom:6px">' + optionsHtml + '</select>' +
+        '<input data-note-qid="' + q.id + '" value="' + escapeAttr(note) + '" placeholder="Extra note (optional)" style="width:100%;padding:10px;border-radius:8px;border:1px solid #E4DCCF;font-size:14px;box-sizing:border-box">' +
+        '</div>';
+    }
+    return '<div style="margin-bottom:12px">' +
+      '<label style="display:block;font-size:13px;color:var(--mid);margin-bottom:4px">' + q.question + '</label>' +
+      '<input data-qid="' + q.id + '" value="' + escapeAttr(existing) + '" style="width:100%;padding:10px;border-radius:8px;border:1px solid #E4DCCF;font-size:15px;box-sizing:border-box">' +
+      '</div>';
+  }).join('');
   document.getElementById('backdrop').hidden = false;
   document.getElementById('qSheet').hidden = false;
 }
@@ -426,12 +457,14 @@ function closeQuestionSheet() {
 document.getElementById('qSheetClose').onclick = closeQuestionSheet;
 document.getElementById('qSheetAdd').onclick = () => {
   if (!qSheetProductId) return;
-  const inputs = document.querySelectorAll('#qSheetBody input');
+  const fields = document.querySelectorAll('#qSheetBody [data-qid]');
   const answers = {};
-  for (const inp of inputs) {
-    const val = inp.value.trim();
-    if (!val) { inp.focus(); return; } // every question needs an answer before adding, same as the bot would insist on in chat
-    answers[inp.dataset.qid] = val;
+  for (const field of fields) {
+    const val = field.value.trim();
+    if (!val) { field.focus(); return; } // every question needs an answer before adding, same as the bot would insist on in chat
+    const noteField = document.querySelector('[data-note-qid="' + field.dataset.qid + '"]');
+    const note = noteField ? noteField.value.trim() : '';
+    answers[field.dataset.qid] = note ? (val + ' (' + note + ')') : val;
   }
   if (qSheetEditingKey) {
     const existing = basket[qSheetEditingKey];

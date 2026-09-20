@@ -554,6 +554,13 @@ create table if not exists product_question (
   product_id uuid not null references product(id) on delete cascade,
   question text not null,
   position integer not null default 0,
+  -- Nullable -- a question with no options defined keeps the exact same
+  -- free-text input on the web menu page it always had; only a question a
+  -- business has actually given real choices to gets the faster dropdown-
+  -- plus-optional-note UI. Chidera, 2026-09-20: "should not be a text
+  -- thing they should pick from dropdown and still be able to write extra
+  -- note(optional), so it can be faster." (migrations/0049)
+  options text[],
   created_at timestamptz not null default now()
 );
 create index if not exists product_question_product_idx on product_question (product_id);

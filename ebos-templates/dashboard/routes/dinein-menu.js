@@ -96,7 +96,7 @@ export async function menuForBranch(branchId) {
   const { rows } = await pool.query(
     `select p.id, p.name, p.description, p.price, p.category, p.image_data_url, p.availability,
        coalesce(
-         (select json_agg(json_build_object('id', pq.id, 'question', pq.question) order by pq.position, pq.created_at)
+         (select json_agg(json_build_object('id', pq.id, 'question', pq.question, 'options', pq.options) order by pq.position, pq.created_at)
           from product_question pq where pq.product_id = p.id),
          '[]'
        ) as questions

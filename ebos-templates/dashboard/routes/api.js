@@ -1456,13 +1456,21 @@ router.get('/catalogue/:id/questions', async (req, res) => {
   res.json(rows);
 });
 
+// options: Chidera, 2026-09-20: "should not be a text thing they should
+// pick from dropdown ... so it can be faster" -- optional; a staff member
+// leaving it blank keeps the exact same free-text question it always was.
+// Trimmed and empties dropped so a stray blank row typed in the Catalogue
+// UI never becomes a real, selectable dropdown option.
 router.post('/catalogue/:id/questions', requireStaffApi, async (req, res) => {
   const question = (req.body?.question || '').trim();
   if (!question) return res.status(400).json({ error: 'A question is required.' });
+  const options = Array.isArray(req.body?.options)
+    ? req.body.options.map((o) => String(o).trim()).filter(Boolean)
+    : [];
   const { rows: existing } = await pool.query('select coalesce(max(position), -1) as max_position from product_question where product_id = $1', [req.params.id]);
   const { rows } = await pool.query(
-    'insert into product_question (product_id, question, position) values ($1, $2, $3) returning *',
-    [req.params.id, question, existing[0].max_position + 1]
+    'insert into product_question (product_id, question, options, position) values ($1, $2, $3, $4) returning *',
+    [req.params.id, question, options.length ? options : null, existing[0].max_position + 1]
   );
   res.status(201).json(rows[0]);
 });
