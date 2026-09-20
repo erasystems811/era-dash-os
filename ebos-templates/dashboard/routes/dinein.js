@@ -134,10 +134,27 @@ router.post('/tables/:id/regenerate-qr', requireEditorApi, async (req, res) => {
 // yet for this order. "Served" (POST /orders/:id/served below) is the only
 // way out of this list; "paid" is a second, separate step (see
 // /orders/serving below), not the same click.
+// itemsWithServedDiff -- Chidera, 2026-09-20: "on the staff card let
+// there be a clear demarcation for add on, so they know what has been
+// served and what has just been added on." Diffs each item's CURRENT
+// quantity against served_item_snapshot (captured the moment "Served"
+// was last tapped, see POST /orders/:id/served) -- newQty is however
+// much of this line's quantity wasn't there yet at that moment. A brand-
+// new order (snapshot never taken) shows everything as new, correctly --
+// nothing's been served at all yet.
+function itemsWithServedDiff(order) {
+  const snapshot = order.served_item_snapshot || {};
+  return (order.items || []).map((item) => {
+    const alreadyServed = Number(snapshot[item.product_id] || 0);
+    const newQty = Math.max(0, item.quantity - alreadyServed);
+    return { ...item, newQty };
+  });
+}
+
 router.get('/orders/pending', async (req, res) => {
   const { rows } = await pool.query(
     `select o.*, rt.label as table_label,
-            (select coalesce(json_agg(json_build_object('name', p.name, 'quantity', oi.quantity)), '[]')
+            (select coalesce(json_agg(json_build_object('name', p.name, 'product_id', oi.product_id, 'quantity', oi.quantity)), '[]')
              from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
      from "order" o
      join restaurant_table rt on rt.id = o.table_id
@@ -146,7 +163,7 @@ router.get('/orders/pending', async (req, res) => {
      order by o.created_at asc`,
     [req.branchId]
   );
-  res.json(rows);
+  res.json(rows.map((o) => ({ ...o, items: itemsWithServedDiff(o) })));
 });
 
 // Pipeline two -- served, still owed. "Mark paid" is the existing POST
@@ -156,7 +173,7 @@ router.get('/orders/pending', async (req, res) => {
 router.get('/orders/serving', async (req, res) => {
   const { rows } = await pool.query(
     `select o.*, rt.label as table_label,
-            (select coalesce(json_agg(json_build_object('name', p.name, 'quantity', oi.quantity)), '[]')
+            (select coalesce(json_agg(json_build_object('name', p.name, 'product_id', oi.product_id, 'quantity', oi.quantity)), '[]')
              from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
      from "order" o
      join restaurant_table rt on rt.id = o.table_id
@@ -165,7 +182,7 @@ router.get('/orders/serving', async (req, res) => {
      order by o.served_at asc`,
     [req.branchId]
   );
-  res.json(rows);
+  res.json(rows.map((o) => ({ ...o, items: itemsWithServedDiff(o) })));
 });
 
 // The only way an order leaves pipeline one -- sets served_at, nothing
@@ -174,9 +191,20 @@ router.get('/orders/serving', async (req, res) => {
 // to null if more items get added afterward, so an order can cycle through
 // here more than once in the same sitting.
 router.post('/orders/:id/served', async (req, res) => {
-  const { rows } = await pool.query(
-    `update "order" set served_at = now() where id = $1 and channel = 'dinein' returning *`,
+  // served_item_snapshot -- Chidera, 2026-09-20: "on the staff card let
+  // there be a clear demarcation for add on, so they know what has been
+  // served and what has just been added on." Captured in the same
+  // request as served_at itself so the two facts can never drift apart
+  // -- {productId: quantity} as it stands right now, the thing the
+  // kanban card's own items diff against to know what's new.
+  const { rows: snapshotRows } = await pool.query(
+    `select product_id, sum(quantity) as quantity from order_item where order_id = $1 group by product_id`,
     [req.params.id]
+  );
+  const snapshot = Object.fromEntries(snapshotRows.map((r) => [r.product_id, Number(r.quantity)]));
+  const { rows } = await pool.query(
+    `update "order" set served_at = now(), served_item_snapshot = $2 where id = $1 and channel = 'dinein' returning *`,
+    [req.params.id, JSON.stringify(snapshot)]
   );
   if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
   res.json(rows[0]);

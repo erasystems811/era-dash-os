@@ -968,6 +968,26 @@ label {
   color: var(--text);
   min-width: 16px;
 }
+/* Chidera, 2026-09-20: "on the staff card let there be a clear
+   demarcation for add on, so they know what has been served and what
+   has just been added on." newBadge marks a whole line just added;
+   newPart calls out the freshly-added portion of a line that's a mix of
+   already-served + new quantity (e.g. 2 already out, 3 more just
+   ordered) -- both read at a glance against the rest of the plain list. */
+.docket ul li .new-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: var(--warn);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 4px;
+}
+.docket ul li .new-part {
+  color: var(--warn);
+  font-weight: 600;
+}
 .docket .foot {
   display: flex;
   align-items: center;

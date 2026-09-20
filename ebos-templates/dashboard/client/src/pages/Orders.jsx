@@ -446,14 +446,28 @@ export default function Orders() {
                     </div>
                     {o.items?.length > 0 && (
                       <ul>
-                        {o.items.map((item, i) => (
-                          <li key={i}>
-                            <b>{item.quantity}</b> {item.name}
-                            {item.answers?.length > 0 && (
-                              <span className="hint"> ({item.answers.map((a) => a.answer).join(', ')})</span>
-                            )}
-                          </li>
-                        ))}
+                        {o.items.map((item, i) => {
+                          // newQty -- Chidera, 2026-09-20: "on the staff
+                          // card let there be a clear demarcation for
+                          // add on." Same diff InHouse.jsx's own dine-in
+                          // board shows -- this is the same data, just a
+                          // second surface for it (Orders.jsx's own In
+                          // House tab).
+                          const newQty = item.newQty || 0;
+                          return (
+                            <li key={i}>
+                              <b>{item.quantity}</b> {item.name}
+                              {item.answers?.length > 0 && (
+                                <span className="hint"> ({item.answers.map((a) => a.answer).join(', ')})</span>
+                              )}
+                              {newQty === item.quantity ? (
+                                <span className="new-badge">NEW</span>
+                              ) : newQty > 0 ? (
+                                <span className="new-part"> ({newQty} new)</span>
+                              ) : null}
+                            </li>
+                          );
+                        })}
                       </ul>
                     )}
                     <div className="foot">

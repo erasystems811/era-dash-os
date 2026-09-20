@@ -1172,6 +1172,16 @@ alter table "order" add column if not exists payment_mode text not null default 
 -- from marking served so there should be 2 piplines."
 alter table "order" add column if not exists served_at timestamptz;
 
+-- 0053, Chidera 2026-09-20: "on the staff card let there be a clear
+-- demarcation for add on, so they know what has been served and what has
+-- just been added on." A snapshot of {product_id: quantity} taken the
+-- moment served_at above is last set -- order_item has no stable row
+-- identity across a resubmit (the web review route deletes and
+-- reinserts every line each time), so this is a pure diff-against-
+-- current-quantities signal instead, correct regardless of how an
+-- add-on actually got added (web or chat).
+alter table "order" add column if not exists served_item_snapshot jsonb;
+
 -- ---------------------------------------------------------------------------
 -- Folded in from migrations/0042-0048 (never added to this file at the
 -- time -- create-client.mjs seeds a brand-new client from this file
