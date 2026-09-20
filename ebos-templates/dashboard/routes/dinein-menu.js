@@ -270,6 +270,23 @@ router.post('/:qrToken/review', async (req, res) => {
   for (const item of resolved) afterQty.set(item.productId, (afterQty.get(item.productId) || 0) + item.quantity);
   const anyRemoved = [...beforeQty.entries()].some(([productId, qty]) => (afterQty.get(productId) || 0) < qty);
 
+  // Chidera, 2026-09-20, real report: "i went to type cold for water it is
+  // refusing to click the place order button" -- reproduced live: an item
+  // added with a question still outstanding (an upsell, say) leaves
+  // order.pending_question_order_item_id pointing at that row. Answering
+  // it through THIS page's own question sheet is purely client-side
+  // (menu-page-template.js's qSheetAdd never calls the server at all), so
+  // that column was still set the moment "Place order" submitted the
+  // whole basket here -- the delete below then hit its own real foreign
+  // key (order_pending_question_order_item_id_fkey) on every row, no
+  // exception handling on this route at all, so the request just hung
+  // with no response ever sent, reading as a dead button rather than a
+  // clean error. Every item is about to be replaced anyway, so any
+  // pending-question pointer is stale regardless of which row it named --
+  // same reasoning as clearPendingQuestionIfOnItem's own single-item case
+  // (flow.js), just unconditional here since the whole basket is turning
+  // over.
+  await pool.query('update "order" set pending_question_order_item_id = null, pending_question_id = null where id = $1', [order.id]);
   await pool.query('delete from order_item where order_id = $1', [order.id]);
   for (const item of resolved) {
     const { rows: itemRows } = await pool.query(

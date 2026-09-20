@@ -1046,7 +1046,7 @@ async function fieldPrompt(fieldKey, fallbackQuestion, branchId) {
   return fallbackQuestion || `Sorry, can you tell me the ${fieldKey}?`;
 }
 
-async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
+export async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
   // Computed once, reused for whatever reply actually ends up going out
   // below -- a message can both state an order AND ask something ("can I
   // have fried rice, how much is suya wrap"), and the question was
@@ -1157,7 +1157,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         return;
       }
       for (const m of matched) {
-        await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, m.productId, m.quantity, m.price]);
+        await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, m.productId, m.quantity, m.price, customer.id]);
       }
       // Named a real item straight away, first try -- still worth showing
       // the full menu once (see the comment on menuAlreadyShown above):
@@ -1538,7 +1538,7 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
 //    decline still moves on exactly as before; only a real yes-but-which
 //    re-asks, and only once (the offer's already marked offered, so it
 //    can't loop forever even if they keep answering vaguely).
-async function handlePendingUpsell(customer, order, text) {
+export async function handlePendingUpsell(customer, order, text) {
   const { rows: currentItems } = await pool.query(
     `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [order.id]
@@ -1620,7 +1620,15 @@ export async function handleUpsellListTap({ phoneNumber, channelId, rowId, chann
   const product = await productForRowId(picked);
   if (!product) return finishItemsCollection(customer, order, '');
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${product.name}]`, processed: true });
-  await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, 1, $3)', [order.id, product.id, product.price]);
+  // added_by_customer_id -- Chidera, 2026-09-20, real report ("water is
+  // still categorized as guest"): a THIRD parallel insert for an upsell-
+  // added item, missed by the earlier "guest-chicken" fix -- that pass
+  // covered applyOrderModifications' own insert and handlePendingUpsell's
+  // typed-match insert, but this one (a tap on the upsell's own WhatsApp
+  // LIST message -- the default, zero-AI-cost way most customers actually
+  // accept an upsell) has always had its own separate insert that never
+  // set it.
+  await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, 1, $3, $4)', [order.id, product.id, product.price, customer.id]);
   return finishItemsCollection(customer, order, `Added ${product.name}. `);
 }
 
@@ -4521,7 +4529,10 @@ export async function handleMenuItemTap({ phoneNumber, channelId, product, chann
     order.pending_upsell_category = null;
     await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
   }
-  await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+  // added_by_customer_id -- same class of gap as handleUpsellListTap's own
+  // insert (Chidera, 2026-09-20: "water is still categorized as guest"),
+  // this time for a WhatsApp catalog product tap rather than an upsell tap.
+  await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, item.productId, item.quantity, item.price, customer.id]);
   await finishItemsCollection(customer, order, `Added ${product.name}. `);
 }
 
