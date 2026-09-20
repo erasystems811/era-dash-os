@@ -1980,20 +1980,31 @@ router.delete('/customers/:id', requireEditorApi, async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Not found.' });
     }
-    // Chidera, 2026-09-20: real bug, found from a real report ("i tried to
-    // delete the conversation... it didn't delete") -- table_session used
-    // to be deleted here BEFORE "order", but order.session_id/table_id
-    // (schema.sql) reference table_session/restaurant_table with NO
-    // cascade. Any customer with even one dine-in order still referencing
-    // that session hit a foreign-key violation the instant table_session
-    // was removed out from under it, rolling back the whole delete with
-    // nothing actually gone -- exactly what a real dine-in customer's
-    // delete attempt would always do. order now goes first; table_session
-    // (which nothing else here still points at once order is gone) after.
+    // Chidera, 2026-09-20: three real FK bugs found from one real customer
+    // ("i tried to delete the conversation... it didn't delete"), one at a
+    // time as each fix exposed the next. Same root cause every time: a
+    // dependent table has to be cleared before the row it points at can go,
+    // and several tables here reference table_session/delivery_assignment/
+    // customers with no cascade at all.
+    //   1) table_session used to be deleted BEFORE "order", but
+    //      order.session_id/table_id reference table_session/
+    //      restaurant_table with no cascade -- any customer with even one
+    //      dine-in order hit this instantly. order now goes first;
+    //      table_session (nothing left pointing at it once order is gone)
+    //      moved after.
+    //   2) rider_payout.assignment_id references delivery_assignment with
+    //      no cascade, and this route never touched rider_payout at all.
+    //   3) the retired `feedback` table (dine-in's pre-2026-09-11 rating
+    //      system, replaced by order_feedback but never dropped since its
+    //      existing rows are real history) references table_session AND
+    //      customers directly, neither with a cascade -- only matters for
+    //      a customer with old dine-in history, exactly this one.
+    await client.query(`delete from feedback where customer_id = $1`, [id]);
     await client.query(`delete from waiter_call where session_id in (select id from table_session where customer_id = $1)`, [id]);
     await client.query(`delete from callback_task where customer_id = $1 or call_id in (select id from voice_call where customer_id = $1)`, [id]);
     await client.query(`delete from call_turn where call_id in (select id from voice_call where customer_id = $1)`, [id]);
     await client.query(`delete from voice_call where customer_id = $1`, [id]);
+    await client.query(`delete from rider_payout where assignment_id in (select id from delivery_assignment where order_id in (select id from "order" where customer_id = $1))`, [id]);
     await client.query(`delete from delivery_assignment where order_id in (select id from "order" where customer_id = $1)`, [id]);
     await client.query(`delete from delivery_offer where order_id in (select id from "order" where customer_id = $1)`, [id]);
     await client.query(`delete from booking where customer_id = $1`, [id]);
