@@ -3103,11 +3103,58 @@ async function getDineinConfig() {
   return rows[0] || null;
 }
 
-async function sendDineinWelcome(customer, table) {
+// Joint dine-in, Stage 1 (fancy-whistling-pearl.md): records itself the
+// first time each guest actually interacts with the table -- a scan, or
+// the shared web page loading for them -- rather than a roster anyone has
+// to explicitly join. Exported for routes/dinein-menu.js (the shared page
+// itself) as well as this file's own scan handling below.
+export async function upsertTableGuest(sessionId, customerId) {
+  await pool.query(
+    `insert into table_session_guest (session_id, customer_id) values ($1, $2) on conflict (session_id, customer_id) do nothing`,
+    [sessionId, customerId]
+  );
+}
+
+// The ONE shared order for a table's current sitting, regardless of which
+// guest is asking -- replaces the old getOpenOrder(customerId) on the
+// dine-in web routes, which always resolved back to whoever's customer
+// row the caller happened to pass in, not "the table's order." Order
+// ownership (order.customer_id) still stays the session's own original
+// scanner -- every existing single-customer assumption elsewhere (
+// receipts, feedback requests, the fulfilment status line) keeps working
+// unchanged; only line-level attribution is per-guest (order_item.
+// added_by_customer_id, set by the caller after this returns).
+export async function getOrCreateTableOrder(session, table, customer) {
+  await upsertTableGuest(session.id, customer.id);
+  const { rows } = await pool.query(
+    `select * from "order" where session_id = $1 and status = 'new' order by created_at desc limit 1`,
+    [session.id]
+  );
+  if (rows[0]) return rows[0];
+  const ref = newReference('ORD');
+  const { rows: created } = await pool.query(
+    `insert into "order" (customer_id, reference, branch_id, channel, table_id, session_id, fulfilment_type, payment_mode, engine_state, status)
+     values ($1, $2, $3, 'dinein', $4, $5, 'table', 'at_table', 'collect_info', 'new') returning *`,
+    [session.customer_id, ref, table.branch_id, table.id, session.id]
+  );
+  return created[0];
+}
+
+// joiningActiveTable -- Chidera, joint dine-in concept: "is it possible
+// that when a persons scans a qr for a table let everyone on that table be
+// able to join in and see each other". A guest scanning a table that
+// already has another guest's order open gets told there's something to
+// join, not the same first-timer "what would you like to do" -- their own
+// button taps already resolve into that same shared order either way
+// (currentDineinSession now matches table_session_guest too), this is
+// purely the wording matching what's actually true for them.
+async function sendDineinWelcome(customer, table, { joiningActiveTable = false } = {}) {
   const dinein = await getDineinConfig();
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const biz = bizRows[0];
-  const body = `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
+  const body = joiningActiveTable
+    ? `Welcome to ${biz?.name || 'us'}! Table ${table.label} has an active order -- add to it, or see what's already been ordered.`
+    : `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
   const buttons = [
     { id: 'dinein_menu', title: 'See the menu' },
     { id: 'dinein_specials', title: "Today's specials" },
@@ -3168,11 +3215,25 @@ async function handleDineinScan(customer, text) {
   // open a duplicate (table_session_one_open_idx enforces this at the DB
   // level too, this is just avoiding hitting that constraint at all).
   const { rows: sessionRows } = await pool.query(`select * from table_session where table_id = $1 and closed_at is null`, [table.id]);
-  if (!sessionRows.length) {
-    await pool.query(`insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3)`, [table.id, table.branch_id, customer.id]);
+  let session = sessionRows[0];
+  let joiningActiveTable = false;
+  if (!session) {
+    const { rows: created } = await pool.query(
+      `insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3) returning *`,
+      [table.id, table.branch_id, customer.id]
+    );
+    session = created[0];
+  } else if (session.customer_id !== customer.id) {
+    // A second (or third...) guest scanning the same table's own code,
+    // not the original opener -- joint dine-in, Stage 1. table_session_
+    // guest is what lets currentDineinSession/the shared order page
+    // recognize them from here on, same as the original scanner already
+    // could via session.customer_id.
+    joiningActiveTable = true;
   }
+  await upsertTableGuest(session.id, customer.id);
 
-  await sendDineinWelcome(customer, table);
+  await sendDineinWelcome(customer, table, { joiningActiveTable });
   return true;
 }
 
@@ -3180,11 +3241,19 @@ async function handleDineinScan(customer, text) {
 // customer's own most recent open table_session, not re-parsed from
 // anything in the tap itself (a button tap carries no table info of its
 // own, unlike the scan message).
+//
+// Also matches via table_session_guest, not just ts.customer_id -- Stage 1
+// of the joint dine-in plan (fancy-whistling-pearl.md): a second guest at
+// the same table never opens the session, they join one already open, so
+// ts.customer_id alone (only ever the FIRST scanner) left every other
+// guest's own button taps with "please scan your table's QR code to get
+// started" even though they very much had.
 async function currentDineinSession(customer) {
   const { rows } = await pool.query(
     `select ts.*, rt.label as table_label, rt.qr_token
      from table_session ts join restaurant_table rt on rt.id = ts.table_id
-     where ts.customer_id = $1 and ts.closed_at is null
+     where ts.closed_at is null
+       and (ts.customer_id = $1 or exists (select 1 from table_session_guest g where g.session_id = ts.id and g.customer_id = $1))
      order by ts.opened_at desc limit 1`,
     [customer.id]
   );
@@ -3212,7 +3281,16 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
     return;
   }
   const specialsCategory = buttonId === 'dinein_specials' ? await findSpecialsCategory(customer.branch_id) : null;
-  const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}${specialsCategory ? `?cat=${encodeURIComponent(specialsCategory)}` : ''}`;
+  // g=<menu_token> -- joint dine-in, Stage 1: every guest at the table
+  // gets the SAME qrToken (it identifies the table, not them), so this is
+  // the only thing that lets the shared page tell which guest is actually
+  // looking at it right now -- reuses the existing per-customer menu_token
+  // (ensureMenuToken) rather than inventing a second kind of token.
+  const guestToken = await ensureMenuToken(customer);
+  const params = new URLSearchParams();
+  if (specialsCategory) params.set('cat', specialsCategory);
+  params.set('g', guestToken);
+  const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}?${params.toString()}`;
   const bodyText = buttonId === 'dinein_specials' ? `Here's today's specials for Table ${session.table_label}.` : `Here's our menu for Table ${session.table_label}.`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonId === 'dinein_specials' ? 'See specials' : 'View menu', url, credentials);
@@ -3412,7 +3490,7 @@ async function handlePendingBatch(customer, text) {
 // table). Returns false (no real send) when PUBLIC_URL isn't configured,
 // same "genuinely inert without it" gate every other PUBLIC_URL-dependent
 // send in this file already follows.
-async function ensureMenuToken(customer) {
+export async function ensureMenuToken(customer) {
   if (customer.menu_token) return customer.menu_token;
   const token = randomBytes(12).toString('hex');
   await pool.query('update customers set menu_token = $1 where id = $2', [token, customer.id]);

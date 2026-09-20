@@ -52,7 +52,7 @@
 // (engine/flow.js) never even asks delivery/pickup for one, so asking here
 // too would be a real, unwanted new question. Only routes/menu-page.js
 // (general ordering) passes askFulfilment: true.
-export function renderMenuPage({ reviewPath, birthdayPath, showBirthdayPrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
+export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthdayPrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
   const lightProducts = products.map((p) => ({
     id: p.id,
@@ -221,6 +221,12 @@ const PRODUCTS = ${JSON.stringify(lightProducts)};
 const INITIAL_CATEGORY = ${JSON.stringify(initialCategory || null)};
 const PENDING_ORDER = ${JSON.stringify(pendingOrder)};
 const REVIEW_PATH = ${JSON.stringify(reviewPath)};
+// Joint dine-in, Stage 1: only ever set on the table-scoped page
+// (routes/dinein-menu.js) -- POLL_PATH doubling as the "is this a shared
+// table order" flag instead of a separate boolean, since the two are
+// always the same fact (routes/menu-page.js's own /m/ page never passes
+// either).
+const POLL_PATH = ${JSON.stringify(pollPath || null)};
 const BIRTHDAY_PATH = ${JSON.stringify(birthdayPath || null)};
 const SHOW_BIRTHDAY_PROMPT = ${JSON.stringify(Boolean(showBirthdayPrompt))};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
@@ -244,19 +250,29 @@ let fulfilment = (PENDING_ORDER && PENDING_ORDER.fulfilment) || null;
 // with no questions at all get answers: {} always, so they behave
 // exactly as the single-line-per-product basket did before this existed.
 function lineKey(productId, answers) { return productId + '::' + JSON.stringify(answers || {}); }
-let basket = {}; // key -> { productId, quantity, answers }
-if (PENDING_ORDER && PENDING_ORDER.items) {
-  // A guest reopening this link may already have an order sitting with us
-  // -- pre-load it into the basket (steppers and all) instead of a page
-  // with no memory of it, so adjusting or removing something already
-  // pending is as direct as adding something new. Chidera 2026-09-10:
-  // "how are they aware that the first one is still pending... how can
-  // they remove as well?"
-  PENDING_ORDER.items.forEach(function (i) {
+let basket = {}; // key -> { productId, quantity, answers, addedBy?, addedByLabel? }
+// A guest reopening this link may already have an order sitting with us --
+// pre-load it into the basket (steppers and all) instead of a page with no
+// memory of it, so adjusting or removing something already pending is as
+// direct as adding something new. Chidera 2026-09-10: "how are they aware
+// that the first one is still pending... how can they remove as well?"
+// Pulled out into its own function -- joint dine-in, Stage 1's poll (below)
+// reuses this exact same load, not a second copy of it.
+function loadPendingIntoBasket(pending) {
+  const next = {};
+  (pending && pending.items || []).forEach(function (i) {
     const answers = i.answers || {};
-    basket[lineKey(i.productId, answers)] = { productId: i.productId, quantity: i.quantity, answers: answers };
+    next[lineKey(i.productId, answers)] = { productId: i.productId, quantity: i.quantity, answers: answers, addedBy: i.addedBy || null, addedByLabel: i.addedByLabel || null };
   });
+  return next;
 }
+basket = loadPendingIntoBasket(PENDING_ORDER);
+// Snapshot of the last basket state that actually came FROM the server --
+// joint dine-in, Stage 1's poll only ever overwrites basket when it
+// still matches this (i.e. nothing's been added/changed locally since),
+// so another guest's own not-yet-submitted edits never get silently wiped
+// by this guest's poll picking up what's already been confirmed.
+let lastSyncedBasketJSON = JSON.stringify(basket);
 // Opens straight on the requested category (the "Special offers" button
 // links here with ?cat=) when the catalogue actually has it right now --
 // falls back to the first category exactly as before otherwise, so a
@@ -290,7 +306,11 @@ function changeQty(key, delta, productId, answers) {
   // this used to silently drop them (always fell back to {}), so a
   // question-having item's real answers never actually reached the
   // server even though the basket KEY was already answer-aware.
-  else basket[key] = { productId: productId || (existing && existing.productId), quantity: nextQty, answers: existing ? existing.answers : (answers || {}) };
+  // addedBy/addedByLabel carried over from an existing line (a "+" on
+  // something another guest already added stays theirs, not silently
+  // reattributed) -- dropped entirely for a genuinely new line, since
+  // there's no real attribution yet until the server assigns one on submit.
+  else basket[key] = { productId: productId || (existing && existing.productId), quantity: nextQty, answers: existing ? existing.answers : (answers || {}), addedBy: existing ? existing.addedBy : null, addedByLabel: existing ? existing.addedByLabel : null };
   render();
   updateBasket();
   if (!document.getElementById('sheet').hidden) renderSheet();
@@ -471,7 +491,7 @@ document.getElementById('qSheetAdd').onclick = () => {
     const existing = basket[qSheetEditingKey];
     const key = lineKey(qSheetProductId, answers);
     delete basket[qSheetEditingKey];
-    basket[key] = { productId: qSheetProductId, quantity: existing ? existing.quantity : 1, answers: answers };
+    basket[key] = { productId: qSheetProductId, quantity: existing ? existing.quantity : 1, answers: answers, addedBy: existing ? existing.addedBy : null, addedByLabel: existing ? existing.addedByLabel : null };
     render();
     updateBasket();
     if (!document.getElementById('sheet').hidden) renderSheet();
@@ -602,7 +622,12 @@ function renderSheet() {
     // finish up) gets a clear "needs an answer" callout instead of looking
     // like any other already-settled line -- tapping it reopens its own
     // question sheet, pre-filled with whatever it already has.
-    const label = p.name + (needsAnswer ? ' \\u2014 needs an answer' : (answerText ? ' (' + answerText + ')' : ''));
+    // addedByLabel -- joint dine-in, Stage 1: only ever set on the shared
+    // table page (POLL_PATH), and only for a line that's actually synced
+    // from the server -- a line this guest just added locally shows no tag
+    // at all (it's obviously theirs, nothing to label yet).
+    const addedByText = POLL_PATH && line.addedByLabel ? ' \\u00b7 ' + line.addedByLabel : '';
+    const label = p.name + (needsAnswer ? ' \\u2014 needs an answer' : (answerText ? ' (' + answerText + ')' : '')) + addedByText;
     const rowStyle = needsAnswer ? ' style="color:var(--hot);cursor:pointer"' : '';
     return '<div class="sheetRow"' + (needsAnswer ? ' data-needs-answer-key="' + escapeAttr(key) + '"' : '') + '>' +
       '<span class="nm"' + rowStyle + '>' + label + '</span>' +
@@ -724,7 +749,7 @@ document.getElementById('backdrop').onclick = () => {
 };
 
 async function submitOrder() {
-  const items = Object.values(basket).map(function (l) { return { productId: l.productId, quantity: l.quantity, answers: l.answers || {} }; });
+  const items = Object.values(basket).map(function (l) { return { productId: l.productId, quantity: l.quantity, answers: l.answers || {}, addedBy: l.addedBy || null }; });
   if (!items.length) { document.getElementById('bc').textContent = 'Add something first'; return; }
   // Whichever button is actually visible right now -- the bottom bar for
   // dine-in's own unchanged one-tap flow, the sheet's own Confirm button
@@ -821,6 +846,32 @@ if (SHOW_BIRTHDAY_PROMPT) {
   } else if (PENDING_ORDER && PENDING_ORDER.items && PENDING_ORDER.items.length) {
     openSheet();
   }
+}
+
+// Joint dine-in, Stage 1: "let everyone on that table... see each other."
+// 15s poll (same interval InHouse.jsx/Delivery.jsx already use, no new
+// infra) picking up what OTHER guests have added -- but only applied when
+// this guest's own basket still matches lastSyncedBasketJSON, i.e. they
+// haven't added or changed anything locally since the last sync. A guest
+// mid-add always wins their own screen; the next poll (15s later, likely
+// after they've submitted) picks up cleanly once they're back in sync.
+if (POLL_PATH) {
+  setInterval(async function () {
+    let data;
+    try {
+      const res = await fetch(POLL_PATH);
+      if (!res.ok) return;
+      data = await res.json();
+    } catch (err) {
+      return; // a dropped connection here is silently skipped, same as any other poll -- there's always another one in 15s
+    }
+    if (JSON.stringify(basket) !== lastSyncedBasketJSON) return; // local unsynced edits in progress -- don't clobber them
+    basket = loadPendingIntoBasket(data.pendingOrder);
+    lastSyncedBasketJSON = JSON.stringify(basket);
+    render();
+    updateBasket();
+    if (!document.getElementById('sheet').hidden) renderSheet();
+  }, 15000);
 }
 </script>
 </body></html>`;

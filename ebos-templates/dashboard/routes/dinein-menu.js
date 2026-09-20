@@ -6,7 +6,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage } from '../engine/menu-page-template.js';
-import { getOpenOrder, finishItemsCollection } from '../engine/flow.js';
+import { ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, upsertTableGuest } from '../engine/flow.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
@@ -74,6 +74,26 @@ async function openSessionFor(table) {
   return rows[0] || null;
 }
 
+// Joint dine-in, Stage 1: every guest at a table shares the exact same
+// qrToken (it identifies the TABLE, not them), so it alone can never say
+// which guest is actually looking at the page right now -- ?g= (each
+// guest's own customers.menu_token, embedded per-recipient when flow.js
+// sends their own copy of the menu link) is what does. Falls back to the
+// session's original scanner when ?g= is missing or stale -- an old
+// bookmarked link, or the very first GET before any button tap has ever
+// handed this guest their own ?g= link -- same customer this page always
+// resolved to before this existed, not a new failure mode.
+async function resolveActingCustomer(session, req) {
+  const g = typeof req.query.g === 'string' ? req.query.g : null;
+  if (g) {
+    const { rows } = await pool.query('select * from customers where menu_token = $1', [g]);
+    if (rows[0]) return rows[0];
+  }
+  if (!session?.customer_id) return null;
+  const { rows } = await pool.query('select * from customers where id = $1', [session.customer_id]);
+  return rows[0] || null;
+}
+
 // Own query, not fields.js's resolveMenu -- that one is shaped for AI
 // prompt context (no images, no availability detail) and reused all over
 // the order-taking engine; bloating it with base64 photos for every call
@@ -124,13 +144,25 @@ export async function menuForBranch(branchId) {
   return rows;
 }
 
+// Polled every 15s by the shared page itself (menu-page-template.js) so
+// other guests' additions show up without anyone manually reloading --
+// joint dine-in, Stage 1. Same pendingOrder shape as the initial page
+// render below, just fetched again -- no separate live-update mechanism,
+// matching the codebase's own existing 15s-poll pattern (InHouse.jsx/
+// Delivery.jsx) rather than adding new infra for this one page.
 router.get('/:qrToken/menu.json', async (req, res) => {
   const table = await resolveTable(req.params.qrToken);
   if (!table) return res.status(404).json({ error: 'Table not found.' });
-  const products = await menuForBranch(table.branch_id);
+  const session = await openSessionFor(table);
+  const actingCustomer = session ? await resolveActingCustomer(session, req) : null;
+  const [products, pendingOrder] = await Promise.all([
+    menuForBranch(table.branch_id),
+    pendingOrderPayload(session, table, actingCustomer?.id || null),
+  ]);
   res.json({
     table: { label: table.label, branch_name: table.branch_name, business_name: table.business_name },
     products,
+    pendingOrder,
   });
 });
 
@@ -148,12 +180,28 @@ router.post('/:qrToken/review', async (req, res) => {
   const items = Array.isArray(req.body?.items) ? req.body.items : [];
   if (!items.length) return res.status(400).json({ error: 'Your basket is empty.' });
 
-  const { rows: customerRows } = await pool.query('select * from customers where id = $1', [session.customer_id]);
-  const customer = customerRows[0];
+  // The guest actually submitting THIS round, not necessarily the table's
+  // original scanner -- joint dine-in, Stage 1. Item lines below get
+  // attributed to them individually (added_by_customer_id); the order
+  // itself stays owned by session.customer_id either way (getOrCreateTableOrder).
+  const customer = await resolveActingCustomer(session, req);
   if (!customer) return res.status(404).json({ error: 'Customer not found.' });
 
   const products = await menuForBranch(table.branch_id);
   const byId = new Map(products.map((p) => [p.id, p]));
+  // Which added_by_customer_id claims are even real -- never trust the
+  // client's own claim here either, same reasoning as price/availability/
+  // answers just below. Everyone who's ever scanned or opened this table
+  // (session.customer_id plus every table_session_guest), so a line
+  // genuinely added earlier by a different guest keeps their name on
+  // re-submit instead of every full-basket replace silently reattributing
+  // the whole table to whoever happens to tap Confirm.
+  const { rows: guestRows } = await pool.query(
+    `select customer_id from table_session_guest where session_id = $1
+     union select $2`,
+    [session.id, session.customer_id]
+  );
+  const validGuestIds = new Set(guestRows.map((g) => g.customer_id));
   const resolved = [];
   for (const item of items) {
     const p = byId.get(item.productId);
@@ -173,41 +221,34 @@ router.post('/:qrToken/review', async (req, res) => {
         }
       }
     }
-    resolved.push({ productId: p.id, name: p.name, price: p.price, quantity: qty, answers });
+    const addedBy = validGuestIds.has(item.addedBy) ? item.addedBy : customer.id;
+    resolved.push({ productId: p.id, name: p.name, price: p.price, quantity: qty, answers, addedBy });
   }
   if (!resolved.length) return res.status(400).json({ error: "Sorry, nothing in your basket is available right now." });
 
-  // Still deciding on THIS round (hasn't said yes yet, status stays 'new'
-  // the whole time it's being decided -- see finishItemsCollection's own
-  // effect on engine_state below) -- replace its items with the full new
-  // basket instead of creating a second, duplicate order and abandoning
-  // the first. Found live, 2026-09-11, Chidera: "dine in didnt reserve my
-  // orders fo when i tapped change it" -- every re-submit from "No, change
-  // it" (handleOrderConfirmNoTap's own menu link) silently orphaned the
+  // The ONE shared order for this table's current sitting -- joint dine-in,
+  // Stage 1. Still deciding on THIS round (hasn't said yes yet, status
+  // stays 'new' the whole time -- see finishItemsCollection's own effect on
+  // engine_state below) -- replace items with the full new basket instead
+  // of creating a second, duplicate order and abandoning the first. Found
+  // live, 2026-09-11, Chidera: "dine in didnt reserve my orders fo when i
+  // tapped change it" -- every re-submit from "No, change it"
+  // (handleOrderConfirmNoTap's own menu link) silently orphaned the
   // original order and created a fresh one, which is what actually made it
   // look like the order had vanished.
-  const existing = await getOpenOrder(customer.id);
-  let order;
-  if (existing && existing.status === 'new' && existing.table_id === table.id) {
-    order = existing;
-    await pool.query('delete from order_item where order_id = $1', [order.id]);
-  } else {
-    const ref = `ORD-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    // engine_state starts at 'collect_info', not 'confirm_order' --
-    // finishItemsCollection below needs to be the one walking it forward
-    // (item questions, upsell, THEN confirm_order), same starting point
-    // handleWebMenuOrder uses for the exact same reason.
-    const { rows: orderRows } = await pool.query(
-      `insert into "order" (customer_id, reference, branch_id, channel, table_id, session_id, fulfilment_type, payment_mode, engine_state, status)
-       values ($1, $2, $3, 'dinein', $4, $5, 'table', 'at_table', 'collect_info', 'new') returning *`,
-      [customer.id, ref, table.branch_id, table.id, session.id]
-    );
-    order = orderRows[0];
-  }
+  //
+  // Whole-basket replace still means clearing every existing line, not
+  // just this guest's own -- every guest's page always submits the FULL
+  // current basket (this guest's own edits merged onto whatever was last
+  // synced from the others, see menu-page-template.js's poll merge), so
+  // re-inserting all of `resolved` below is re-inserting everyone's items,
+  // not dropping anyone else's.
+  const order = await getOrCreateTableOrder(session, table, customer);
+  await pool.query('delete from order_item where order_id = $1', [order.id]);
   for (const item of resolved) {
     const { rows: itemRows } = await pool.query(
-      'insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4) returning id',
-      [order.id, item.productId, item.quantity, item.price]
+      'insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5) returning id',
+      [order.id, item.productId, item.quantity, item.price, item.addedBy || customer.id]
     );
     for (const questionId of Object.keys(item.answers || {})) {
       await pool.query(
@@ -248,26 +289,54 @@ router.post('/:qrToken/review', async (req, res) => {
 // still being decided vanished from the basket the moment the menu
 // reopened (handleOrderConfirmNoTap's "No, change it" link, or just
 // scanning again before saying yes).
-async function pendingOrderPayload(customerId, tableId) {
-  const order = await getOpenOrder(customerId);
-  if (!order || order.status !== 'new' || order.table_id !== tableId) return null;
+// session-scoped, not customer-scoped -- joint dine-in, Stage 1: the ONE
+// shared order for the table's current sitting, same as everywhere else
+// this file resolves it (getOrCreateTableOrder). `actingCustomerId` is only
+// used to label each line "You" vs the other guest's own name.
+async function pendingOrderPayload(session, table, actingCustomerId) {
+  if (!session) return null;
+  const { rows: orderRows } = await pool.query(
+    `select * from "order" where session_id = $1 and status = 'new' order by created_at desc limit 1`,
+    [session.id]
+  );
+  const order = orderRows[0];
+  if (!order || order.table_id !== table.id) return null;
   // answers -- Chidera, 2026-09-17: so a reopened table link's basket
   // rebuilds the exact same distinct lines it left with (menu-page-
   // template.js's own PENDING_ORDER pre-load), not one merged line that's
   // lost which answer belonged to which unit. coalesce to '{}', not NULL,
   // same reasoning as routes/menu-page.js's own pendingOrderPayload.
+  //
+  // addedByName/addedByCustomerId -- Chidera's joint dine-in concept:
+  // "let everyone on that table be able to join in and see each other" --
+  // coalesce(name, preferred_name) same as anywhere else a customer's own
+  // display name is shown, 'a guest' when neither's ever been set (name
+  // is dashboard-editable only, preferred_name is voice-only -- neither is
+  // ever written by any WhatsApp/web ordering code, so this is genuinely
+  // the common case, not a fallback for rare data).
   const { rows: items } = await pool.query(
-    `select oi.product_id, oi.quantity, p.name,
+    `select oi.product_id, oi.quantity, p.name, oi.added_by_customer_id,
+       coalesce(c.name, c.preferred_name) as added_by_name,
        coalesce(
          (select json_object_agg(oa.question_id, oa.answer) from order_item_answer oa where oa.order_item_id = oi.id),
          '{}'
        ) as answers
-     from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+     from order_item oi
+       join product p on p.id = oi.product_id
+       left join customers c on c.id = oi.added_by_customer_id
+     where oi.order_id = $1`,
     [order.id]
   );
   if (!items.length) return null;
   return {
-    items: items.map((i) => ({ productId: i.product_id, quantity: i.quantity, name: i.name, answers: i.answers || {} })),
+    items: items.map((i) => ({
+      productId: i.product_id,
+      quantity: i.quantity,
+      name: i.name,
+      answers: i.answers || {},
+      addedBy: i.added_by_customer_id || null,
+      addedByLabel: i.added_by_customer_id === actingCustomerId ? 'You' : (i.added_by_name || 'a guest'),
+    })),
     total: Number(order.total) || 0,
   };
 }
@@ -276,14 +345,34 @@ router.get('/:qrToken', async (req, res) => {
   const table = await resolveTable(req.params.qrToken);
   if (!table) return res.status(404).send('Table not found.');
   const session = await openSessionFor(table);
+  // Joint dine-in, Stage 1: whoever's actually opening the page right now
+  // (see resolveActingCustomer) gets recorded as part of this sitting the
+  // moment the page loads, same as a scan does -- "the first time each
+  // guest actually interacts with the table."
+  const actingCustomer = session ? await resolveActingCustomer(session, req) : null;
+  if (session && actingCustomer) await upsertTableGuest(session.id, actingCustomer.id);
   const [products, waNumber, pendingOrder] = await Promise.all([
     menuForBranch(table.branch_id),
     resolveWaNumber(table.branch_id),
-    session ? pendingOrderPayload(session.customer_id, table.id) : Promise.resolve(null),
+    pendingOrderPayload(session, table, actingCustomer?.id || null),
   ]);
+  // guestToken -- carried forward onto every fetch this page makes on its
+  // own (review submit, the 15s poll) so the server keeps knowing who's
+  // asking without the qrToken itself (shared by the whole table) having
+  // to say. ensureMenuToken here as a defensive fallback only -- in the
+  // normal path this guest already has one, handed to them the moment
+  // flow.js sent their own copy of this link (handleDineinButtonTap).
+  const guestToken = actingCustomer ? await ensureMenuToken(actingCustomer) : null;
+  const qs = (extra) => {
+    const params = new URLSearchParams(extra || {});
+    if (guestToken) params.set('g', guestToken);
+    const s = params.toString();
+    return s ? `?${s}` : '';
+  };
   res.set('Content-Type', 'text/html').send(
     renderMenuPage({
-      reviewPath: `/t/${req.params.qrToken}/review`,
+      reviewPath: `/t/${req.params.qrToken}/review${qs()}`,
+      pollPath: session ? `/t/${req.params.qrToken}/menu.json${qs()}` : null,
       businessName: table.business_name,
       subtitle: `Table ${table.label} · ${table.branch_name}`,
       coverPhotoVersion: table.cover_photo_version,
