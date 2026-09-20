@@ -33,6 +33,15 @@ export default function Settings() {
   const [hoursClose, setHoursClose] = useState('');
   const [hoursSaved, setHoursSaved] = useState(false);
   const [hoursError, setHoursError] = useState(null);
+  // Chidera, 2026-09-20: "a business can choose pos, flutterwave,
+  // paystack, or manual" -- Flutterwave left out of the picker on
+  // purpose ("leave flutterwave out for now"), same reasoning as the DB
+  // check constraint (payment_config's own schema comment). Own state,
+  // own save/load, same as Opening hours below -- a separate table
+  // (payment_config), not part of the big business-details form.
+  const [paymentConfig, setPaymentConfig] = useState(null);
+  const [paymentConfigSaved, setPaymentConfigSaved] = useState(false);
+  const [paymentConfigError, setPaymentConfigError] = useState(null);
 
   useEffect(() => {
     api.get('/business').then(setBusiness);
@@ -42,6 +51,7 @@ export default function Settings() {
       setHoursOpen(h.opening_hours?.open || '');
       setHoursClose(h.opening_hours?.close || '');
     });
+    api.get('/payment-config').then(setPaymentConfig);
   }, []);
 
   if (!business) return <Loading />;
@@ -158,6 +168,19 @@ export default function Settings() {
       setHoursSaved(true);
     } catch (err) {
       setHoursError(err.message);
+    }
+  }
+
+  async function savePaymentConfig(e) {
+    e.preventDefault();
+    setPaymentConfigError(null);
+    setPaymentConfigSaved(false);
+    try {
+      const updated = await api.post('/payment-config', paymentConfig);
+      setPaymentConfig(updated);
+      setPaymentConfigSaved(true);
+    } catch (err) {
+      setPaymentConfigError(err.message);
     }
   }
 
@@ -293,6 +316,65 @@ export default function Settings() {
           {editable && <button type="submit">Save</button>}
         </form>
       </div>
+
+      {paymentConfig && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>How you get paid</h3>
+          <p className="hint">
+            POS: customers pick Transfer (we quote the account below) or Card (they tap it on the terminal). Either way, payment
+            confirms automatically, no staff step. Paystack: a real payment link. Manual: the bank details above, plus a photo of
+            proof. Leave unset to keep things exactly as they are today.
+          </p>
+          {paymentConfigSaved && <div className="success-banner">Saved.</div>}
+          {paymentConfigError && <div className="error-banner">Could not save: {paymentConfigError}</div>}
+          <form onSubmit={savePaymentConfig}>
+            <div className="form-row">
+              <div className="field">
+                <label>Provider</label>
+                <select
+                  value={paymentConfig.provider || ''}
+                  onChange={(e) => setPaymentConfig({ ...paymentConfig, provider: e.target.value || null })}
+                  disabled={!editable}
+                >
+                  <option value="">Not set (keep current behaviour)</option>
+                  <option value="pos">POS</option>
+                  <option value="paystack">Paystack</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </div>
+            </div>
+            {paymentConfig.provider === 'pos' && (
+              <div className="form-row">
+                <div className="field">
+                  <label>Transfer bank name</label>
+                  <input
+                    value={paymentConfig.transfer_bank_name || ''}
+                    onChange={(e) => setPaymentConfig({ ...paymentConfig, transfer_bank_name: e.target.value })}
+                    disabled={!editable}
+                  />
+                </div>
+                <div className="field">
+                  <label>Transfer account number</label>
+                  <input
+                    value={paymentConfig.transfer_account_number || ''}
+                    onChange={(e) => setPaymentConfig({ ...paymentConfig, transfer_account_number: e.target.value })}
+                    disabled={!editable}
+                  />
+                </div>
+                <div className="field">
+                  <label>Transfer account name</label>
+                  <input
+                    value={paymentConfig.transfer_account_name || ''}
+                    onChange={(e) => setPaymentConfig({ ...paymentConfig, transfer_account_name: e.target.value })}
+                    disabled={!editable}
+                  />
+                </div>
+              </div>
+            )}
+            {editable && <button type="submit">Save</button>}
+          </form>
+        </div>
+      )}
 
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Opening hours</h3>

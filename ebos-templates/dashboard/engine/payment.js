@@ -81,6 +81,18 @@ export async function initializePaystackTopupTransaction({ topupId, order, custo
   return result.authorizationUrl;
 }
 
+// Chidera, 2026-09-20: "a business can choose pos, flutterwave, paystack,
+// or manual". null (no row yet, or provider column itself is null) means
+// "not configured through Settings -- keep using the legacy
+// PAYMENT_PROVIDER env var", exactly like every other caller here already
+// does today. Only once an owner actually saves a choice does this start
+// overriding that env var at all -- see payment_config's own schema
+// comment for why.
+export async function getPaymentConfig() {
+  const { rows } = await pool.query('select * from payment_config limit 1');
+  return rows[0] || null;
+}
+
 export function verifyPaystackSignature(rawBody, signatureHeader) {
   const secretKey = process.env.PAYMENT_SECRET_KEY;
   if (!secretKey || !signatureHeader) return false;

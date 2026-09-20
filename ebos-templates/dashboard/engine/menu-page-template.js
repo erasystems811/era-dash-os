@@ -580,7 +580,7 @@ document.getElementById('fulCheckFee').onclick = async function () {
     const fee = Number(data.fee) || 0;
     document.getElementById('fulFeeResult').textContent = fee > 0 ? ('Delivery fee: ' + naira(fee)) : 'Delivery fee will be confirmed with you.';
   } catch (err) {
-    document.getElementById('fulFeeResult').textContent = 'Could not check the fee right now -- you can still continue.';
+    document.getElementById('fulFeeResult').textContent = 'Could not check the fee right now. You can still continue.';
   }
   btn.textContent = 'Check delivery fee';
 };
@@ -769,7 +769,7 @@ document.getElementById('bdaySave').onclick = async () => {
     if (!res.ok) throw new Error('save failed');
     closeBdaySheet();
   } catch (err) {
-    errEl.textContent = "Couldn't save that -- please try again.";
+    errEl.textContent = "Couldn't save that. Please try again.";
     errEl.style.display = 'block';
   }
 };
@@ -803,7 +803,7 @@ document.getElementById('nameSave').onclick = async () => {
     if (!res.ok) throw new Error('save failed');
     closeNameSheet();
   } catch (err) {
-    errEl.textContent = "Couldn't save that -- please try again.";
+    errEl.textContent = "Couldn't save that. Please try again.";
     errEl.style.display = 'block';
   }
 };
@@ -838,7 +838,7 @@ async function submitOrder() {
     data = await res.json();
   } catch (err) {
     goBtn.textContent = originalLabel;
-    alert('Could not reach the connection -- please check your network and try again.');
+    alert('Could not reach the connection. Please check your network and try again.');
     return;
   }
   if (!res.ok) { goBtn.textContent = originalLabel; alert(data.error || 'Something went wrong.'); return; }
@@ -981,7 +981,7 @@ export function escapeHtml(s) {
 // live without a manual refresh. The existing dashboard "Mark paid"
 // button stays as a real fallback (cash, or anything that doesn't
 // reconcile automatically) -- never removed.
-export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, status, statusPath, createPath }) {
+export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, status, statusPath, createPath, posTransfer = null }) {
   const headerStyle = coverPhotoVersion
     ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : 'position:relative';
@@ -1013,6 +1013,11 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
   .guest input{width:18px;height:18px;accent-color:var(--hot)}
   .sub{display:flex;justify-content:space-between;margin-top:12px;padding-top:10px;border-top:1px solid var(--line);font-size:14.5px;font-weight:600}
   .primaryBtn{width:100%;margin-top:12px;background:var(--hot);color:#fff;border:0;font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
+  .secondaryBtn{width:100%;margin-top:10px;background:#fff;color:var(--ink);border:1px solid var(--line);font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
+  .payChoice{display:flex;gap:10px;margin-top:14px}
+  .payChoice button{flex:1;margin-top:0}
+  .transferBox{text-align:left;margin-top:14px;background:#F6F1E8;border-radius:10px;padding:14px;font-size:13.5px}
+  .transferBox .row{border-bottom:0;padding:4px 0}
   .payAmount{text-align:center;margin:16px;background:#fff;border-radius:14px;padding:20px;border:1px solid var(--line)}
   .payAmount .big{font-family:"Fraunces",serif;font-size:28px;font-weight:700;margin:6px 0}
   .badge{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px}
@@ -1027,7 +1032,7 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
   <div class="nm">${escapeHtml(businessName)}</div>
   <div class="mt">Table ${escapeHtml(tableLabel)} · Ready to pay</div>
 </div>
-<div id="doneBanner" class="done" hidden>All paid up -- thank you!</div>
+<div id="doneBanner" class="done" hidden>All paid up. Thank you!</div>
 <div id="mainContent">
   <div class="card" id="itemsCard"></div>
   <div class="card" id="guestsCard">
@@ -1037,9 +1042,14 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
     <button id="requestBtn" class="primaryBtn">Request payment amount</button>
   </div>
   <div id="amountCard" class="payAmount" hidden>
-    <div style="color:var(--mid);font-size:13px">Please pay this amount at the counter or on the POS terminal</div>
+    <div style="color:var(--mid);font-size:13px" id="amountHint">Please pay this amount at the counter or on the POS terminal</div>
     <div class="big" id="amountValue"></div>
-    <div style="color:var(--mid);font-size:12.5px">We'll confirm automatically the moment it clears.</div>
+    <div style="color:var(--mid);font-size:12.5px" id="amountSub">We'll confirm automatically the moment it clears.</div>
+    <div class="payChoice" id="payChoice" hidden>
+      <button id="payTransferBtn" class="secondaryBtn">Transfer</button>
+      <button id="payCardBtn" class="secondaryBtn">Tap card</button>
+    </div>
+    <div class="transferBox" id="transferBox" hidden></div>
   </div>
   <div class="card" id="paymentsCard" hidden>
     <h3>Payments so far</h3>
@@ -1050,6 +1060,7 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
 <script>
 const STATUS_PATH = ${JSON.stringify(statusPath)};
 const CREATE_PATH = ${JSON.stringify(createPath)};
+const POS_TRANSFER = ${JSON.stringify(posTransfer)};
 let status = ${JSON.stringify(status)};
 let selected = new Set([status.selfId]);
 
@@ -1114,12 +1125,43 @@ document.getElementById('requestBtn').onclick = async () => {
     document.getElementById('amountValue').textContent = naira(data.amount);
     document.getElementById('amountCard').hidden = false;
     document.getElementById('guestsCard').hidden = true;
+    // Chidera, 2026-09-20: "i want them to be able to pick transfer or
+    // card, transfer will give them number on pos while card the bot just
+    // waits to auto confirm payment" -- both land as the same real
+    // Moniepoint transaction either way (createOrderPayment already made
+    // one pending amount to match against), this choice only changes
+    // which instructions the guest sees.
+    if (POS_TRANSFER) {
+      document.getElementById('amountHint').textContent = 'How would you like to pay?';
+      document.getElementById('amountSub').hidden = true;
+      document.getElementById('payChoice').hidden = false;
+    }
   } catch (err) {
-    alert(err.message || 'Could not request a payment amount -- please try again.');
+    alert(err.message || 'Could not request a payment amount. Please try again.');
   } finally {
     btn.textContent = original;
   }
 };
+
+if (POS_TRANSFER) {
+  document.getElementById('payTransferBtn').onclick = () => {
+    document.getElementById('payChoice').hidden = true;
+    document.getElementById('transferBox').hidden = false;
+    document.getElementById('transferBox').innerHTML =
+      '<div class="row"><span>Bank</span><span>' + POS_TRANSFER.bankName + '</span></div>' +
+      '<div class="row"><span>Account number</span><span>' + POS_TRANSFER.accountNumber + '</span></div>' +
+      '<div class="row"><span>Account name</span><span>' + POS_TRANSFER.accountName + '</span></div>';
+    document.getElementById('amountSub').hidden = false;
+    document.getElementById('amountSub').textContent = "We'll confirm automatically the moment it clears. No need to send proof.";
+  };
+  document.getElementById('payCardBtn').onclick = () => {
+    document.getElementById('payChoice').hidden = true;
+    document.getElementById('transferBox').hidden = false;
+    document.getElementById('transferBox').innerHTML = '<div class="row"><span>Tap your card on our POS terminal for this amount.</span></div>';
+    document.getElementById('amountSub').hidden = false;
+    document.getElementById('amountSub').textContent = "We'll confirm automatically the moment it clears.";
+  };
+}
 
 render();
 

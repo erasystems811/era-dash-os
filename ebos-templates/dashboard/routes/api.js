@@ -2436,6 +2436,32 @@ router.post('/business-hours', requireEditorApi, async (req, res) => {
   res.json({ opening_hours: rows[0]?.opening_hours || null });
 });
 
+// Chidera, 2026-09-20: "a business can choose pos, flutterwave, paystack,
+// or manual". No row yet (every business before this feature shipped)
+// returns an all-null shape -- Settings shows "Not set", and every payment
+// call site keeps falling back to the legacy PAYMENT_PROVIDER env var
+// exactly as it always has (see payment_config's own schema comment).
+router.get('/payment-config', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(`select * from payment_config limit 1`);
+  res.json(rows[0] || { provider: null, transfer_account_number: null, transfer_account_name: null, transfer_bank_name: null });
+});
+
+router.post('/payment-config', requireEditorApi, async (req, res) => {
+  const { provider, transfer_account_number, transfer_account_name, transfer_bank_name } = req.body;
+  const { rows } = await pool.query(
+    `insert into payment_config (business_id, provider, transfer_account_number, transfer_account_name, transfer_bank_name)
+     values ((select id from business limit 1), $1, $2, $3, $4)
+     on conflict (business_id) do update set
+       provider = excluded.provider,
+       transfer_account_number = excluded.transfer_account_number,
+       transfer_account_name = excluded.transfer_account_name,
+       transfer_bank_name = excluded.transfer_bank_name
+     returning *`,
+    [provider || null, transfer_account_number || null, transfer_account_name || null, transfer_bank_name || null]
+  );
+  res.json(rows[0]);
+});
+
 // Which Instagram account (if any) is actually connected right now, read
 // live from Meta rather than just echoing back the stored user ID -- a
 // real username/profile picture is what actually lets staff (or a Meta App

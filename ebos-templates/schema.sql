@@ -1246,6 +1246,23 @@ create table if not exists pos_transaction (
 create unique index if not exists pos_transaction_provider_ref_idx on pos_transaction(provider, provider_reference);
 create index if not exists pos_transaction_occurred_at_idx on pos_transaction(occurred_at desc);
 
+-- Chidera, 2026-09-20: business-level choice of how the bot collects money
+-- FROM a customer -- POS (transfer to the terminal's own account, or tap a
+-- card on it, either way auto-confirmed the same way dine-in's Stage 3
+-- already does), Paystack, or manual bank-transfer-plus-proof. Flutterwave
+-- deliberately left out of the check constraint ("leave flutterwave out
+-- for now") -- its own migration adds it once that integration exists.
+-- provider has NO default -- see migrations/0054_payment_config.sql's own
+-- comment for why an absent row must keep meaning "whatever
+-- PAYMENT_PROVIDER already says", not silently become 'manual'.
+create table if not exists payment_config (
+  business_id uuid primary key references business(id),
+  provider text check (provider in ('pos', 'paystack', 'manual')),
+  transfer_account_number text,
+  transfer_account_name text,
+  transfer_bank_name text
+);
+
 -- Who gets pinged the moment a payment clears and an order is ready to
 -- start preparing (kitchen/ops), separate from handover_alerts (customer-
 -- service escalations). Chidera, 2026-09-16.

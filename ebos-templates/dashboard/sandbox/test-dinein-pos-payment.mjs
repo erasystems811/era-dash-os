@@ -186,7 +186,13 @@ async function main() {
   const { rows: order2After } = await pool.query(`select status from "order" where id = $1`, [order2.id]);
   const { rows: order3After } = await pool.query(`select status from "order" where id = $1`, [order3.id]);
   assert(order2After[0].status !== 'completed' && order3After[0].status !== 'completed', 'a genuine tie (same amount, both pending) auto-confirms NEITHER');
-  assert(logs.some((l) => l.includes('matched more than one table')), 'staff got alerted about the tie instead of a silent guess');
+  // Chidera, 2026-09-20: "i need pos to work now for both online and in
+  // house" -- this alert's own wording was generalized (flow.js's
+  // matchPosTransactionToPayment) to cover an online order (no table)
+  // alongside a dine-in one, so the tie-alert text itself changed from
+  // "table" to "order" -- see sandbox/test-online-pos-payment.mjs for the
+  // online-order half of this same alert.
+  assert(logs.some((l) => l.includes('matched more than one order')), 'staff got alerted about the tie instead of a silent guess');
 
   // --- Whole-table payment: one guest selects everyone, covers the full order regardless of per-item amounts ---
   const { rows: tableRows4 } = await pool.query(`insert into restaurant_table (branch_id, label, qr_token) values ($1, '12', 'qrtest12') returning id`, [branchId]);

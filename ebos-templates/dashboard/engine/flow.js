@@ -12,7 +12,7 @@ import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCt
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice } from './documents.js';
-import { initializePaystackTransaction, initializePaystackTopupTransaction } from './payment.js';
+import { initializePaystackTransaction, initializePaystackTopupTransaction, getPaymentConfig } from './payment.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
@@ -2008,8 +2008,85 @@ async function sendPaymentLinkButton(customer, paymentUrl, bodyText) {
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText}\n[payment link sent: ${paymentUrl}]`, trigger: 'payment_link', processed: true });
 }
 
+// Chidera, 2026-09-20: "i want them to be able to pick transfer or card,
+// transfer will give them number on pos while card the bot just waits to
+// auto confirm payment... i need pos to work now for both online and in
+// house." Dine-in's own Stage 3 (order_payment + matchPosTransactionToPayment,
+// both real and already tested -- sandbox/test-dinein-pos-payment.mjs)
+// already auto-confirms EITHER a transfer-to-the-terminal or a card tap
+// the exact same way (both land as a real Moniepoint POS_TRANSACTION,
+// matched by amount) -- so Transfer vs Card is purely which instructions
+// the customer sees, never a different backend path. This reuses that
+// same mechanism for a single online order instead of a table's split/
+// joint one (covers_item_ids always null here -- one customer, one
+// payment, the whole order).
+async function createSingleOrderPayment(order, customerId) {
+  const { rows: existing } = await pool.query(
+    `select * from order_payment where order_id = $1 and status = 'pending' and covers_item_ids is null`,
+    [order.id]
+  );
+  if (existing.length) return existing[0];
+  const reference = `${order.reference}-P${randomBytes(3).toString('hex').toUpperCase()}`;
+  const { rows } = await pool.query(
+    `insert into order_payment (order_id, provider, reference, amount, covers_item_ids, paid_by_customer_id)
+     values ($1, 'pos', $2, $3, null, $4) returning *`,
+    [order.id, reference, order.total, customerId]
+  );
+  return rows[0];
+}
+
+async function sendPosPaymentChoice(customer, order, amountLabel) {
+  await createSingleOrderPayment(order, customer.id);
+  const bodyText = `Your total is NGN ${amountLabel}. How would you like to pay?`;
+  if (customer.channel !== 'whatsapp') {
+    await reply(customer, `${bodyText} Reply "transfer" for our account details, or "card" if you'll tap a card on our POS terminal.`, 'pos_pay_choice');
+    return;
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  const buttons = [
+    { id: 'pos_pay_transfer', title: "I'll transfer" },
+    { id: 'pos_pay_card', title: "I'll tap my card" },
+  ];
+  await sendWhatsAppButtons(recipientFor(customer), bodyText, buttons, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger: 'pos_pay_choice' });
+}
+
+// The reply to whichever of the two buttons above got tapped -- same
+// resolveCustomerOrder fix as every other dispatch-adjacent handler
+// (2026-09-20's JV report), so a dine-in guest's own tap here still finds
+// their real shared order rather than risking the rogue-order bug that
+// started this.
+export async function handlePosPayMethodTap({ phoneNumber, channelId, buttonId, channel = 'whatsapp', branchId }) {
+  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${buttonId}]`, processed: true });
+  const order = await resolveCustomerOrder(customer);
+  // A stale tap -- the order's since moved on/gone, or already paid
+  // another way -- nothing to do.
+  if (!order) return;
+  if (buttonId === 'pos_pay_transfer') {
+    const config = await getPaymentConfig();
+    const hasTransferDetails = config?.transfer_account_number && config?.transfer_account_name && config?.transfer_bank_name;
+    const text = hasTransferDetails
+      ? `Please transfer to:\n\nBank: ${config.transfer_bank_name}\nAccount number: ${config.transfer_account_number}\nAccount name: ${config.transfer_account_name}\n\nWe'll confirm automatically once it clears, no need to send proof.`
+      : `Sorry, transfer details aren't set up yet, please ask a staff member.`;
+    await reply(customer, text, 'pos_pay_transfer_details');
+  } else if (buttonId === 'pos_pay_card') {
+    await reply(customer, `Please tap your card on our POS terminal. We'll confirm automatically the moment it clears.`, 'pos_pay_card_instructions');
+  }
+}
+
 async function buildPayLine(order, customer, { amount, amountLabel }) {
-  if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
+  const paymentConfig = await getPaymentConfig();
+  // provider === 'pos' -- Settings' own explicit choice, always wins.
+  // No configured row (or a row with no provider set) falls through to the
+  // exact same PAYMENT_PROVIDER env-var check every existing client
+  // already runs on today -- see payment_config's own schema comment for
+  // why this must never change behavior on its own.
+  if (paymentConfig?.provider === 'pos') {
+    return { payLine: null, needsHandover: false, paymentUrl: null, posChoice: true };
+  }
+  const useProviderPaystack = paymentConfig?.provider ? paymentConfig.provider === 'paystack' : process.env.PAYMENT_PROVIDER === 'paystack';
+  if (useProviderPaystack && process.env.PAYMENT_SECRET_KEY) {
     try {
       const url = await initializePaystackTransaction({ order, customer, amount });
       if (url) {
@@ -2043,7 +2120,7 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
   };
 }
 
-async function sendPaymentInstructions(customer, order) {
+export async function sendPaymentInstructions(customer, order) {
   const { total, deliveryFee } = await summariseOrder(order);
   const invoicePath = await createInvoice(order);
   // PUBLIC_URL is this deployment's own https://<subdomain> -- without it
@@ -2091,7 +2168,16 @@ async function sendPaymentInstructions(customer, order) {
   // exactly the kind of thing that's easy to misread or fat-finger
   // copying out -- each on its own line reads the way a real transfer
   // slip would.
-  const { payLine, needsHandover, paymentUrl } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
+  const { payLine, needsHandover, paymentUrl, posChoice } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
+  if (posChoice) {
+    // A CTA-URL button (paymentUrl) or plain text can carry the invoice
+    // line inline, but a Transfer/Card choice needs its own real WhatsApp
+    // buttons message -- sent separately, same multi-message shape the
+    // invoice PDF + payment link already use today.
+    await reply(customer, invoiceLine);
+    await sendPosPaymentChoice(customer, order, `${total}${deliveryFeeLine}`);
+    return;
+  }
   if (paymentUrl) {
     await sendPaymentLinkButton(customer, paymentUrl, `${invoiceLine}\n\n${payLine}`);
   } else {
@@ -3644,16 +3730,30 @@ export async function confirmOrderPayment(orderPaymentId) {
   const fullyCovered = wholeOrderPaid || (allItems.length > 0 && allItems.every((i) => covered.has(i.id)));
   if (!fullyCovered) return payment;
 
-  const { rows: orderRows } = await pool.query(
-    `update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1 returning *`,
-    [payment.order_id]
-  );
-  const order = orderRows[0];
-  if (order) {
-    sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
-    if (order.session_id) {
-      closeTableSessionIfSettled(order.session_id, { closedBy: 'auto' }).catch((err) => console.error('closeTableSessionIfSettled failed:', err.message));
+  // Chidera, 2026-09-20: "i need pos to work now for both online and in
+  // house" -- dine-in payment closes the order straight to 'completed'
+  // (the table's already eaten; paying is the LAST step). An online order
+  // paying via POS is the OPPOSITE order -- payment is what kicks off
+  // preparation, not what ends the order -- same distinction
+  // completePayment (Paystack/proof-image confirm) already draws. Reusing
+  // that exact function here instead of duplicating its
+  // transitionOrder/createDelivery/staff-alert logic.
+  const { rows: preRows } = await pool.query('select * from "order" where id = $1', [payment.order_id]);
+  const preOrder = preRows[0];
+  if (preOrder?.channel === 'dinein') {
+    const { rows: orderRows } = await pool.query(
+      `update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1 returning *`,
+      [payment.order_id]
+    );
+    const order = orderRows[0];
+    if (order) {
+      sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
+      if (order.session_id) {
+        closeTableSessionIfSettled(order.session_id, { closedBy: 'auto' }).catch((err) => console.error('closeTableSessionIfSettled failed:', err.message));
+      }
     }
+  } else if (preOrder) {
+    await completePayment(preOrder.id);
   }
   return payment;
 }
@@ -3674,7 +3774,7 @@ export async function confirmOrderPayment(orderPaymentId) {
 // asked which one instead.
 export async function matchPosTransactionToPayment(transaction) {
   const { rows: candidates } = await pool.query(
-    `select op.*, o.table_id, rt.label as table_label
+    `select op.*, o.table_id, o.reference as order_reference, rt.label as table_label
      from order_payment op
        join "order" o on o.id = op.order_id
        left join restaurant_table rt on rt.id = o.table_id
@@ -3693,8 +3793,12 @@ export async function matchPosTransactionToPayment(transaction) {
       // rejects that as banned formatting (found live, via this exact
       // alert, not assumed). Line breaks + "label: value" instead, same
       // convention every other structured staff alert in this file uses.
-      const list = candidates.map((c) => `Table ${c.table_label || '?'}: NGN ${c.amount}`).join('\n');
-      const alertText = `A POS payment of NGN ${transaction.amount} matched more than one table waiting to pay:\n${list}\n\nNot auto-confirmed, to avoid crediting the wrong table. Please confirm the right one from In House, Awaiting payment, Mark paid.`;
+      // table_label is null for an online order (no table_id) -- 2026-09-20,
+      // "i need pos to work now for both online and in house" -- labelled
+      // by its own order reference instead, same as every other place in
+      // this file already falls back when a dine-in-only field is absent.
+      const list = candidates.map((c) => (c.table_label ? `Table ${c.table_label}: NGN ${c.amount}` : `Order ${c.order_reference}: NGN ${c.amount}`)).join('\n');
+      const alertText = `A POS payment of NGN ${transaction.amount} matched more than one order waiting to pay:\n${list}\n\nNot auto-confirmed, to avoid crediting the wrong one. Please confirm the right one from the dashboard.`;
       for (const { phoneNumber: to } of orderRecipients) await sendStaffAlert(to, alertText);
     }
   }

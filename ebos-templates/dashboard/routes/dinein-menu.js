@@ -7,6 +7,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderPayPage } from '../engine/menu-page-template.js';
 import { createOrderPayment, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
+import { getPaymentConfig } from '../engine/payment.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
@@ -551,6 +552,22 @@ router.get('/:qrToken/pay', async (req, res) => {
   const status = await payStatusPayload(order, session, actingCustomer?.id || null);
   const guestToken = actingCustomer ? await ensureMenuToken(actingCustomer) : null;
   const qs = guestToken ? `?g=${guestToken}` : '';
+  // Chidera, 2026-09-20: "i need pos to work now for both online and in
+  // house... transfer will give them number on pos while card the bot
+  // just waits to auto confirm payment." Only sent to the page when POS is
+  // actually the business's chosen provider -- everyone else keeps
+  // today's generic "pay at the counter or POS terminal" wording
+  // unchanged (payment_config's own schema comment: no row/no provider
+  // must never change existing behavior).
+  const paymentConfig = await getPaymentConfig();
+  const posTransfer =
+    paymentConfig?.provider === 'pos' && paymentConfig.transfer_account_number && paymentConfig.transfer_account_name && paymentConfig.transfer_bank_name
+      ? {
+          accountNumber: paymentConfig.transfer_account_number,
+          accountName: paymentConfig.transfer_account_name,
+          bankName: paymentConfig.transfer_bank_name,
+        }
+      : null;
   res.set('Content-Type', 'text/html').send(
     renderPayPage({
       businessName: table.business_name,
@@ -559,6 +576,7 @@ router.get('/:qrToken/pay', async (req, res) => {
       status,
       statusPath: `/t/${req.params.qrToken}/pay/status${qs}`,
       createPath: `/t/${req.params.qrToken}/pay/create${qs}`,
+      posTransfer,
     })
   );
 });
