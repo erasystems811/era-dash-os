@@ -76,7 +76,6 @@ async function main() {
   if (!client.isEbos) throw new Error(`"${args.client}" isn't an EBOS client -- this script only supports ebos-templates' shared compose/Caddy layout.`);
 
   const secrets = loadSecrets();
-  requireSecrets(secrets, ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']);
 
   const sourceIp = client.ip;
   const slug = client.name;
