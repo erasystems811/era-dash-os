@@ -277,11 +277,17 @@ export async function startServer(config, instanceId) {
 export async function resizeServer(config, instanceId, { ocpus, memoryInGBs }, { timeoutMs = 5 * 60 * 1000, intervalMs = 8000 } = {}) {
   await stopServer(config, instanceId);
   let start = Date.now();
+  let stopped = false;
   while (Date.now() - start < timeoutMs) {
     const instance = await getServer(config, instanceId);
-    if (instance.lifecycleState === 'STOPPED') break;
+    if (instance.lifecycleState === 'STOPPED') { stopped = true; break; }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
+  // OCI silently accepts a shapeConfig PUT while the instance is still
+  // running/stopping -- it never actually applies until the next stop/
+  // start, so proceeding here would return "success" for a resize that
+  // silently didn't happen.
+  if (!stopped) throw new Error(`OCI instance ${instanceId} did not reach STOPPED within ${timeoutMs}ms, refusing to resize`);
 
   await ociRequest(config, 'PUT', `/instances/${instanceId}`, { shapeConfig: { ocpus, memoryInGBs } });
 

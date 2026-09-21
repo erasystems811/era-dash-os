@@ -227,7 +227,7 @@ async function main() {
   console.log(`DONE. ${slug} is now running on ${destIp} (dashboard port ${destPorts.dashboard}) with its real data restored.`);
   console.log(`Verify it directly (bypassing DNS/TLS) with: curl -s http://${destIp}:${destPorts.dashboard}/ -o /dev/null -w '%{http_code}\\n'`);
   console.log(`The old server (${sourceIp}) is untouched and still serving live traffic. Nothing has changed for real customers yet.`);
-  console.log(`Once verified, run cutover-client.mjs --client=${slug} --ip=${destIp} --provider=${destProvider} --server-id=${destServerId} to flip DNS + the registry.`);
+  console.log(`Once verified, run cutover-client.mjs --client=${slug} to flip DNS + the registry.`);
 }
 
 main().catch((err) => {
