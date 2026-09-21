@@ -981,7 +981,7 @@ export function escapeHtml(s) {
 // live without a manual refresh. The existing dashboard "Mark paid"
 // button stays as a real fallback (cash, or anything that doesn't
 // reconcile automatically) -- never removed.
-export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, status, statusPath, createPath, posTransfer = null }) {
+export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, status, statusPath, createPath, claimPath, posTransfer = null, dynamicExpiresAt = null, dynamicReadyAt = null, paystackUrl = null }) {
   const headerStyle = coverPhotoVersion
     ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : 'position:relative';
@@ -1018,7 +1018,8 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
   .payChoice[hidden]{display:none}
   .payChoice button{flex:1;margin-top:0}
   .transferBox{text-align:left;margin-top:14px;background:#F6F1E8;border-radius:10px;padding:14px;font-size:13.5px}
-  .transferBox .row{border-bottom:0;padding:4px 0}
+  .transferBox .row{border-bottom:0;padding:4px 0;display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .copyBtn{flex-shrink:0;background:var(--ink);color:var(--paper);border:0;font-family:inherit;font-weight:600;font-size:11.5px;padding:5px 10px;border-radius:999px;touch-action:manipulation}
   .payAmount{text-align:center;margin:16px;background:#fff;border-radius:14px;padding:20px;border:1px solid var(--line)}
   .payAmount .big{font-family:"Fraunces",serif;font-size:28px;font-weight:700;margin:6px 0}
   .badge{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px}
@@ -1050,7 +1051,12 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
       <button id="payTransferBtn" class="secondaryBtn">Transfer</button>
       <button id="payCardBtn" class="secondaryBtn">Tap card</button>
     </div>
+    <a id="paystackBtn" class="primaryBtn" href="#" hidden style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">Pay</a>
     <div class="transferBox" id="transferBox" hidden></div>
+    <div style="color:var(--mid);font-size:12px;margin-top:6px" id="expiryTimer" hidden></div>
+    <button id="refreshAccountBtn" class="secondaryBtn" hidden>Get a new account number</button>
+    <button id="claimBtn" class="secondaryBtn" hidden>I've sent it</button>
+    <div style="color:var(--mid);font-size:12px;margin-top:8px" id="claimNote" hidden>We've told the team -- they'll confirm shortly.</div>
   </div>
   <div class="card" id="paymentsCard" hidden>
     <h3>Payments so far</h3>
@@ -1061,11 +1067,22 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
 <script>
 const STATUS_PATH = ${JSON.stringify(statusPath)};
 const CREATE_PATH = ${JSON.stringify(createPath)};
-const POS_TRANSFER = ${JSON.stringify(posTransfer)};
+const CLAIM_PATH = ${JSON.stringify(claimPath)};
+let POS_TRANSFER = ${JSON.stringify(posTransfer)};
+let DYNAMIC_EXPIRES_AT = ${JSON.stringify(dynamicExpiresAt)};
+let DYNAMIC_READY_AT = ${JSON.stringify(dynamicReadyAt)};
+let PAYSTACK_URL = ${JSON.stringify(paystackUrl)};
+let expiryInterval = null;
+let readyTimeout = null;
 let status = ${JSON.stringify(status)};
 let selected = new Set([status.selfId]);
 
 function naira(n) { return 'NGN ' + Number(n).toLocaleString(); }
+
+// Escapes business-owner-entered text (bank name, account name) before it
+// goes into innerHTML -- that text is not trusted input, same reasoning
+// as the server-side escapeHtml() this file already uses elsewhere.
+function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
 function render() {
   if (status.completed) {
@@ -1130,8 +1147,23 @@ function render() {
       document.getElementById('amountHint').textContent = 'How would you like to pay?';
       document.getElementById('amountSub').hidden = true;
       document.getElementById('payChoice').hidden = false;
+    } else if (PAYSTACK_URL) {
+      showPaystackButton();
     }
   }
+}
+
+// Chidera, 2026-09-21: "LET DINE IN SUPPORT PAYSTACK O" -- a real
+// Paystack card payment, same as an online order gets, instead of only
+// ever POS transfer or a generic "pay at the counter" line. A plain
+// external link (Paystack's own hosted checkout page), not a fetch call
+// -- opening it is the whole point.
+function showPaystackButton() {
+  const btn = document.getElementById('paystackBtn');
+  btn.href = PAYSTACK_URL;
+  btn.hidden = false;
+  document.getElementById('amountSub').hidden = false;
+  document.getElementById('amountSub').textContent = "We'll confirm automatically the moment it clears.";
 }
 
 function updateSubtotal() {
@@ -1150,6 +1182,14 @@ document.getElementById('requestBtn').onclick = async () => {
     document.getElementById('amountValue').textContent = naira(data.amount);
     document.getElementById('amountCard').hidden = false;
     document.getElementById('guestsCard').hidden = true;
+    // Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+    // PAYSTACK DOES" -- /pay/create now generates a real, one-time account
+    // for THIS payment (confirmed live), returned here instead of only
+    // ever using the page-load-time static one.
+    if ('posTransfer' in data) POS_TRANSFER = data.posTransfer;
+    DYNAMIC_EXPIRES_AT = data.dynamicExpiresAt || null;
+    DYNAMIC_READY_AT = data.dynamicReadyAt || null;
+    PAYSTACK_URL = data.paystackUrl || null;
     // Chidera, 2026-09-20: "i want them to be able to pick transfer or
     // card, transfer will give them number on pos while card the bot just
     // waits to auto confirm payment" -- both land as the same real
@@ -1160,6 +1200,8 @@ document.getElementById('requestBtn').onclick = async () => {
       document.getElementById('amountHint').textContent = 'How would you like to pay?';
       document.getElementById('amountSub').hidden = true;
       document.getElementById('payChoice').hidden = false;
+    } else if (PAYSTACK_URL) {
+      showPaystackButton();
     }
   } catch (err) {
     alert(err.message || 'Could not request a payment amount. Please try again.');
@@ -1168,16 +1210,140 @@ document.getElementById('requestBtn').onclick = async () => {
   }
 };
 
+// Chidera, 2026-09-21: "make copying an account easy with that copy
+// button that copies to clipboard" -- guests are typing the number into a
+// separate banking app, not just reading it.
+function copyAcct(btn) {
+  const text = btn.getAttribute('data-acct');
+  const original = btn.textContent;
+  const showCopied = () => { btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = original; }, 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(showCopied).catch(() => fallbackCopy(text, showCopied));
+  } else {
+    fallbackCopy(text, showCopied);
+  }
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try { document.execCommand('copy'); } catch (err) {}
+  document.body.removeChild(ta);
+  done();
+}
+
+// Chidera, 2026-09-21: "I SENT MONEY NO PLACE FOR CUSTOMER TO TAP I SENT
+// THE MONEY FOR BOT TO AUTO CONFIRM" -- transfer is supposed to auto-
+// confirm off Moniepoint's own webhook, but if it hasn't shown up yet
+// this is the fallback: pings staff directly, doesn't touch payment
+// state (the real webhook, if it still lands, confirms completely
+// normally on top of this).
+document.getElementById('claimBtn').onclick = async () => {
+  const btn = document.getElementById('claimBtn');
+  btn.disabled = true;
+  btn.textContent = 'Notifying...';
+  try {
+    await fetch(CLAIM_PATH, { method: 'POST' });
+    btn.hidden = true;
+    document.getElementById('claimNote').hidden = false;
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "I've sent it";
+    alert('Could not reach the team just now. Please try again.');
+  }
+};
+
+// Chidera, 2026-09-21: "SHOW A 4 MINS TIMER TIMING CUSTOMER ON WHEN
+// ACCOUNT NUMBER WILL EXPIRE" -- confirmed live, Moniepoint's own request
+// expires ~5 minutes after creation; DYNAMIC_ACCOUNT_TTL_MS on the server
+// side already stays a little under that. Past zero, this deliberately
+// does NOT say the payment failed -- a transfer that lands late still
+// reaches the real account safely (confirmed live, real money) -- it
+// just means Moniepoint stops auto-matching it, so "I've sent it" (never
+// hidden) is what actually resolves it from here.
+function startExpiryCountdown() {
+  if (expiryInterval) clearInterval(expiryInterval);
+  const timerEl = document.getElementById('expiryTimer');
+  const refreshBtn = document.getElementById('refreshAccountBtn');
+  if (!DYNAMIC_EXPIRES_AT) { timerEl.hidden = true; refreshBtn.hidden = true; return; }
+  timerEl.hidden = false;
+  refreshBtn.hidden = true;
+  const tick = () => {
+    const msLeft = new Date(DYNAMIC_EXPIRES_AT).getTime() - Date.now();
+    if (msLeft <= 0) {
+      clearInterval(expiryInterval);
+      timerEl.textContent = "This account number has expired. Already sent it? Tap \\"I've sent it\\" below, your money still reaches us safely, we'll just confirm it manually. Otherwise get a fresh one:";
+      refreshBtn.hidden = false;
+      return;
+    }
+    const totalSeconds = Math.floor(msLeft / 1000);
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    timerEl.textContent = 'This account number expires in ' + m + ':' + String(s).padStart(2, '0');
+  };
+  tick();
+  expiryInterval = setInterval(tick, 1000);
+}
+
+document.getElementById('refreshAccountBtn').onclick = async () => {
+  const btn = document.getElementById('refreshAccountBtn');
+  btn.disabled = true;
+  btn.textContent = 'Getting a new one...';
+  try {
+    const res = await fetch(CREATE_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ guestIds: [...selected] }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+    if ('posTransfer' in data) POS_TRANSFER = data.posTransfer;
+    DYNAMIC_EXPIRES_AT = data.dynamicExpiresAt || null;
+    DYNAMIC_READY_AT = data.dynamicReadyAt || null;
+    document.getElementById('payTransferBtn').onclick();
+  } catch (err) {
+    alert(err.message || 'Could not get a new account number. Please try again.');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Get a new account number';
+  }
+};
+
+// Chidera, 2026-09-21, real live report: paying a freshly generated
+// one-time account IMMEDIATELY failed with "Recipient KYC registration
+// is incomplete" -- a real bank rejection, consistent with the short
+// NIBSS propagation delay new virtual accounts commonly need. Rather than
+// ever let a customer hit that, the real account details stay hidden
+// behind a short "preparing" countdown until DYNAMIC_READY_AT, then
+// reveal automatically -- no reload, no extra tap.
+function renderTransferBox() {
+  const box = document.getElementById('transferBox');
+  if (readyTimeout) clearTimeout(readyTimeout);
+  if (DYNAMIC_READY_AT && new Date(DYNAMIC_READY_AT).getTime() > Date.now()) {
+    const secondsLeft = Math.ceil((new Date(DYNAMIC_READY_AT).getTime() - Date.now()) / 1000);
+    box.innerHTML = '<div class="row"><span>Setting up a secure one-time account for this payment. Ready in ' + secondsLeft + 's...</span></div>';
+    document.getElementById('amountSub').hidden = true;
+    document.getElementById('claimBtn').hidden = true;
+    document.getElementById('expiryTimer').hidden = true;
+    document.getElementById('refreshAccountBtn').hidden = true;
+    readyTimeout = setTimeout(renderTransferBox, 1000);
+    return;
+  }
+  box.innerHTML =
+    '<div class="row"><span>Bank</span><span>' + esc(POS_TRANSFER.bankName) + '</span></div>' +
+    '<div class="row"><span>Account number</span><span>' + esc(POS_TRANSFER.accountNumber) + ' <button type="button" class="copyBtn" data-acct="' + esc(POS_TRANSFER.accountNumber) + '" onclick="copyAcct(this)">Copy</button></span></div>' +
+    '<div class="row"><span>Account name</span><span>' + esc(POS_TRANSFER.accountName) + '</span></div>';
+  document.getElementById('amountSub').hidden = false;
+  document.getElementById('amountSub').textContent = "We'll confirm automatically the moment it clears. No need to send proof.";
+  document.getElementById('claimBtn').hidden = false;
+  startExpiryCountdown();
+}
+
 if (POS_TRANSFER) {
   document.getElementById('payTransferBtn').onclick = () => {
     document.getElementById('payChoice').hidden = true;
     document.getElementById('transferBox').hidden = false;
-    document.getElementById('transferBox').innerHTML =
-      '<div class="row"><span>Bank</span><span>' + POS_TRANSFER.bankName + '</span></div>' +
-      '<div class="row"><span>Account number</span><span>' + POS_TRANSFER.accountNumber + '</span></div>' +
-      '<div class="row"><span>Account name</span><span>' + POS_TRANSFER.accountName + '</span></div>';
-    document.getElementById('amountSub').hidden = false;
-    document.getElementById('amountSub').textContent = "We'll confirm automatically the moment it clears. No need to send proof.";
+    renderTransferBox();
   };
   document.getElementById('payCardBtn').onclick = () => {
     document.getElementById('payChoice').hidden = true;
@@ -1220,7 +1386,7 @@ setInterval(async function () {
 // language, same auto-confirm mechanism (order_payment +
 // matchPosTransactionToPayment), reached via routes/menu-page.js's
 // /:token/pay.
-export function renderSingleOrderPayPage({ businessName, amount, confirmed, posTransfer, statusPath }) {
+export function renderSingleOrderPayPage({ businessName, amount, confirmed, posTransfer, statusPath, claimPath, dynamicExpiresAt = null, dynamicReadyAt = null }) {
   return `<!doctype html>
 <html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>${escapeHtml(businessName)}</title>
@@ -1239,7 +1405,9 @@ export function renderSingleOrderPayPage({ businessName, amount, confirmed, posT
   .payAmount{text-align:center;margin:16px;background:#fff;border-radius:14px;padding:20px;border:1px solid var(--line)}
   .payAmount .big{font-family:"Fraunces",serif;font-size:28px;font-weight:700;margin:6px 0}
   .transferBox{text-align:left;margin-top:14px;background:#F6F1E8;border-radius:10px;padding:14px;font-size:13.5px}
-  .transferBox .row{display:flex;justify-content:space-between;gap:12px;padding:4px 0}
+  .transferBox .row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:4px 0}
+  .copyBtn{flex-shrink:0;background:var(--ink);color:var(--paper);border:0;font-family:inherit;font-weight:600;font-size:11.5px;padding:5px 10px;border-radius:999px;touch-action:manipulation}
+  .secondaryBtn{width:100%;margin-top:12px;background:#fff;color:var(--ink);border:1px solid var(--line);font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
   .done{margin:16px;background:var(--ok);color:#fff;border-radius:14px;padding:18px;text-align:center;font-family:"Fraunces",serif;font-size:17px;font-weight:700}
 </style></head>
 <body>
@@ -1254,12 +1422,133 @@ export function renderSingleOrderPayPage({ businessName, amount, confirmed, posT
   <div style="color:var(--mid);font-size:12.5px">We'll confirm automatically the moment it clears${posTransfer ? '. No need to send proof.' : '.'}</div>
   ${
     posTransfer
-      ? `<div class="transferBox"><div class="row"><span>Bank</span><span>${escapeHtml(posTransfer.bankName)}</span></div><div class="row"><span>Account number</span><span>${escapeHtml(posTransfer.accountNumber)}</span></div><div class="row"><span>Account name</span><span>${escapeHtml(posTransfer.accountName)}</span></div></div>`
+      ? `<div class="transferBox" id="transferBox"></div><div style="color:var(--mid);font-size:12px;margin-top:6px" id="expiryTimer" hidden></div><button type="button" id="refreshAccountBtn" class="secondaryBtn" hidden>Get a new account number</button><button type="button" id="claimBtn" class="secondaryBtn" hidden>I've sent it</button><div style="color:var(--mid);font-size:12px;margin-top:8px" id="claimNote" hidden>We've told the team -- they'll confirm shortly.</div>`
       : ''
   }
 </div>
 <script>
 const STATUS_PATH = ${JSON.stringify(statusPath)};
+const CLAIM_PATH = ${JSON.stringify(claimPath)};
+const POS_TRANSFER = ${JSON.stringify(posTransfer)};
+const DYNAMIC_EXPIRES_AT = ${JSON.stringify(dynamicExpiresAt)};
+const DYNAMIC_READY_AT = ${JSON.stringify(dynamicReadyAt)};
+
+// Escapes business-owner-entered text (bank name, account name) before it
+// goes into innerHTML -- that text is not trusted input, same reasoning
+// as the server-side escapeHtml() this file already uses elsewhere.
+function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+// Chidera, 2026-09-21: "make copying an account easy with that copy
+// button that copies to clipboard" -- same as dine-in's own pay page.
+function copyAcct(btn) {
+  const text = btn.getAttribute('data-acct');
+  const original = btn.textContent;
+  const showCopied = () => { btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = original; }, 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(showCopied).catch(() => fallbackCopy(text, showCopied));
+  } else {
+    fallbackCopy(text, showCopied);
+  }
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try { document.execCommand('copy'); } catch (err) {}
+  document.body.removeChild(ta);
+  done();
+}
+
+// Chidera, 2026-09-21: "I SENT MONEY NO PLACE FOR CUSTOMER TO TAP I SENT
+// THE MONEY FOR BOT TO AUTO CONFIRM" -- fallback for when a real transfer
+// lands but the Moniepoint webhook doesn't. Only present when posTransfer
+// itself is (the transfer choice is the only one this applies to).
+if (document.getElementById('claimBtn')) {
+  document.getElementById('claimBtn').onclick = async () => {
+    const btn = document.getElementById('claimBtn');
+    btn.disabled = true;
+    btn.textContent = 'Notifying...';
+    try {
+      await fetch(CLAIM_PATH, { method: 'POST' });
+      btn.hidden = true;
+      document.getElementById('claimNote').hidden = false;
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "I've sent it";
+      alert('Could not reach the team just now. Please try again.');
+    }
+  };
+}
+
+// Chidera, 2026-09-21: "SHOW A 4 MINS TIMER TIMING CUSTOMER ON WHEN
+// ACCOUNT NUMBER WILL EXPIRE" -- confirmed live, Moniepoint's own request
+// expires ~5 minutes after creation. Past zero, this deliberately does
+// NOT say the payment failed -- a transfer that lands late still reaches
+// the real account safely (confirmed live, real money) -- "I've sent it"
+// is what actually resolves it from here.
+//
+// Chidera, 2026-09-21, real live report: paying a freshly generated
+// account IMMEDIATELY failed with "Recipient KYC registration is
+// incomplete" -- consistent with the short NIBSS propagation delay new
+// virtual accounts commonly need. The real account details stay hidden
+// behind a short "preparing" countdown until DYNAMIC_READY_AT, then
+// reveal automatically, before the expiry countdown even starts -- no
+// "tap Transfer first" step on this page (online never had one), so this
+// all runs the moment the page itself loads.
+if (POS_TRANSFER && document.getElementById('transferBox')) {
+  const box = document.getElementById('transferBox');
+  const timerEl = document.getElementById('expiryTimer');
+  const refreshBtn = document.getElementById('refreshAccountBtn');
+  let readyTimeout;
+  let expiryTimerInterval;
+
+  function startExpiryCountdown() {
+    if (expiryTimerInterval) clearInterval(expiryTimerInterval);
+    if (!DYNAMIC_EXPIRES_AT) { timerEl.hidden = true; refreshBtn.hidden = true; return; }
+    timerEl.hidden = false;
+    refreshBtn.hidden = true;
+    const tick = () => {
+      const msLeft = new Date(DYNAMIC_EXPIRES_AT).getTime() - Date.now();
+      if (msLeft <= 0) {
+        clearInterval(expiryTimerInterval);
+        timerEl.textContent = "This account number has expired. Already sent it? Tap \\"I've sent it\\" below, your money still reaches us safely, we'll just confirm it manually. Otherwise get a fresh one:";
+        refreshBtn.hidden = false;
+        return;
+      }
+      const totalSeconds = Math.floor(msLeft / 1000);
+      const m = Math.floor(totalSeconds / 60);
+      const s = totalSeconds % 60;
+      timerEl.textContent = 'This account number expires in ' + m + ':' + String(s).padStart(2, '0');
+    };
+    tick();
+    expiryTimerInterval = setInterval(tick, 1000);
+  }
+
+  function renderTransferBox() {
+    if (readyTimeout) clearTimeout(readyTimeout);
+    if (DYNAMIC_READY_AT && new Date(DYNAMIC_READY_AT).getTime() > Date.now()) {
+      const secondsLeft = Math.ceil((new Date(DYNAMIC_READY_AT).getTime() - Date.now()) / 1000);
+      box.innerHTML = '<div class="row"><span>Setting up a secure one-time account for this payment. Ready in ' + secondsLeft + 's...</span></div>';
+      timerEl.hidden = true;
+      refreshBtn.hidden = true;
+      readyTimeout = setTimeout(renderTransferBox, 1000);
+      return;
+    }
+    box.innerHTML =
+      '<div class="row"><span>Bank</span><span>' + esc(POS_TRANSFER.bankName) + '</span></div>' +
+      '<div class="row"><span>Account number</span><span>' + esc(POS_TRANSFER.accountNumber) + ' <button type="button" class="copyBtn" data-acct="' + esc(POS_TRANSFER.accountNumber) + '" onclick="copyAcct(this)">Copy</button></span></div>' +
+      '<div class="row"><span>Account name</span><span>' + esc(POS_TRANSFER.accountName) + '</span></div>';
+    document.getElementById('claimBtn').hidden = false;
+    startExpiryCountdown();
+  }
+
+  refreshBtn.onclick = () => { refreshBtn.disabled = true; refreshBtn.textContent = 'Getting a new one...'; location.reload(); };
+  renderTransferBox();
+}
 
 // Same 15s-poll pattern as dine-in's own pay page -- "Payment confirmed!"
 // never needs a manual refresh to notice.

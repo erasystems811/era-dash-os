@@ -1,6 +1,6 @@
 import express from 'express';
-import { verifyPaystackSignature, findOrderByPaymentReference, findTopupByPaymentReference } from './payment.js';
-import { completePayment, completeTopupPayment } from './flow.js';
+import { verifyPaystackSignature, findOrderByPaymentReference, findTopupByPaymentReference, findOrderPaymentByPaymentReference } from './payment.js';
+import { completePayment, completeTopupPayment, confirmOrderPayment } from './flow.js';
 
 export const router = express.Router();
 
@@ -23,6 +23,14 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
     const topup = await findTopupByPaymentReference(event.data.reference);
     if (topup) {
       await completeTopupPayment(topup.id);
+      return;
+    }
+    // Chidera, 2026-09-21: "LET DINE IN SUPPORT PAYSTACK O" -- same
+    // narrower-first reasoning as the topup check above; a dine-in
+    // payment's own reference never matches a real order row either.
+    const orderPayment = await findOrderPaymentByPaymentReference(event.data.reference);
+    if (orderPayment) {
+      await confirmOrderPayment(orderPayment.id);
       return;
     }
     const order = await findOrderByPaymentReference(event.data.reference);

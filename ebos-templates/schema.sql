@@ -984,7 +984,48 @@ create table if not exists order_payment (
   covers_item_ids uuid[],
   paid_by_customer_id uuid references customers(id),
   created_at timestamptz not null default now(),
-  confirmed_at timestamptz
+  confirmed_at timestamptz,
+  -- Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+  -- PAYSTACK DOES" -- a real, one-time Moniepoint account generated just
+  -- for this one payment (POST /v1/transactions, keyed by this row's own
+  -- `reference`), confirmed live against a real account -- the ONLY
+  -- account Moniepoint will actually track against our own reference (a
+  -- plain transfer to the business's regular static account is never
+  -- even seen as a "POS transaction" on their side at all, confirmed
+  -- live -- their POS webhook only covers terminal-originated activity,
+  -- so the static account can never be auto-confirmed by any mechanism).
+  -- Expires on Moniepoint's own side ~5 minutes after creation (confirmed
+  -- live) -- dynamic_account_expires_at is OUR OWN clock, set a little
+  -- earlier (4 minutes, engine/flow.js's DYNAMIC_ACCOUNT_TTL_MS) so the
+  -- customer-facing countdown never claims more time than Moniepoint
+  -- will actually honor. A transfer that lands AFTER expiry still
+  -- reaches the real account safely (confirmed live, a real NGN 100
+  -- test) -- only the auto-match-by-reference stops working, which is
+  -- exactly why the pay page's own "I've sent it" tap always falls back
+  -- to alerting staff instead of ever telling a customer their payment
+  -- failed.
+  -- dynamic_account_ready_at: real live report, 2026-09-21 -- sending to
+  -- a freshly generated account IMMEDIATELY failed with "Recipient KYC
+  -- registration is incomplete" (a real bank-side rejection); a second
+  -- account, paid several minutes after being generated, went through
+  -- fine. Consistent with a brief NIBSS propagation delay new virtual
+  -- accounts commonly have before every bank's own Name Enquiry
+  -- recognizes them. The pay page hides the account number behind a
+  -- short "preparing" countdown until this timestamp, instead of ever
+  -- letting a customer try to pay it too soon.
+  dynamic_account_number text,
+  dynamic_account_name text,
+  dynamic_account_expires_at timestamptz,
+  dynamic_account_ready_at timestamptz,
+  -- Chidera, 2026-09-21: "LET DINE IN SUPPORT PAYSTACK O" -- dine-in's own
+  -- pay page never had a Paystack option at all (only POS transfer or a
+  -- generic "pay at the counter" line) -- same payment_reference/
+  -- payment_link_url shape order_topup already uses for its own real
+  -- Paystack transaction (engine/payment.js's
+  -- initializeOrderPaymentPaystackTransaction), keyed to THIS specific
+  -- payment (a split share or the whole table), not the order as a whole.
+  payment_reference text,
+  payment_link_url text
 );
 create index if not exists order_payment_order_idx on order_payment (order_id);
 create index if not exists order_payment_pending_amount_idx on order_payment (amount) where status = 'pending';
@@ -1239,6 +1280,28 @@ create table if not exists pos_sync_config (
   -- API-key-based path (never actually reached live); this is the one
   -- that matters. See migrations/0055_pos_webhook_secret.sql.
   webhook_secret text,
+  -- Chidera, 2026-09-21: the REAL "POS as a Platform" API works after
+  -- all -- root cause of every earlier "Invalid key provided" was
+  -- scripts/add-pos-sync.mjs hitting the wrong base URL (api.pos.
+  -- moniepoint.com) and treating a single api_key as a bearer token
+  -- directly. The real flow: POST https://channel.moniepoint.com/v1/auth
+  -- with {clientId, clientSecret} returns a real bearer accessToken
+  -- (~24h expiry), confirmed live against a real account (token scoped
+  -- "erp-integration", the same feature she saw blank on the physical
+  -- terminal -- same underlying credential, now confirmed working). api_key
+  -- above is the old, dead single-key shape; client_id/client_secret is
+  -- the real one, used by engine/moniepoint-api.js's own token exchange.
+  -- See migrations/0056_pos_client_credentials.sql.
+  client_id text,
+  client_secret text,
+  -- Chidera, 2026-09-21: the terminal that gets a real, one-time payment
+  -- request pushed to it (POST /v1/transactions) for every POS payment --
+  -- confirmed live: this generates a genuinely NEW, single-use account
+  -- number per request (order_payment's own dynamic_account_number
+  -- below), not the one static account every customer used to be quoted.
+  -- Found from the physical device itself (a sticker on the
+  -- back/bottom, or its own Device Info menu).
+  terminal_serial text,
   connected_at timestamptz
 );
 create table if not exists pos_transaction (
@@ -1262,6 +1325,13 @@ create index if not exists pos_transaction_occurred_at_idx on pos_transaction(oc
 -- provider has NO default -- see migrations/0054_payment_config.sql's own
 -- comment for why an absent row must keep meaning "whatever
 -- PAYMENT_PROVIDER already says", not silently become 'manual'.
+-- transfer_account_number/transfer_account_name/transfer_bank_name below
+-- are unused as of 2026-09-21 ("ISNT THERE ALREADY SPACE IN SETTING TO PUT
+-- ACCOUNT NUMBER AND ALL?") -- the transfer account POS quotes customers
+-- now reads straight from business.bank_name/bank_account_number/
+-- bank_account_name (engine/payment.js's getPaymentConfig()), the same
+-- fields the "manual" flow has always used. Left in place, not dropped,
+-- only because migrate.mjs is DDL-additive-only by design.
 create table if not exists payment_config (
   business_id uuid primary key references business(id),
   provider text check (provider in ('pos', 'paystack', 'manual')),

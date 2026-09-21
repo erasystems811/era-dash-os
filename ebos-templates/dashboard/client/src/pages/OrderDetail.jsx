@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
-import { nextStageFor } from '../orderStages.js';
+import { nextStageFor, canCancelFrom } from '../orderStages.js';
 import Loading from '../components/Loading.jsx';
 
 export default function OrderDetail() {
@@ -20,7 +20,26 @@ export default function OrderDetail() {
   const [overrideError, setOverrideError] = useState(null);
 
   if (!data) return <Loading />;
-  const { order, items, customer, topups = [], paymentProofs = [], delivery, deliveryAssignment } = data;
+  const { order, items, customer, topups = [], paymentProofs = [], delivery, deliveryAssignment, tableLabel, businessName } = data;
+
+  // Chidera, 2026-09-21: "the docket is for kitchen people o so, hope it
+  // has details a standard kitchen will need" -- grouped by station
+  // (product.category, e.g. Mains/Drinks/Proteins) the same way the
+  // Catalogue page already groups the menu, so a kitchen with more than a
+  // couple of items can scan straight to their own section instead of
+  // reading every line. Only groups when this business actually uses
+  // categories at all (product.category's own schema comment: "never
+  // invented") -- a flat list otherwise, not one lonely "Other" header.
+  function groupByCategory(list) {
+    if (!list.some((i) => i.category)) return [[null, list]];
+    const groups = new Map();
+    for (const item of list) {
+      const key = item.category || 'Other';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+    return [...groups.entries()];
+  }
 
   // Chidera, 2026-09-20: "that new sign on kanban should keep showing when
   // kanban is tapped open na so they can clarify... a sub section of add
@@ -100,6 +119,7 @@ export default function OrderDetail() {
 
   return (
     <div>
+      <div className="no-print">
       <div className="page-header">
         <div>
           <h1>{order.reference}</h1>
@@ -107,9 +127,14 @@ export default function OrderDetail() {
             Engine state: {order.engine_state} &middot; Payment: <span className={`badge ${order.payment_status}`}>{order.payment_status}</span>
           </p>
         </div>
-        <Link to="/" className="btn secondary" style={{ padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8 }}>
-          Back to orders
-        </Link>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="secondary" onClick={() => window.print()} style={{ padding: '8px 14px' }}>
+            Print docket
+          </button>
+          <Link to="/" className="btn secondary" style={{ padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8 }}>
+            Back to orders
+          </Link>
+        </div>
       </div>
 
       <div className="card">
@@ -278,13 +303,99 @@ export default function OrderDetail() {
             <div style={{ display: 'flex', gap: 8 }}>
               {dineinUnserved && <button onClick={markServed}>Mark as served</button>}
               {next && <button onClick={() => advanceStatus(next.next)}>{next.label}</button>}
-              <button className="secondary" onClick={cancelOrder}>
-                Cancel order
-              </button>
+              {canCancelFrom(order) && (
+                <button className="secondary" onClick={cancelOrder}>
+                  Cancel order
+                </button>
+              )}
             </div>
           </div>
         );
       })()}
+      </div>
+
+      {/* Chidera, 2026-09-21: "the orders placed that appear in the kanban
+          for in house can it be printed from a docket?" -- staff's own
+          browser print (whatever printer is already set up on their
+          device), not a direct-to-receipt-printer integration yet (that
+          needs a specific printer model to build against). Hidden on
+          screen, the ONLY thing shown when the "Print docket" button
+          above actually triggers a print (index.css's own @media print
+          block hides everything else via .no-print). Reuses the exact
+          same mainItems/addOnItems served-vs-new split the on-screen
+          Items card above already computed, so the printed docket and
+          what staff see on screen never disagree.
+          "the docket is for kitchen people o so, hope it has details a
+          standard kitchen will need" -- no price/total here on purpose,
+          a kitchen ticket is about what to cook, not what's owed (that
+          stays on the customer-facing invoice/receipt, routes/documents.js
+          -- confirmed again after a brief back-and-forth: Chidera's own
+          real reference photo of a real kitchen docket had no prices on
+          it either). Grouped by station (category) when this business
+          uses them, table number made the single biggest thing on the
+          page since that's the first thing a kitchen scans for. */}
+      <div className="printDocket">
+        {businessName && <div className="docketBrand">{businessName}</div>}
+        <div className="docketTable">
+          {order.channel === 'dinein' && tableLabel ? `Table ${tableLabel}` : (order.fulfilment_type || order.channel || '').toUpperCase()}
+        </div>
+        <div className="docketMeta">
+          {order.reference} &middot;{' '}
+          {new Date(order.created_at).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+        </div>
+        <hr />
+        {groupByCategory(mainItems).map(([category, group]) => (
+          <div key={category || 'main'} className="docketGroup">
+            {category && <div className="docketCategory">{category}</div>}
+            {group.map((i) => (
+              <div key={i.id} className="docketItem">
+                <span className="docketQty">{i.quantity}&times;</span>
+                <span className="docketName">
+                  {i.name}
+                  {i.newQty > 0 && <span className="docketNew"> NEW</span>}
+                  {i.answers?.length > 0 && (
+                    <div className="docketNote">
+                      {i.answers.map((a, idx) => (
+                        <div key={idx}>
+                          {a.question}: {a.answer}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+        {addOnItems.length > 0 && (
+          <>
+            <div className="docketAddonHead">Add on &middot; after serving</div>
+            {groupByCategory(addOnItems).map(([category, group]) => (
+              <div key={category || 'addon'} className="docketGroup">
+                {category && <div className="docketCategory">{category}</div>}
+                {group.map((i) => (
+                  <div key={i.id} className="docketItem">
+                    <span className="docketQty">{i.quantity}&times;</span>
+                    <span className="docketName">
+                      {i.name}
+                      <span className="docketNew"> NEW</span>
+                      {i.answers?.length > 0 && (
+                        <div className="docketNote">
+                          {i.answers.map((a, idx) => (
+                            <div key={idx}>
+                              {a.question}: {a.answer}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </>
+        )}
+      </div>
     </div>
   );
 }

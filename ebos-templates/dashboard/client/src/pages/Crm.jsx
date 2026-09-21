@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell, BarChart, Bar } from 'recharts';
 import { api } from '../api.js';
 import Loading from '../components/Loading.jsx';
 import StatCard, { Delta } from '../components/StatCard.jsx';
@@ -43,6 +43,8 @@ export default function Crm() {
   const [stats, setStats] = useState(null);
   const [recent, setRecent] = useState(null);
   const [months, setMonths] = useState(null);
+  const [topProducts, setTopProducts] = useState(null);
+  const [byDayOfWeek, setByDayOfWeek] = useState(null);
 
   useEffect(() => {
     api.get('/customers/recent').then(setRecent);
@@ -51,11 +53,16 @@ export default function Crm() {
 
   useEffect(() => {
     setStats(null);
+    setTopProducts(null);
+    setByDayOfWeek(null);
+    const monthParam = period === 'cumulative' ? '' : `?month=${period}`;
     const url = period === 'cumulative' ? '/customers/stats' : `/customers/monthly-stats?month=${period}`;
     api.get(url).then(setStats);
+    api.get(`/sales/top-products${monthParam}`).then(setTopProducts);
+    api.get(`/sales/by-day-of-week${monthParam}`).then(setByDayOfWeek);
   }, [period]);
 
-  if (!stats || !recent || !months) return <Loading />;
+  if (!stats || !recent || !months || !topProducts || !byDayOfWeek) return <Loading />;
 
   const segmentData = [
     { key: 'new', name: 'New', value: stats.segments.new },
@@ -140,6 +147,22 @@ export default function Crm() {
           value={formatMoneyShort(stats.totalRevenue)}
           delta={<Delta pct={stats.deltas.revenuePct} />}
         />
+        <StatCard
+          iconBg="var(--warn-soft)"
+          iconColor="var(--warn)"
+          icon={
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+            </svg>
+          }
+          label="Upsell Success Rate"
+          value={stats.upsellSuccessRate === null ? '—' : `${stats.upsellSuccessRate}%`}
+          delta={
+            <span className="hint">
+              {stats.upsellOffered ? `${stats.upsellAccepted} of ${stats.upsellOffered} offers taken` : 'No upsells offered yet'}
+            </span>
+          }
+        />
       </div>
 
       <div className="crm-charts-grid">
@@ -190,6 +213,44 @@ export default function Crm() {
                 ))}
               </div>
             </>
+          )}
+        </div>
+      </div>
+
+      <div className="crm-charts-grid crm-sales-grid">
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Best Sellers</h3>
+          <p className="hint" style={{ marginTop: -8 }}>Top items by units sold, this period.</p>
+          {topProducts.length === 0 ? (
+            <p className="hint">No completed orders in this period yet.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={Math.max(180, topProducts.length * 34)}>
+              <BarChart data={topProducts} layout="vertical" margin={{ left: 8, right: 24 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
+                <XAxis type="number" fontSize={12} stroke="var(--text-muted)" allowDecimals={false} />
+                <YAxis type="category" dataKey="name" fontSize={12} stroke="var(--text-muted)" width={120} tick={{ width: 110 }} />
+                <Tooltip formatter={(value, key) => (key === 'unitsSold' ? [`${value} sold`, 'Units'] : [formatMoney(value), 'Revenue'])} />
+                <Bar dataKey="unitsSold" fill="var(--gold)" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Best-Selling Days</h3>
+          <p className="hint" style={{ marginTop: -8 }}>Orders by day of the week, this period.</p>
+          {byDayOfWeek.every((d) => d.orderCount === 0) ? (
+            <p className="hint">No completed orders in this period yet.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={byDayOfWeek}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="day" fontSize={12} stroke="var(--text-muted)" tickFormatter={(d) => d.slice(0, 3)} />
+                <YAxis fontSize={12} stroke="var(--text-muted)" allowDecimals={false} />
+                <Tooltip formatter={(value, key) => (key === 'orderCount' ? [value, 'Orders'] : [formatMoney(value), 'Revenue'])} />
+                <Bar dataKey="orderCount" fill="var(--accent)" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
           )}
         </div>
       </div>

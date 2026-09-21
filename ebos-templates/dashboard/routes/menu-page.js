@@ -8,7 +8,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderSingleOrderPayPage } from '../engine/menu-page-template.js';
 import { menuForBranch, resolveMenuBranding, resolveWaNumber } from './dinein-menu.js';
-import { handleWebMenuOrder, getOpenOrder } from '../engine/flow.js';
+import { handleWebMenuOrder, getOpenOrder, notifyCustomerClaimedPosPayment, ensureDynamicPosAccount } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { estimateFeeForAddress } from '../engine/delivery.js';
 import { getPaymentConfig } from '../engine/payment.js';
@@ -234,7 +234,7 @@ router.get('/:token/pay', async (req, res) => {
   const order = await getOpenOrder(customer.id);
   const payment = order ? await findPayment(order) : null;
   const paymentConfig = await getPaymentConfig();
-  const posTransfer =
+  let posTransfer =
     paymentConfig?.provider === 'pos' && paymentConfig.transfer_account_number && paymentConfig.transfer_account_name && paymentConfig.transfer_bank_name
       ? {
           accountNumber: paymentConfig.transfer_account_number,
@@ -242,13 +242,32 @@ router.get('/:token/pay', async (req, res) => {
           bankName: paymentConfig.transfer_bank_name,
         }
       : null;
+  let dynamicExpiresAt = null;
+  let dynamicReadyAt = null;
+  // Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+  // PAYSTACK DOES" -- a real, one-time account for THIS payment instead
+  // of the same static one every customer sees, confirmed live. Only
+  // attempted for a genuinely pending payment (a confirmed/failed one has
+  // nothing left to pay) -- falls straight back to the static account
+  // above on any failure, so a Moniepoint hiccup never breaks the page.
+  if (posTransfer && payment?.status === 'pending') {
+    const dynamic = await ensureDynamicPosAccount(payment);
+    if (dynamic) {
+      posTransfer = { accountNumber: dynamic.accountNumber, accountName: dynamic.accountName, bankName: posTransfer.bankName };
+      dynamicExpiresAt = dynamic.expiresAt;
+      dynamicReadyAt = dynamic.readyAt;
+    }
+  }
   res.set('Content-Type', 'text/html').send(
     renderSingleOrderPayPage({
       businessName: bizRows[0]?.name || '',
       amount: payment ? Number(payment.amount) : Number(order?.total || 0),
       confirmed: payment?.status === 'confirmed',
       posTransfer,
+      dynamicExpiresAt,
+      dynamicReadyAt,
       statusPath: `/m/${req.params.token}/pay/status`,
+      claimPath: `/m/${req.params.token}/pay/claim`,
     })
   );
 });
@@ -264,4 +283,21 @@ router.get('/:token/pay/status', async (req, res) => {
   if (!order) return res.json({ confirmed: true });
   const payment = await findPayment(order);
   res.json({ confirmed: payment?.status === 'confirmed' });
+});
+
+// Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+// PAYSTACK DOES" -- the pay page's own "I've sent it" button. Checks
+// Moniepoint directly first and auto-confirms instantly if it already
+// shows paid; only falls back to alerting staff if it doesn't (see
+// notifyCustomerClaimedPosPayment's own comment for why that's never
+// treated as a failure).
+router.post('/:token/pay/claim', async (req, res) => {
+  const customer = await resolveCustomer(req.params.token);
+  if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  const order = await getOpenOrder(customer.id);
+  if (!order) return res.status(404).json({ error: 'No open order right now.' });
+  const payment = await findPayment(order);
+  if (payment?.status === 'confirmed') return res.json({ ok: true, alreadyConfirmed: true });
+  await notifyCustomerClaimedPosPayment(payment, order, customer);
+  res.json({ ok: true });
 });

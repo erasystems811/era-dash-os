@@ -12,7 +12,6 @@ import { router as workstationRoutes } from './routes/workstation.js';
 import { router as workstationEsfRoutes } from './routes/workstation-esf.js';
 import { main as runBotHealthCheck } from '../scripts/check-bot-health.mjs';
 import { main as runDeepHealthCheck } from '../scripts/deep-health-check.mjs';
-import { main as runBackupAllClients } from '../scripts/backup-all-clients.mjs';
 
 const MIGRATIONS_DIR = path.join(process.cwd(), '..', 'ebos-templates', 'migrations');
 // Read once at boot, not per-request -- this is a static doc, not data.
@@ -631,8 +630,10 @@ function businessesSection(ebosClients) {
 
   <fieldset>
     <legend>Database backups</legend>
-    <p class="muted">Every client's database is backed up automatically once a day (pg_dump, pulled down to this server -- see README.md's "Backups" section for the restore command). Run it right now instead of waiting for tonight's automatic pass.</p>
+    <p class="muted">Every client's database is backed up automatically every 6 hours (pg_dump, pulled down to this server -- see README.md's "Backups" section for the restore command). Run it right now instead of waiting for the next automatic pass.</p>
     <button type="button" onclick="runBackupNow()">Run backup now</button>
+    <p class="muted" style="margin-top:14px;">A backup nobody's ever restored isn't verified, it's just a hope. This actually restores each client's latest backup into a disposable test database, confirms real data comes back, then discards it -- runs automatically every Sunday, or right now:</p>
+    <button type="button" onclick="verifyBackupsNow()">Verify backups now</button>
   </fieldset>
 
   <fieldset>
@@ -837,12 +838,27 @@ function page(clients, ebosClients) {
     </form>
 
     <h4>Add / update payment</h4>
+    <p class="muted">The gateway's own API keys (Flutterwave/Paystack), just credentials -- doesn't decide how THIS client actually gets paid. See "How this client gets paid" below for that.</p>
     <form id="paymentForm">
       <label>Provider</label>
       <select name="provider"><option value="flutterwave">Flutterwave</option><option value="paystack">Paystack</option></select>
       <label>Secret key</label><input name="secretKey" required>
       <label>Public key</label><input name="publicKey" required>
       <button type="submit">Add payment</button>
+    </form>
+
+    <h4>How this client gets paid</h4>
+    <p class="muted">Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE CLIENT DASHBOARD" -- ERA's own call per client, not something the business's own staff can set. POS: customer pays by transfer (a real Moniepoint transaction auto-confirms it, no staff step) or taps a card on the terminal for dine-in. Paystack: a real payment link, using the API keys above. Manual: bank details + a photo of proof. "ISNT THERE ALREADY SPACE IN SETTING TO PUT ACCOUNT NUMBER AND ALL?" -- yes: the transfer account quoted to customers is whatever bank name/account number/account name the business already has saved in their own Settings (the same fields "manual" has always used) -- nothing to duplicate here, just the provider choice. Leave provider blank to keep things exactly as they are today. <button type="button" onclick="loadPaymentConfig()">Load current</button></p>
+    <div id="paymentConfigStatus" style="margin:10px 0;"></div>
+    <form id="paymentConfigForm">
+      <label>Provider</label>
+      <select name="provider">
+        <option value="">Not set (keep current behaviour)</option>
+        <option value="pos">POS</option>
+        <option value="paystack">Paystack</option>
+        <option value="manual">Manual</option>
+      </select>
+      <button type="submit">Save</button>
     </form>
 
     <h4>Message wallet</h4>
@@ -860,6 +876,29 @@ function page(clients, ebosClients) {
       <label>Add / update (one KEY=value per line)</label>
       <textarea name="vars" rows="5" style="width:100%;font-family:monospace;font-size:13px;" placeholder="OPENAI_API_KEY=sk-...&#10;SOME_OTHER_VAR=value" required></textarea>
       <button type="submit">Set env vars</button>
+    </form>
+
+    <h4>Migrate to another server</h4>
+    <p class="muted">Moves this client's real database and secrets to a different shared server -- no fresh secrets, no empty database, no DNS change (that's the separate "Cutover" step below, only after you've checked the new deployment yourself).</p>
+    <form id="migrateForm2">
+      <label>Provider</label>
+      <select name="provider"><option value="oracle">Oracle</option><option value="hetzner">Hetzner</option></select>
+      <label>Destination</label>
+      <select name="sharedServerMode" id="migrateSharedServerMode">
+        <option value="new">New shared server</option>
+        <option value="join">Join an existing shared server</option>
+      </select>
+      <div id="migrateSharedServerIpWrap" class="hidden">
+        <label>Shared server</label>
+        <select name="sharedServerIp" id="migrateSharedServerIp"></select>
+      </div>
+      <button type="submit">Start migration</button>
+    </form>
+
+    <h4>Cutover (flips DNS + registry to the migrated server)</h4>
+    <p class="muted">Only run this after you've verified the migrated deployment works -- it flips real traffic. The old server keeps running untouched afterward, as a rollback.</p>
+    <form id="cutoverForm2">
+      <button type="submit">Cut over now</button>
     </form>
 
     <h4 class="danger">Tear down (deletes the server + repo, permanent)</h4>
@@ -1053,6 +1092,25 @@ document.getElementById('paymentForm').addEventListener('submit', (e) => {
   submitJson('/api/add-payment', { client: currentClient, provider: f.get('provider'), secretKey: f.get('secretKey'), publicKey: f.get('publicKey') });
 });
 
+async function loadPaymentConfig() {
+  const el = document.getElementById('paymentConfigStatus');
+  el.textContent = 'Loading...';
+  const res = await fetch('/api/ebos/payment-config?client=' + encodeURIComponent(currentClient));
+  const data = await res.json();
+  if (!res.ok) { el.textContent = 'Error: ' + (data.error || 'failed to load'); return; }
+  el.textContent = 'Provider: ' + (data.provider || 'not set') + (data.transfer_account_number ? ' -- transfer account on file: ' + data.transfer_bank_name + ' ' + data.transfer_account_number + ' (' + data.transfer_account_name + ')' : ' -- no transfer account saved in this business\\'s own Settings yet');
+  document.getElementById('paymentConfigForm').provider.value = data.provider || '';
+}
+
+document.getElementById('paymentConfigForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const res = await fetch('/api/ebos/payment-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: currentClient, provider: f.get('provider') }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  loadPaymentConfig();
+});
+
 async function loadEnv() {
   const el = document.getElementById('envList');
   el.textContent = 'Loading...';
@@ -1120,6 +1178,13 @@ async function runBackupNow() {
   pollJob(data.jobId);
 }
 
+async function verifyBackupsNow() {
+  const res = await fetch('/api/verify-backups-now', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  pollJob(data.jobId);
+}
+
 async function confirmDns(name) {
   const res = await fetch('/api/confirm-dns', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name }) });
   if (!res.ok) { alert('Failed to confirm'); return; }
@@ -1130,6 +1195,35 @@ document.getElementById('teardownForm').addEventListener('submit', (e) => {
   e.preventDefault();
   if (!confirm('Really tear down ' + currentClient + '? This deletes the server and cannot be undone.')) return;
   submitJson('/api/teardown', { client: currentClient, confirm: true });
+});
+
+document.getElementById('migrateSharedServerMode').addEventListener('change', async (e) => {
+  const wrap = document.getElementById('migrateSharedServerIpWrap');
+  if (e.target.value !== 'join') { wrap.classList.add('hidden'); return; }
+  wrap.classList.remove('hidden');
+  const select = document.getElementById('migrateSharedServerIp');
+  select.innerHTML = '<option>Loading...</option>';
+  const servers = await fetch('/api/workstation/shared-servers').then((r) => r.json());
+  select.innerHTML = servers.map((s) => '<option value="' + s.ip + '">' + s.ip + ' (' + s.provider + ', ' + s.clientCount + ' client(s))</option>').join('') || '<option value="">No shared servers yet</option>';
+});
+
+document.getElementById('migrateForm2').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const sharedServerMode = f.get('sharedServerMode');
+  if (!confirm('Migrate ' + currentClient + ' to a ' + (sharedServerMode === 'join' ? 'shared server (' + f.get('sharedServerIp') + ')' : 'brand new shared server') + '? This deploys a real copy of its live data -- the old server keeps running untouched until you separately cut over.')) return;
+  submitJson('/api/migrate-client', {
+    client: currentClient,
+    provider: f.get('provider'),
+    sharedServerMode,
+    sharedServerIp: f.get('sharedServerIp') || undefined,
+  });
+});
+
+document.getElementById('cutoverForm2').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (!confirm('Cut over ' + currentClient + ' now? This flips real DNS traffic to the migrated server. Only do this after you\\'ve verified it works.')) return;
+  submitJson('/api/cutover-client', { client: currentClient });
 });
 
 function escClient(value) {
@@ -1915,6 +2009,67 @@ app.post('/api/ebos/pos-sync-mode', async (req, res) => {
   }
 });
 
+// Chidera, 2026-09-20: "how do we integrate the pos now" -- the real
+// connection mechanism turned out to be a webhook subscription created
+// through Moniepoint's own Settings UI (not scripts/add-pos-sync.mjs's
+// API-key system, which never actually worked), authenticated with one
+// HMAC secret instead of Basic auth credentials -- see engine/webhook-
+// moniepoint.js's own comment on era-demo for the full mechanism. This is
+// the one write this session couldn't reach directly (needs the client's
+// own ebosAdminToken, which only lives here), so it's a real, permanent
+// route -- not a one-off -- same shape as pos-sync-mode just above.
+app.post('/api/ebos/pos-sync-webhook-secret', async (req, res) => {
+  try {
+    const { client: name, secret } = req.body;
+    if (!secret) return res.status(400).json({ error: 'secret is required.' });
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/pos-sync-config/webhook-secret', 'POST', { secret }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-21: "LET ME TRY ANOTHER ACCOUNT AND SEE IF IT WORKS" --
+// the real "POS as a Platform" clientId/clientSecret pair, confirmed
+// working live (see pos_sync_config's own schema comment for the root
+// cause of every earlier "Invalid key provided"). Same shape as the
+// webhook-secret route just above.
+app.post('/api/ebos/pos-sync-client-credentials', async (req, res) => {
+  try {
+    const { client: name, clientId, clientSecret, terminalSerial } = req.body;
+    if (!clientId || !clientSecret) return res.status(400).json({ error: 'clientId and clientSecret are required.' });
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/pos-sync-config/client-credentials', 'POST', { clientId, clientSecret, terminalSerial: terminalSerial || undefined }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE
+// CLIENT DASHBOARD" -- how a business gets paid is ERA's own call per
+// client, same shape as pos-sync-mode/webhook-secret above, not a
+// business-owner Settings field. GET reads the current provider/transfer
+// details (client's own /api/payment-config now needs an ERA admin token
+// too), POST sets them.
+app.get('/api/ebos/payment-config', async (req, res) => {
+  try {
+    const client = ebosClientOrThrow(req.query.client);
+    res.json(await callBusinessApi(client, '/api/payment-config', 'GET'));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/ebos/payment-config', async (req, res) => {
+  try {
+    const { client: name, provider } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/payment-config', 'POST', { provider: provider || null }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
 // ONE shared Chowdeck account for every business, on purpose -- CHOWDECK_
 // SECRET_KEY/CHOWDECK_MERCHANT_REFERENCE live once in secrets.env, never
 // per-business. Turning this on for a business pushes those same two
@@ -2313,12 +2468,22 @@ app.post('/api/sync-code', (req, res) => {
   res.json({ jobId });
 });
 
-// On-demand version of the daily backup run scheduled near the bottom of
-// this file -- same script, same job-runner mechanism as everything else
-// here, so you can actually watch a backup happen instead of waiting for
-// (or just trusting) tonight's automatic run.
+// On-demand version of the every-6-hours backup run -- scheduled on the
+// control server's own crontab now (`crontab -l`), not from inside this
+// process, so a code deploy/restart here never shifts or skips a backup
+// the way the old panel-internal setInterval did. Same script, same
+// job-runner mechanism as everything else here, so you can actually watch
+// a backup happen instead of waiting for (or just trusting) the next pass.
 app.post('/api/backup-now', (req, res) => {
   const jobId = startJob('backup-all-clients.mjs', []);
+  res.json({ jobId });
+});
+
+// Same idea, for the weekly restore-drill (verify-backups.mjs) -- also on
+// the control server's own crontab (Sundays 4am), this just lets you watch
+// one happen on demand instead of waiting for Sunday.
+app.post('/api/verify-backups-now', (req, res) => {
+  const jobId = startJob('verify-backups.mjs', []);
   res.json({ jobId });
 });
 
@@ -2340,6 +2505,29 @@ app.post('/api/teardown', (req, res) => {
   const { client, confirm } = req.body;
   if (!client || confirm !== true) return res.status(400).json({ error: 'confirmation required' });
   const jobId = startJob('teardown-client.mjs', [`--client=${client}`]);
+  res.json({ jobId });
+});
+
+// Moves a live shared-mode client's real data/secrets to a different shared
+// server -- see scripts/migrate-client.mjs's own header for exactly what
+// this does and doesn't touch (never DNS/registry -- that's cutover below,
+// a deliberate separate step after a human verifies the move worked).
+app.post('/api/migrate-client', (req, res) => {
+  const { client, provider, sharedServerMode, sharedServerIp } = req.body;
+  if (!client) return res.status(400).json({ error: 'client is required' });
+  if (sharedServerMode === 'join' && !sharedServerIp) return res.status(400).json({ error: 'Pick which shared server to join.' });
+  const args = [`--client=${client}`];
+  if (provider) args.push(`--provider=${provider}`);
+  if (sharedServerMode === 'join') args.push(`--shared-server=${sharedServerIp}`);
+  else args.push('--new-shared-server');
+  const jobId = startJob('migrate-client.mjs', args);
+  res.json({ jobId });
+});
+
+app.post('/api/cutover-client', (req, res) => {
+  const { client } = req.body;
+  if (!client) return res.status(400).json({ error: 'client is required' });
+  const jobId = startJob('cutover-client.mjs', [`--client=${client}`]);
   res.json({ jobId });
 });
 
@@ -2430,20 +2618,12 @@ if (process.env.FIXBOT_ALERTS_ENABLED === '0') {
   }, BOT_HEALTH_CHECK_INTERVAL_MS);
 }, 60_000);
 
-// Same reasoning as Bot Monitoring above, and same guard (FIXBOT_ALERTS_ENABLED=0
-// opts a panel instance -- the standby copy -- out, so it doesn't independently
-// back up every client and send duplicate failure alerts alongside the
-// primary's own run). Daily, not hourly -- see README.md's "Backups" section
-// for the restore command and what this actually covers. A longer initial
-// delay than the bot-health check (10 minutes, not 1) since this isn't
-// urgent the moment the process boots and there's no reason to compete with
-// whatever else is still starting up.
-const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-if (process.env.FIXBOT_ALERTS_ENABLED !== '0') {
-  setTimeout(() => {
-    runBackupAllClients().catch((err) => console.error('Backup run failed:', err));
-    setInterval(() => {
-      runBackupAllClients().catch((err) => console.error('Backup run failed:', err));
-    }, BACKUP_INTERVAL_MS);
-  }, 10 * 60_000);
-}
+// Chidera, 2026-09-21: "back up should be more often" -- moved OFF this
+// panel-process-internal setInterval and onto a real, fixed-time crontab
+// entry instead (every 6 hours, see the control server's own crontab --
+// `crontab -l`). The old approach's actual cadence depended entirely on
+// how long the panel process had been running without a restart, which on
+// a day with several code deploys meant backups firing 7 times in one day
+// and not at all the next -- found live checking real backup file
+// timestamps. A crontab entry fires on the wall clock regardless of how
+// many times this process itself gets redeployed and restarted.

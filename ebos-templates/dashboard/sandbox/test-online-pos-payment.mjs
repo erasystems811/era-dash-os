@@ -75,10 +75,13 @@ async function main() {
     [bizRows[0].id, WEBHOOK_SECRET]
   );
 
-  // Settings' own new "How you get paid" choice -- POS, with real transfer details.
+  // ERA-set provider choice (panel-only, not a Settings field). Transfer
+  // account quoted to customers reads from business's own Settings fields
+  // (getPaymentConfig() joins them in), same as the "manual" flow has
+  // always used -- not a second, payment_config-only place to set it.
+  await pool.query(`insert into payment_config (business_id, provider) values ($1, 'pos')`, [bizRows[0].id]);
   await pool.query(
-    `insert into payment_config (business_id, provider, transfer_account_number, transfer_account_name, transfer_bank_name)
-     values ($1, 'pos', '1234567890', 'Sample Restaurant Ltd', 'Moniepoint MFB')`,
+    `update business set bank_name = 'Moniepoint MFB', bank_account_number = '1234567890', bank_account_name = 'Sample Restaurant Ltd' where id = $1`,
     [bizRows[0].id]
   );
 
@@ -121,6 +124,42 @@ async function main() {
   // account details show directly, no extra tap needed.
   assert(payPageHtml.includes('1234567890') && payPageHtml.includes('Moniepoint MFB'), 'carries the real transfer details from Settings, shown directly, no choice needed');
   assert(!payPageHtml.includes('Tap card') && !payPageHtml.includes('Tap your card'), 'no Card option is ever offered for an online order');
+  assert(payPageHtml.includes('claimBtn') && payPageHtml.includes("I've sent it"), 'the "I\'ve sent it" fallback button is on the page');
+  // Chidera, 2026-09-21: the copy button's data-acct is now built
+  // client-side from POS_TRANSFER (renderTransferBox, menu-page-
+  // template.js) rather than server-rendered directly into the initial
+  // HTML -- that switch is what makes the "preparing, ready in Xs" gate
+  // possible for a real dynamic account (this test has no terminal_serial
+  // configured, so it never generates one, but the rendering path is
+  // shared either way). '"accountNumber":"1234567890"' is the real
+  // account embedded as page data for that client-side render.
+  assert(payPageHtml.includes('"accountNumber":"1234567890"'), 'the real account number is embedded as page data for the copy button to use');
+
+  // Chidera, 2026-09-21: "I SENT MONEY NO PLACE FOR CUSTOMER TO TAP I SENT
+  // THE MONEY FOR BOT TO AUTO CONFIRM" -- a real transfer can land and the
+  // webhook still not arrive; this is the fallback, tapped BEFORE any
+  // webhook fires here, same as a customer would tap it after really
+  // sending money and seeing nothing happen.
+  // Staff's own alert goes to a bare staff phone number, not a `customers`
+  // row -- sendStaffAlert never lands in the `message` table the way a
+  // customer-facing reply does, so the sandbox's own mocked send (console
+  // logging "[sandbox -> phone]: text") is what's actually checkable here.
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => { logs.push(args.join(' ')); originalLog(...args); };
+  const claimRes = await fetch(`${BASE}/m/${token}/pay/claim`, { method: 'POST' });
+  console.log = originalLog;
+  assert(claimRes.status === 200, 'the claim tap is accepted');
+  const { rows: claimedPayment } = await pool.query(`select status from order_payment where order_id = $1`, [order.id]);
+  assert(claimedPayment[0].status === 'pending', 'the claim tap does NOT touch payment state -- purely an early-warning alert, not a second confirmation path');
+  const staffAlert = logs.find((l) => l.includes('2348099990002') && l.includes('POS transfer'));
+  assert(Boolean(staffAlert), 'staff got a real alert naming it as a POS transfer claim');
+  assert(staffAlert?.includes(Number(total).toLocaleString()), 'the alert carries the real amount claimed');
+  const { rows: customerAck } = await pool.query(
+    `select body from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`,
+    [customer.id]
+  );
+  assert(/confirm your transfer/i.test(customerAck[0].body), 'the customer gets their own ack back too, not silence');
 
   const statusBefore = await (await fetch(`${BASE}/m/${token}/pay/status`)).json();
   assert(statusBefore.confirmed === false, 'not confirmed yet before any real POS transaction arrives');

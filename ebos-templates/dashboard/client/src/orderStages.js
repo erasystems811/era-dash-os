@@ -40,10 +40,38 @@ export function nextStageFor(order) {
     case 'ready':
       return order.fulfilment_type === 'pickup' ? { label: 'Picked up', next: 'completed' } : { label: 'Mark in delivery', next: 'in_transit' };
     case 'in_transit':
-      return { label: 'Mark completed', next: 'completed' };
+      // Chidera, 2026-09-21, real live report: "why is the staff now
+      // still able to have a normal mark completed button that can go
+      // through without a reason?" -- 'in_transit' -> 'completed' is
+      // meant to be system-only, the instant a rider enters the real
+      // delivery code (routes/rider.js) -- see this file's own comment
+      // above. A generic button here let staff complete a delivery with
+      // no code check at all, silently bypassing the entire reason the
+      // Delivery card's own "Release delivery" flow (OrderDetail.jsx)
+      // exists in the first place. No manual advance from here anymore --
+      // release-with-a-reason is the only way forward besides the real
+      // code.
+      return null;
     default:
       return null;
   }
+}
+
+// Chidera, 2026-09-21, real live report: "why is there a cancel button on
+// an order that has been mark ready down to in delivery and pick up? i
+// feel does pipeline kanban button and features needs to be designed to
+// what that stage actually needs." -- 'ready' already means the kitchen
+// is done and, for a delivery order, dispatch has already fired (a rider
+// may already be assigned or en route); 'in_transit' means one physically
+// has the food. Cancelling either doesn't match reality anymore -- a real
+// problem at that point is what the Delivery card's own "Release
+// delivery" flow is for, not a plain cancel. Dine-in is untouched (its
+// own separate "Cancel order" / "Mark as served" pair, gated by
+// dineinUnserved in OrderDetail.jsx, already reflects its own real
+// stages).
+export function canCancelFrom(order) {
+  if (order.channel === 'dinein') return true;
+  return !['ready', 'in_transit'].includes(order.status);
 }
 
 // No 'new' column (still-being-built-through-chat orders belong on

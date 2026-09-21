@@ -6,8 +6,8 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderPayPage } from '../engine/menu-page-template.js';
-import { createOrderPayment, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
-import { getPaymentConfig } from '../engine/payment.js';
+import { createOrderPayment, ensureDynamicPosAccount, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, notifyCustomerClaimedPosPayment, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
+import { getPaymentConfig, initializeOrderPaymentPaystackTransaction } from '../engine/payment.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
@@ -495,6 +495,19 @@ async function findOpenOrderForSession(session) {
   return rows[0] || null;
 }
 
+// The FULL order_payment row (payStatusPayload's own `payments` query
+// below only selects display columns, not `reference` -- needed here for
+// ensureDynamicPosAccount/checkMoniepointPaymentPaid to actually check
+// with Moniepoint).
+async function findMyPendingPayment(order, actingCustomerId) {
+  if (!actingCustomerId) return null;
+  const { rows } = await pool.query(
+    `select * from order_payment where order_id = $1 and status = 'pending' and paid_by_customer_id = $2 order by created_at desc limit 1`,
+    [order.id, actingCustomerId]
+  );
+  return rows[0] || null;
+}
+
 // Joint dine-in, Stage 3: everything the pay page (and its poll) needs to
 // show who's here, what they each added, who's already paid for what,
 // and what's genuinely still outstanding. Shared between the initial GET
@@ -589,9 +602,11 @@ async function payStatusPayload(order, session, actingCustomerId) {
 // actually opens. Public, token-authenticated like every other route in
 // this file. Stage 3: the guest here picks who they're paying for (just
 // themselves, or grouped with other guests already at the table) and
-// requests a POS amount to actually pay -- no Paystack link anywhere in
-// this flow, the guest pays a real POS terminal and Moniepoint's webhook
-// (engine/webhook-moniepoint.js) auto-confirms the match.
+// requests a payment amount -- POS (a real POS terminal, Moniepoint's
+// webhook auto-confirms the match) or, "LET DINE IN SUPPORT PAYSTACK O",
+// a real Paystack card payment (engine/payment.js's
+// initializeOrderPaymentPaystackTransaction), depending on the business's
+// own payment_config.provider.
 router.get('/:qrToken/pay', async (req, res) => {
   const table = await resolveTable(req.params.qrToken);
   if (!table) return res.status(404).send('Table not found.');
@@ -610,7 +625,7 @@ router.get('/:qrToken/pay', async (req, res) => {
   // unchanged (payment_config's own schema comment: no row/no provider
   // must never change existing behavior).
   const paymentConfig = await getPaymentConfig();
-  const posTransfer =
+  let posTransfer =
     paymentConfig?.provider === 'pos' && paymentConfig.transfer_account_number && paymentConfig.transfer_account_name && paymentConfig.transfer_bank_name
       ? {
           accountNumber: paymentConfig.transfer_account_number,
@@ -618,6 +633,39 @@ router.get('/:qrToken/pay', async (req, res) => {
           bankName: paymentConfig.transfer_bank_name,
         }
       : null;
+  let dynamicExpiresAt = null;
+  let dynamicReadyAt = null;
+  // Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+  // PAYSTACK DOES" -- a real, one-time account for THIS guest's own
+  // already-pending payment (the "reopen straight into it" resume case),
+  // confirmed live. A guest who hasn't requested an amount yet gets this
+  // from /pay/create instead (nothing to generate a dynamic account FOR
+  // until a real order_payment row exists).
+  let paystackUrl = null;
+  if (posTransfer && actingCustomer) {
+    const myPending = await findMyPendingPayment(order, actingCustomer.id);
+    if (myPending) {
+      const dynamic = await ensureDynamicPosAccount(myPending);
+      if (dynamic) {
+        posTransfer = { accountNumber: dynamic.accountNumber, accountName: dynamic.accountName, bankName: posTransfer.bankName };
+        dynamicExpiresAt = dynamic.expiresAt;
+        dynamicReadyAt = dynamic.readyAt;
+      }
+    }
+  } else if (paymentConfig?.provider === 'paystack' && actingCustomer) {
+    const myPending = await findMyPendingPayment(order, actingCustomer.id);
+    if (myPending) {
+      // Reuses an already-generated link rather than initializing a fresh
+      // Paystack transaction on every page view -- same "don't do this
+      // more than once per payment for no reason" discipline as the POS
+      // dynamic account above.
+      paystackUrl = myPending.payment_link_url
+        || (await initializeOrderPaymentPaystackTransaction({ orderPayment: myPending, order, customer: actingCustomer, amount: Number(myPending.amount) }).catch((err) => {
+          console.error('initializeOrderPaymentPaystackTransaction failed:', err.message);
+          return null;
+        }));
+    }
+  }
   res.set('Content-Type', 'text/html').send(
     renderPayPage({
       businessName: table.business_name,
@@ -626,7 +674,11 @@ router.get('/:qrToken/pay', async (req, res) => {
       status,
       statusPath: `/t/${req.params.qrToken}/pay/status${qs}`,
       createPath: `/t/${req.params.qrToken}/pay/create${qs}`,
+      claimPath: `/t/${req.params.qrToken}/pay/claim${qs}`,
       posTransfer,
+      dynamicExpiresAt,
+      dynamicReadyAt,
+      paystackUrl,
     })
   );
 });
@@ -660,5 +712,52 @@ router.post('/:qrToken/pay/create', async (req, res) => {
   const requested = Array.isArray(req.body?.guestIds) ? req.body.guestIds.map(String) : [];
   const guestIds = requested.includes(actingCustomer.id) ? requested : [...requested, actingCustomer.id];
   const payment = await createOrderPayment(order, guestIds, actingCustomer.id);
-  res.json({ ok: true, amount: Number(payment.amount), status: payment.status });
+  // Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+  // PAYSTACK DOES" -- a real, one-time account for THIS payment, confirmed
+  // live. Only attempted for POS providers with a static account already
+  // set (payment_config's own schema comment) -- falls back to the
+  // static one on any failure, same as the GET /pay route above.
+  let posTransfer = null;
+  let dynamicExpiresAt = null;
+  let dynamicReadyAt = null;
+  let paystackUrl = null;
+  if (payment.status === 'pending') {
+    const paymentConfig = await getPaymentConfig();
+    if (paymentConfig?.provider === 'pos' && paymentConfig.transfer_account_number && paymentConfig.transfer_account_name && paymentConfig.transfer_bank_name) {
+      const dynamic = await ensureDynamicPosAccount(payment);
+      posTransfer = dynamic
+        ? { accountNumber: dynamic.accountNumber, accountName: dynamic.accountName, bankName: paymentConfig.transfer_bank_name }
+        : { accountNumber: paymentConfig.transfer_account_number, accountName: paymentConfig.transfer_account_name, bankName: paymentConfig.transfer_bank_name };
+      dynamicExpiresAt = dynamic?.expiresAt || null;
+      dynamicReadyAt = dynamic?.readyAt || null;
+    } else if (paymentConfig?.provider === 'paystack') {
+      // Chidera, 2026-09-21: "LET DINE IN SUPPORT PAYSTACK O" -- a real
+      // Paystack transaction for THIS payment (a split share or the
+      // whole table), keyed to order_payment, not the order as a whole.
+      paystackUrl = await initializeOrderPaymentPaystackTransaction({ orderPayment: payment, order, customer: actingCustomer, amount: Number(payment.amount) }).catch((err) => {
+        console.error('initializeOrderPaymentPaystackTransaction failed:', err.message);
+        return null;
+      });
+    }
+  }
+  res.json({ ok: true, amount: Number(payment.amount), status: payment.status, posTransfer, dynamicExpiresAt, dynamicReadyAt, paystackUrl });
+});
+
+// Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+// PAYSTACK DOES" -- the pay page's own "I've sent it" button. Checks
+// Moniepoint directly first and auto-confirms instantly if it already
+// shows paid; only falls back to alerting staff if it doesn't (see
+// notifyCustomerClaimedPosPayment's own comment for why that's never
+// treated as a failure).
+router.post('/:qrToken/pay/claim', async (req, res) => {
+  const table = await resolveTable(req.params.qrToken);
+  if (!table) return res.status(404).json({ error: 'Table not found.' });
+  const session = await openSessionFor(table);
+  const order = await findOpenOrderForSession(session);
+  if (!order) return res.status(404).json({ error: 'No open order for this table right now.' });
+  const actingCustomer = await resolveActingCustomer(session, req);
+  if (!actingCustomer) return res.status(404).json({ error: 'Customer not found.' });
+  const payment = await findMyPendingPayment(order, actingCustomer.id);
+  await notifyCustomerClaimedPosPayment(payment, order, actingCustomer);
+  res.json({ ok: true });
 });

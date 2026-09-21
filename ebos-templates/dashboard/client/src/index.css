@@ -404,6 +404,11 @@ a:hover {
   align-items: stretch;
   margin-bottom: 20px;
 }
+/* Best Sellers / Best-Selling Days -- two same-shaped bar charts, unlike
+   Customer Overview/Segments' deliberate 2:1 split above. */
+.crm-sales-grid {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
 
 table {
   width: 100%;
@@ -1277,6 +1282,155 @@ label {
   }
   .crm-charts-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- Print docket (OrderDetail.jsx's "Print docket" button) ----------
+   Chidera, 2026-09-21: "the orders placed that appear in the kanban for in
+   house can it be printed from a docket?" -- browser print (any printer
+   already set up on the staff's own device, receipt printer or otherwise),
+   not yet a direct-to-thermal-printer integration (needs a specific
+   printer model to build against). .printDocket stays hidden on screen and
+   is the ONLY thing visible when actually printing -- everything else on
+   the page (nav, buttons, other cards) is hidden via .no-print so staff
+   get a clean, receipt-style page instead of the whole dashboard UI.
+
+   "the docket is for kitchen people o so, hope it has details a standard
+   kitchen will need? make printed paper look fine and premium and high
+   class" -- table number is the single largest, boldest thing on the
+   page (the first thing a kitchen scans for), items are grouped by
+   station (product.category) the same way the Catalogue page already
+   groups the menu, and there's no price/total here at all (a kitchen
+   ticket is about what to cook, not what's owed). Same Inter type system
+   as the rest of this dashboard (index.css's own :root comment on why
+   Inter, not a second font just for print), letter-spacing and weight
+   doing the "premium" work instead of color, since a thermal printer
+   often can't reproduce color reliably. */
+.printDocket {
+  display: none;
+}
+@media print {
+  /* Found live, 2026-09-21: OrderDetail.jsx's own .no-print only ever
+     hid that page's own content -- the app shell around it (Layout.jsx's
+     .sidebar/.mobile-header/.nav-backdrop) sits OUTSIDE that wrapper
+     entirely, so a real print would have shown the full navy sidebar
+     bleeding onto the page next to the docket. Hidden globally here
+     instead, once, so every future print view (not just this one) gets
+     a clean page automatically -- .main naturally fills the freed space
+     since .app-shell is a plain flex row, not a fixed-position sidebar. */
+  .sidebar,
+  .mobile-header,
+  .nav-backdrop {
+    display: none !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  /* Chidera, 2026-09-21: "hope when its printed it wont be tiny on the
+     paper and actually sit well on the docket paper" -- a real margin
+     instead of the browser's own often-huge default page margin, which
+     otherwise pushes a narrow docket column oddly far from the edge on a
+     normal A4/Letter sheet. Font sizes below (13-26px) are already sized
+     to read clearly on their own regardless of paper -- the one thing
+     genuinely specific to a real receipt-roll printer (58mm vs 80mm
+     paper width) needs the actual printer model to tune exactly, same as
+     the direct-to-thermal-printer integration itself. */
+  @page {
+    margin: 8mm;
+  }
+  .printDocket {
+    display: block;
+    font-family: var(--font-body);
+    color: #000;
+    max-width: 340px;
+    margin: 0 auto;
+  }
+  .printDocket .docketBrand {
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #444;
+    margin-bottom: 10px;
+  }
+  .printDocket .docketTable {
+    text-align: center;
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.1;
+  }
+  .printDocket .docketMeta {
+    text-align: center;
+    font-size: 11.5px;
+    color: #555;
+    margin-top: 4px;
+    margin-bottom: 14px;
+  }
+  .printDocket hr {
+    border: none;
+    border-top: 1.5px solid #000;
+    margin: 0 0 14px;
+  }
+  .printDocket .docketGroup {
+    margin-bottom: 12px;
+  }
+  .printDocket .docketCategory {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #444;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 3px;
+    margin-bottom: 6px;
+  }
+  .printDocket .docketItem {
+    display: flex;
+    gap: 10px;
+    padding: 5px 0;
+    align-items: baseline;
+  }
+  .printDocket .docketQty {
+    flex-shrink: 0;
+    width: 30px;
+    font-weight: 700;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+  }
+  .printDocket .docketName {
+    flex: 1;
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1.3;
+  }
+  .printDocket .docketNew {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    border: 1px solid #000;
+    border-radius: 3px;
+    padding: 1px 4px;
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+  .printDocket .docketNote {
+    font-size: 12px;
+    font-style: italic;
+    color: #444;
+    margin-top: 2px;
+  }
+  .printDocket .docketAddonHead {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: center;
+    border-top: 1.5px dashed #000;
+    border-bottom: 1.5px dashed #000;
+    padding: 6px 0;
+    margin: 10px 0 12px;
   }
 }
 

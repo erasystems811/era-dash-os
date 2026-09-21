@@ -22,7 +22,10 @@ import { loadSecrets } from './lib/secrets.mjs';
 import { addARecord, deleteARecord } from './lib/dns.mjs';
 
 const PRIMARY_IP = '167.233.242.179';
-const STANDBY_IP = '91.99.139.215';
+// Standby rebuilt on Oracle 2026-09-21 ("era-standby") after the old
+// 91.99.139.215 box was destroyed -- keep this in sync with the address
+// in sync-standby.mjs.
+const STANDBY_IP = '145.241.193.64';
 const DOMAIN = 'erasystems.com.ng';
 const HOSTNAME = 'dash';
 const SHORT_TTL = 300;

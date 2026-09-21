@@ -45,9 +45,15 @@ async function main() {
     [bizRows[0].id]
   );
   await pool.query(
-    `insert into payment_config (business_id, provider, transfer_account_number, transfer_account_name, transfer_bank_name)
-     values ($1, 'pos', '1234567890', 'Sample Restaurant Ltd', 'Moniepoint MFB')
-     on conflict (business_id) do update set provider = 'pos', transfer_account_number = '1234567890', transfer_account_name = 'Sample Restaurant Ltd', transfer_bank_name = 'Moniepoint MFB'`,
+    `insert into payment_config (business_id, provider) values ($1, 'pos')
+     on conflict (business_id) do update set provider = 'pos'`,
+    [bizRows[0].id]
+  );
+  // Transfer account quoted to customers reads from business's own Settings
+  // fields (getPaymentConfig() joins them in), same as the "manual" flow
+  // has always used -- not a second, payment_config-only place to set it.
+  await pool.query(
+    `update business set bank_name = 'Moniepoint MFB', bank_account_number = '1234567890', bank_account_name = 'Sample Restaurant Ltd' where id = $1`,
     [bizRows[0].id]
   );
   const { rows: existingBranch } = await pool.query(`select id from branch limit 1`);

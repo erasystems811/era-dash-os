@@ -13,6 +13,7 @@ import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice } from './documents.js';
 import { initializePaystackTransaction, initializePaystackTopupTransaction, getPaymentConfig } from './payment.js';
+import { pushPaymentRequest, lookupTransactionByReference } from './moniepoint-api.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
@@ -889,18 +890,31 @@ async function handleGreeting(customer, text) {
   const message = customer.name
     ? `Hello ${customer.name}! Welcome to ${businessName}, what would you like to order?`
     : `Hello! Welcome to ${businessName}, what would you like to order?`;
-  if (customer.channel !== 'whatsapp') {
+  // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
+  // catch up to our current state" -- found live: an Instagram customer
+  // got this bare greeting with NO menu link at all, ever, anywhere in
+  // the flow (WhatsApp's own CTA-URL button type doesn't exist there) --
+  // they could only order by typing item names and hoping the AI parsed
+  // them right. voice genuinely can't use a link at all (spoken, not
+  // visual), so it keeps the bare greeting -- Instagram gets the same
+  // real menu URL WhatsApp does, just as a plain text line instead of a
+  // button (auto-linkified by Instagram's own client), same fallback
+  // shape sendPaymentLinkButton/sendPosPaymentChoice already use.
+  if (customer.channel === 'voice' || !process.env.PUBLIC_URL) {
     await reply(customer, message, 'greeting');
     return;
   }
-  if (!process.env.PUBLIC_URL) {
-    await reply(customer, message, 'greeting');
-    return;
-  }
-  const headerImageUrl = await businessCoverPhotoUrl();
   const token = await ensureMenuToken(customer);
   const menuUrl = `${process.env.PUBLIC_URL}/m/${token}`;
   const specialsCategory = await findSpecialsCategory(customer.branch_id);
+  if (customer.channel === 'instagram') {
+    const body = specialsCategory
+      ? `${message}\n\nMenu: ${menuUrl}\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
+      : `${message}\n\nMenu: ${menuUrl}`;
+    await reply(customer, body, 'greeting');
+    return;
+  }
+  const headerImageUrl = await businessCoverPhotoUrl();
   const body = specialsCategory
     ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
     : message;
@@ -2075,6 +2089,17 @@ async function sendPosPaymentChoice(customer, order) {
   }
   const token = await ensureMenuToken(customer);
   const url = `${process.env.PUBLIC_URL}/m/${token}/pay`;
+  // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
+  // catch up" -- found live, this was built WhatsApp-only (no CTA-URL
+  // button type on Instagram) with no fallback at all, unlike
+  // sendPaymentLinkButton right above, which already has the correct
+  // pattern -- an Instagram customer on POS would have hit this and
+  // gotten nothing. Same fallback now: a plain text line with the real
+  // link, auto-linkified by Instagram's own client.
+  if (customer.channel === 'instagram') {
+    await reply(customer, `Ready to pay?\n\n${url}`, 'pos_pay_choice');
+    return;
+  }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), 'Ready to pay?', 'Click here', url, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice' });
@@ -3946,7 +3971,12 @@ export async function sendFeedbackRequest(orderId) {
   if (!order) return;
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
   const customer = customerRows[0];
-  if (!customer || customer.channel !== 'whatsapp') return;
+  // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
+  // catch up to our current state" -- this used to flatly skip Instagram
+  // (no feedback request ever sent), the one deliberate WhatsApp-only
+  // gate left after fixing the actual ordering-flow gaps (menu link,
+  // POS payment) -- same plain-text-link fallback as everywhere else now.
+  if (!customer || (customer.channel !== 'whatsapp' && customer.channel !== 'instagram')) return;
   const { rows: inserted } = await pool.query(
     `insert into order_feedback (order_id, branch_id, customer_id, channel)
      values ($1, $2, $3, $4) on conflict (order_id) do nothing returning id`,
@@ -3954,6 +3984,10 @@ export async function sendFeedbackRequest(orderId) {
   );
   if (!inserted.length) return; // already sent for this order
   const url = `${process.env.PUBLIC_URL}/f/${inserted[0].id}`;
+  if (customer.channel === 'instagram') {
+    await reply(customer, `How was your order? Tap below to rate it, takes 10 seconds.\n\n${url}`, 'feedback_form_sent');
+    return;
+  }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), 'How was your order? Tap below to rate it -- takes 10 seconds.', 'Rate your order', url, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[feedback form sent: ${url}]`, trigger: 'feedback_form_sent' });
@@ -4207,6 +4241,16 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
       const params = new URLSearchParams({ g: guestToken });
       if (category) params.set('cat', category);
       const dineinUrl = `${process.env.PUBLIC_URL}/t/${qrToken}?${params.toString()}`;
+      // Chidera, 2026-09-21: "look at my instagram flow... how does
+      // instagram catch up" -- this unconditionally called the WhatsApp-
+      // only CTA-URL button before, no Instagram branch at all -- same
+      // plain-text-link fallback as every other place in this file now
+      // handles it (sendPaymentLinkButton/sendPosPaymentChoice/
+      // handleGreeting).
+      if (customer.channel === 'instagram') {
+        await reply(customer, `${bodyText}\n\n${dineinUrl}`, 'menu_shown');
+        return true;
+      }
       const dineinCredentials = await getWhatsAppCredentials(customer.branch_id);
       try {
         await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, dineinUrl, dineinCredentials, headerImageUrl || (await businessCoverPhotoUrl()));
@@ -4220,6 +4264,15 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
   }
   const token = await ensureMenuToken(customer);
   const url = `${process.env.PUBLIC_URL}/m/${token}${category ? `?cat=${encodeURIComponent(category)}` : ''}`;
+  // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
+  // catch up" -- same fix as the dine-in branch above, this is the main
+  // call site every OTHER menu-link moment in the conversation actually
+  // routes through -- was the real reason an Instagram customer never
+  // saw a menu link anywhere in the whole flow.
+  if (customer.channel === 'instagram') {
+    await reply(customer, `${bodyText}\n\n${url}`, 'menu_shown');
+    return true;
+  }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   // Chidera, 2026-09-16: "ensure image appear on chat cause its not still
   // appearing" -- handleGreeting (this file, ~line 839) already resolved
@@ -4877,36 +4930,204 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
     // actually confirms it.
     await pool.query(`update "order" set payment_status = 'proof_submitted', status = 'confirmation' where id = $1`, [order.id]);
     await reply(customer, `Noted, I will confirm the payment and get back to you shortly.`, 'payment_proof_received');
-    // Staff confirming payment needs both documents in front of them at
-    // once -- the invoice (what was ordered/owed) and the receipt they just
-    // sent (proof it was paid) -- not a bare "check the dashboard" alert.
-    // Built directly now, not read back from generated_document -- Chidera
-    // 2026-09-11: "can the place of documents stop storing invoice and only
-    // store receipts" (createInvoice no longer inserts a row for this to
-    // read; the URL itself still renders the same either way).
-    const invoiceUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/documents/invoice/${order.id}` : null;
+    // Chidera, 2026-09-21: "WHY IS DINE IN HANDOVER TAKING ME OUT OF
+    // WHATSAPP TO SHOW ME INVOICE?" -- these used to be plain-text URLs
+    // inside the alert body, which WhatsApp auto-linkifies to open the
+    // device's own external browser -- exactly the same bug the "confirm"
+    // button below was already fixed for once (2026-09-03 comment,
+    // preserved), just never applied to these two. Dropped entirely, not
+    // converted to more CTA buttons (WhatsApp only allows one per
+    // message) -- the "Confirm payment" button already lands staff on the
+    // order page, which shows the same invoice/items AND the payment-
+    // proof image inline (OrderDetail.jsx's own paymentProofs), so
+    // nothing is actually lost.
     await handover(
       customer,
       `Customer submitted payment proof, needs manual confirmation`,
-      {
-        invoice: invoiceUrl ? `Invoice: ${invoiceUrl}` : null,
-        receipt: process.env.PUBLIC_URL ? `Payment proof: ${process.env.PUBLIC_URL}/documents/payment-proof/${order.id}` : null,
-        // Neither of the two links above is where the actual "Confirm
-        // payment received" button lives -- found live, 2026-09-03: staff
-        // had the invoice and the proof but nothing to actually click to
-        // confirm it, just handover()'s own generic conversation link.
-        // Straight into the order itself (OrderDetail.jsx has the same
-        // "Confirm payment received" button the kanban card does) --
-        // Chidera's call: land inside the card, not on the board having to
-        // find it first.
-        confirm: process.env.PUBLIC_URL ? `Confirm payment: ${process.env.PUBLIC_URL}/orders/${order.id}` : null,
-      },
+      null,
       false, // already sent its own ack ("Noted, I will confirm...") above
+      // found live, 2026-09-03: staff had the invoice and the proof but
+      // nothing to actually click to confirm it, just handover()'s own
+      // generic conversation link. Straight into the order itself
+      // (OrderDetail.jsx has the same "Confirm payment received" button
+      // the kanban card does) -- Chidera's call: land inside the card,
+      // not on the board having to find it first.
       { path: `/orders/${order.id}`, title: 'Confirm payment' }
     );
   } catch (err) {
     console.error(`Failed to download payment proof ${kind}:`, err);
     await reply(customer, `Got your ${kind} but had trouble saving it. Let me get someone to help confirm your payment.`, 'payment_proof_received');
     await handover(customer, `Customer submitted payment proof but the ${kind} failed to save`, null, false);
+  }
+}
+
+// Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+// PAYSTACK DOES" -- checks Moniepoint directly, right now, using this
+// exact payment's own reference (the same one pushPaymentRequest
+// registered it under). Confirmed live: actualAmount stays null the
+// whole time a request is pending or expired, and only gets a real value
+// once a matching transfer has actually cleared -- checking for that,
+// not a specific status string, since the exact "it's paid" wording was
+// never actually observed live (the one real test transfer arrived after
+// its request had already expired).
+export async function checkMoniepointPaymentPaid(payment) {
+  if (!payment?.reference) return false;
+  const tx = await lookupTransactionByReference(payment.reference).catch((err) => {
+    console.error('Moniepoint payment status check failed:', err.message);
+    return null;
+  });
+  if (!tx || tx.actualAmount == null) return false;
+  // A non-null actualAmount only means SOME transfer cleared against this
+  // reference, not that it covers what's owed -- a short transfer (bank
+  // fee, mistyped amount) must not be reported as paid. Compare in kobo,
+  // same minor-unit convention as pushPaymentRequest's own amountKobo and
+  // webhook-moniepoint.js's amount handling. >= rather than strict
+  // equality so a genuine overpayment still counts as paid.
+  const expectedKobo = Math.round(Number(payment.amount) * 100);
+  return Number(tx.actualAmount) >= expectedKobo;
+}
+
+// Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
+// PAYSTACK DOES" -- a real, ONE-TIME Moniepoint account generated just for
+// this one payment (pushPaymentRequest, POST /v1/transactions, keyed by
+// this row's own `reference`), confirmed live -- and, since confirmed
+// live, the ONLY account Moniepoint will ever actually track against our
+// reference (an ordinary transfer straight to the business's regular
+// static account is never even seen as a "POS transaction" on their
+// side, so it can never be auto-confirmed by any mechanism, webhook or
+// lookup -- tried quoting the static account here for exactly one real
+// session, confirmed dead end). Also still fixes the original "tie"
+// problem (two pending payments at the same amount, same static account)
+// for good, since every payment now gets its own real account.
+//
+// Reused for DYNAMIC_ACCOUNT_TTL_MS (4 minutes -- a little short of
+// Moniepoint's own confirmed ~5-minute expiry) rather than pushed fresh
+// on every page load -- a fresh push also re-flashes the physical
+// terminal's own screen (confirmed live, unavoidable -- Chidera: "dont
+// worry build it"), no reason to do that more than once per payment.
+//
+// dynamic_account_ready_at (READY_DELAY_MS, 60s): real live report,
+// 2026-09-21 -- paying a freshly generated account IMMEDIATELY failed
+// with "Recipient KYC registration is incomplete" (a real bank-side
+// rejection); a separate account, paid several minutes after being
+// generated, went through fine. Consistent with the short NIBSS
+// propagation delay new virtual accounts commonly need before every
+// bank's own Name Enquiry recognizes them -- the pay page now hides the
+// account number behind a short "preparing" countdown until this
+// timestamp, instead of ever letting a customer try to pay it too soon.
+//
+// Returns null when no terminal_serial is configured (pos_sync_config)
+// or the push fails for any reason -- callers fall straight back to the
+// existing static-account behaviour unchanged, never a broken pay page.
+const DYNAMIC_ACCOUNT_TTL_MS = 4 * 60 * 1000;
+const READY_DELAY_MS = 60 * 1000;
+
+export async function ensureDynamicPosAccount(payment) {
+  if (payment.dynamic_account_number && payment.dynamic_account_expires_at && new Date(payment.dynamic_account_expires_at) > new Date()) {
+    return {
+      accountNumber: payment.dynamic_account_number,
+      accountName: payment.dynamic_account_name,
+      expiresAt: payment.dynamic_account_expires_at,
+      readyAt: payment.dynamic_account_ready_at,
+    };
+  }
+  try {
+    const { rows } = await pool.query(`select terminal_serial from pos_sync_config where enabled = true and terminal_serial is not null limit 1`);
+    const terminalSerial = rows[0]?.terminal_serial;
+    if (!terminalSerial) return null;
+
+    const amountKobo = Math.round(Number(payment.amount) * 100);
+    await pushPaymentRequest({ terminalSerial, amountKobo, merchantReference: payment.reference });
+    const tx = await lookupTransactionByReference(payment.reference);
+    if (!tx?.accountNumber) return null;
+
+    const expiresAt = new Date(Date.now() + DYNAMIC_ACCOUNT_TTL_MS);
+    const readyAt = new Date(Date.now() + READY_DELAY_MS);
+    await pool.query(
+      `update order_payment set dynamic_account_number = $1, dynamic_account_name = $2, dynamic_account_expires_at = $3, dynamic_account_ready_at = $4 where id = $5`,
+      [tx.accountNumber, tx.accountName, expiresAt, readyAt, payment.id]
+    );
+    payment.dynamic_account_number = tx.accountNumber;
+    payment.dynamic_account_name = tx.accountName;
+    payment.dynamic_account_expires_at = expiresAt;
+    payment.dynamic_account_ready_at = readyAt;
+    return { accountNumber: tx.accountNumber, accountName: tx.accountName, expiresAt, readyAt };
+  } catch (err) {
+    console.error('ensureDynamicPosAccount failed, falling back to the static account:', err.message);
+    return null;
+  }
+}
+
+// Chidera, 2026-09-21: "I SENT MONEY NO PLACE FOR CUSTOMER TO TAP I SENT
+// THE MONEY FOR BOT TO AUTO CONFIRM" -- the pay page's own "I've sent it"
+// button. Checks Moniepoint directly first (checkMoniepointPaymentPaid) --
+// if it already shows paid, confirms instantly (confirmOrderPayment's own
+// existing customer-facing messaging, e.g. completePayment's "Payment
+// received...", handles telling them, same as a real webhook match
+// would). Only falls back to alerting staff when Moniepoint doesn't show
+// it yet -- a real transfer can still land after this (a request expires
+// ~5 minutes after creation, confirmed live, and a late transfer still
+// reaches the real account safely, also confirmed live with real money --
+// see order_payment's own schema comment) -- so this NEVER tells a
+// customer their payment failed, only "not yet" for a person to check.
+export async function notifyCustomerClaimedPosPayment(payment, order, customer) {
+  if (payment && payment.status === 'pending' && (await checkMoniepointPaymentPaid(payment))) {
+    await confirmOrderPayment(payment.id);
+    return;
+  }
+
+  const amount = payment ? Number(payment.amount) : Number(order.total);
+  const reason = `Customer says they've sent a POS transfer (NGN ${amount.toLocaleString()}) but it hasn't auto-confirmed yet`;
+  await pool.query(`update customers set handled_by = 'staff', handover_at = now(), handover_reason = $1 where id = $2`, [reason, customer.id]);
+  await reply(customer, `Noted, I'll confirm your transfer and get back to you here shortly.`, 'handover_ack');
+
+  const recipients = await handoverRecipients();
+  if (!recipients.length) return;
+
+  // Chidera, 2026-09-21: "WHY IS DINE IN HANDOVER TAKING ME OUT OF
+  // WHATSAPP TO SHOW ME INVOICE?" -- a plain-text URL in the alert body
+  // is exactly the bug already fixed once for handover()'s own primary
+  // link (2026-09-03 comment above) -- WhatsApp auto-linkifies it to open
+  // the device's own external browser, not its in-app one. Dropped
+  // entirely, not converted to a second CTA button (WhatsApp only allows
+  // one per message) -- the "Confirm payment" button below already lands
+  // staff on the order page, which shows the same invoice/items and any
+  // payment-proof images inline (OrderDetail.jsx's own paymentProofs).
+  //
+  // "LET INVOICE HANDOVER FOR DINE IN GROUP PAYMENT BASED ON HOW PARTIES
+  // AGREED TO MAKE THE PAYMENT...SO STAFF WONT SEE TO CHECK FOR A SMALL
+  // AMOUNT IN A LARGE INVOICE AND BE WONDERING HOW" -- a split/joint
+  // dine-in payment can genuinely be a small slice of a much bigger table
+  // total (payStatusPayload's own coversLabel logic, dinein-menu.js) --
+  // without saying what this specific amount actually covers, staff
+  // seeing e.g. "NGN 1200" claimed against a "NGN 4700" order have no way
+  // to tell if that's right or a mistake.
+  let coverageNote = '';
+  if (payment && order.channel === 'dinein') {
+    if (payment.covers_item_ids === null) {
+      coverageNote = ` This covers the whole table (order total NGN ${Number(order.total).toLocaleString()}).`;
+    } else {
+      const { rows: coveredItems } = await pool.query(
+        `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.id = any($1::uuid[])`,
+        [payment.covers_item_ids]
+      );
+      const itemsLabel = coveredItems.map((i) => (i.quantity > 1 ? `${i.quantity}x ${i.name}` : i.name)).join(', ') || 'part of the order';
+      coverageNote = ` This is just for their own share (${itemsLabel}), not the whole table. The table's full order comes to NGN ${Number(order.total).toLocaleString()}.`;
+    }
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  for (const { phoneNumber: to, staffId } of recipients) {
+    const alert = `${displayNameFor(customer)} says they sent a POS transfer of NGN ${amount.toLocaleString()} but it hasn't auto-confirmed yet.${coverageNote}`;
+    await sendStaffAlert(to, alert);
+    if (!process.env.PUBLIC_URL) continue;
+    const path = `/orders/${order.id}`;
+    const link = staffId
+      ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
+      : `${process.env.PUBLIC_URL}${path}`;
+    try {
+      await sendWhatsAppCtaUrl(to, `Tap below to confirm this payment.`, 'Confirm payment', link, credentials);
+    } catch (err) {
+      console.error(`Failed to send claimed-payment link to ${to}:`, err.message);
+    }
   }
 }

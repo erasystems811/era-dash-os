@@ -24,7 +24,7 @@ import {
   magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, UPSELL_GROUPS, categoryMatchesGroup } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
@@ -572,6 +572,35 @@ router.post('/pos-sync-config/webhook-secret', requireEraAdmin, async (req, res)
   res.json(rows[0]);
 });
 
+// Chidera, 2026-09-21: "LET ME TRY ANOTHER ACCOUNT AND SEE IF IT WORKS" --
+// the real "POS as a Platform" API works after all, root cause of every
+// earlier "Invalid key provided" was scripts/add-pos-sync.mjs hitting the
+// wrong base URL and treating a single api_key as a bearer token directly
+// instead of exchanging clientId/clientSecret for one via POST
+// channel.moniepoint.com/v1/auth (see pos_sync_config's own schema
+// comment, and engine/moniepoint-api.js). Separate from /credentials
+// above (the old, dead single-api_key shape) -- this is the real one.
+// terminalSerial optional -- the client_id/client_secret pair alone is
+// enough to auth (engine/moniepoint-api.js), but ensureDynamicPosAccount
+// (flow.js) also needs the terminal serial to push a real one-time
+// payment request. Not required here since it's frequently sent together
+// but sometimes found/added later (the physical terminal's own sticker).
+router.post('/pos-sync-config/client-credentials', requireEraAdmin, async (req, res) => {
+  const { clientId, clientSecret, terminalSerial } = req.body;
+  if (!clientId || !clientSecret) return res.status(400).json({ error: 'clientId and clientSecret are required.' });
+  const { rows } = await pool.query(
+    `insert into pos_sync_config (business_id, enabled, provider, client_id, client_secret, terminal_serial, connected_at)
+     values ((select id from business limit 1), true, 'moniepoint', $1, $2, $3, now())
+     on conflict (business_id) do update set
+       client_id = excluded.client_id, client_secret = excluded.client_secret,
+       terminal_serial = coalesce(excluded.terminal_serial, pos_sync_config.terminal_serial),
+       enabled = true, connected_at = now()
+     returning business_id, enabled, provider, terminal_serial, connected_at`,
+    [clientId, clientSecret, terminalSerial || null]
+  );
+  res.json(rows[0]);
+});
+
 router.post('/pos-sync-config/credentials', requireEraAdmin, async (req, res) => {
   const { provider, apiKey, webhookUsername, webhookPassword } = req.body;
   if (!webhookUsername || !webhookPassword) return res.status(400).json({ error: 'webhookUsername and webhookPassword are required.' });
@@ -584,6 +613,43 @@ router.post('/pos-sync-config/credentials', requireEraAdmin, async (req, res) =>
        enabled = true, connected_at = now()
      returning business_id, enabled, provider, connected_at`,
     [provider || 'moniepoint', apiKey || null, webhookUsername, webhookPassword]
+  );
+  res.json(rows[0]);
+});
+
+// Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE
+// CLIENT DASHBOARD" -- how a business gets paid is ERA's own decision per
+// client, same as pos-sync-config just above, NOT something a business
+// owner picks in their own Settings. requireEraAdmin, above
+// router.use(requireStaffApi), for the same reason pos-sync-config is.
+// Chidera, 2026-09-21: "ISNT THERE ALREADY SPACE IN SETTING TO PUT ACCOUNT
+// NUMBER AND ALL?" -- yes, business.bank_name/bank_account_number/
+// bank_account_name (the existing "manual" proof-of-payment fields) --
+// this route only ever owns `provider`; transfer_* here is a read-only
+// join for display, same as engine/payment.js's getPaymentConfig().
+router.get('/payment-config', async (req, res) => {
+  const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
+  if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
+  const { rows } = await pool.query(
+    `select pc.provider,
+            b.bank_name as transfer_bank_name,
+            b.bank_account_number as transfer_account_number,
+            b.bank_account_name as transfer_account_name
+     from business b
+     left join payment_config pc on pc.business_id = b.id
+     limit 1`
+  );
+  res.json(rows[0] || { provider: null, transfer_account_number: null, transfer_account_name: null, transfer_bank_name: null });
+});
+
+router.post('/payment-config', requireEraAdmin, async (req, res) => {
+  const { provider } = req.body;
+  const { rows } = await pool.query(
+    `insert into payment_config (business_id, provider) values ((select id from business limit 1), $1)
+     on conflict (business_id) do update set provider = excluded.provider
+     returning *`,
+    [provider || null]
   );
   res.json(rows[0]);
 });
@@ -999,7 +1065,7 @@ router.get('/orders/:id', async (req, res) => {
   // preps the order. json_agg here, not a separate query, since answers
   // is naturally a per-item array.
   const { rows: items } = await pool.query(
-    `select oi.*, p.name,
+    `select oi.*, p.name, p.category,
        coalesce(
          (select json_agg(json_build_object('question', pq.question, 'answer', oa.answer) order by oa.created_at)
           from order_item_answer oa join product_question pq on pq.id = oa.question_id
@@ -1032,6 +1098,14 @@ router.get('/orders/:id', async (req, res) => {
     `select id, status from delivery_assignment where order_id = $1 order by created_at desc limit 1`,
     [order.id]
   );
+  // Chidera, 2026-09-21: "the orders placed that appear in the kanban for
+  // in house can it be printed from a docket?" -- the printed docket
+  // (OrderDetail.jsx) needs the table label, which the order row itself
+  // doesn't carry (table_id only).
+  const { rows: tableRows } = order.table_id
+    ? await pool.query('select label from restaurant_table where id = $1', [order.table_id])
+    : { rows: [] };
+  const { rows: bizRows } = await pool.query('select name from business limit 1');
   res.json({
     order,
     items,
@@ -1040,6 +1114,8 @@ router.get('/orders/:id', async (req, res) => {
     paymentProofs,
     delivery: delivery[0] || null,
     deliveryAssignment: assignment[0] || null,
+    tableLabel: tableRows[0]?.label || null,
+    businessName: bizRows[0]?.name || null,
   });
 });
 
@@ -1690,6 +1766,45 @@ router.get('/customers', requireFullAccessApi, async (req, res) => {
   res.json(rows);
 });
 
+// How often an upsell offer actually landed. There's no explicit
+// "accepted" flag anywhere (a tapped or typed acceptance inserts an
+// order_item the exact same way any other item does -- see engine/flow.js's
+// handleUpsellListTap/handlePendingUpsell) -- so "accepted" is inferred the
+// same way nextUpsellGroup itself decides a category's already satisfied:
+// the completed order ends up containing a product whose category matches
+// the offered group's keywords. dateWhereSql/dateParams let the two
+// callers below scope this to "all time" or one calendar month without
+// duplicating the match-and-count logic itself.
+async function computeUpsellStats(dateWhereSql, dateParams) {
+  const { rows } = await pool.query(
+    `select o.upsell_offered,
+       coalesce(array_agg(distinct p.category) filter (where p.category is not null), '{}') as item_categories
+     from "order" o
+     left join order_item oi on oi.order_id = o.id
+     left join product p on p.id = oi.product_id
+     where o.status = 'completed' and o.upsell_offered != '{}' ${dateWhereSql}
+     group by o.id, o.upsell_offered`,
+    dateParams
+  );
+  let accepted = 0;
+  for (const row of rows) {
+    // Only one offer per order going forward (Chidera, 2026-09-20: "only
+    // upsell once"), but upsell_offered is still an array for older orders
+    // from before that -- the last entry is the one that was actually
+    // left standing when the order completed.
+    const key = row.upsell_offered[row.upsell_offered.length - 1];
+    const group = UPSELL_GROUPS.find((g) => g.key === key);
+    if (!group) continue;
+    if (row.item_categories.some((c) => categoryMatchesGroup(c, group.keywords))) accepted++;
+  }
+  const offered = rows.length;
+  return {
+    upsellOffered: offered,
+    upsellAccepted: accepted,
+    upsellSuccessRate: offered > 0 ? Math.round((accepted / offered) * 1000) / 10 : null,
+  };
+}
+
 // Dashboard cards/charts (Chidera, 2026-09-16, matching a client's own CRM
 // mockup) -- New = exactly 1 completed order, Repeat = 2+, VIP = top 10%
 // by total spend among customers who've ordered at least once. Retention
@@ -1699,7 +1814,7 @@ router.get('/customers', requireFullAccessApi, async (req, res) => {
 // trailing 30 days to the 30 days before that; a metric with nothing in
 // the prior window (deltaPct: null) shows as new rather than a fake "+infinity%".
 router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
-  const [totals, segments, thisMonth, lastMonth, daily] = await Promise.all([
+  const [totals, segments, thisMonth, lastMonth, daily, upsell] = await Promise.all([
     pool.query(`select count(*)::int as total_customers from customers`),
     pool.query(
       `with per_customer as (
@@ -1756,6 +1871,7 @@ router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
        group by date(completed_at)
        order by day`
     ),
+    computeUpsellStats('', []),
   ]);
 
   const s = segments.rows[0];
@@ -1778,6 +1894,9 @@ router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
       revenuePct: pctChange(Number(thisMonth.rows[0].revenue), Number(lastMonth.rows[0].revenue)),
     },
     daily: daily.rows.map((r) => ({ day: r.day, newCustomers: r.new_customers, repeatCustomers: r.repeat_customers })),
+    upsellOffered: upsell.upsellOffered,
+    upsellAccepted: upsell.upsellAccepted,
+    upsellSuccessRate: upsell.upsellSuccessRate,
   });
 });
 
@@ -1801,7 +1920,7 @@ router.get('/customers/monthly-stats', requireFullAccessApi, async (req, res) =>
   if (!/^\d{4}-\d{2}$/.test(month || '')) return res.status(400).json({ error: 'month must be YYYY-MM.' });
   const start = `${month}-01`;
 
-  const [current, previous, segmentsByMonth, daily] = await Promise.all([
+  const [current, previous, segmentsByMonth, daily, upsell] = await Promise.all([
     pool.query(
       `with month_orders as (
          select customer_id, total, completed_at,
@@ -1880,6 +1999,7 @@ router.get('/customers/monthly-stats', requireFullAccessApi, async (req, res) =>
        order by day`,
       [start]
     ),
+    computeUpsellStats(`and o.completed_at >= $1::date and o.completed_at < ($1::date + interval '1 month')`, [start]),
   ]);
 
   const c = current.rows[0];
@@ -1899,6 +2019,9 @@ router.get('/customers/monthly-stats', requireFullAccessApi, async (req, res) =>
       revenuePct: pctChange(Number(c.total_revenue), Number(p.total_revenue)),
     },
     daily: daily.rows.map((r) => ({ day: r.day, newCustomers: r.new_customers, repeatCustomers: r.repeat_customers })),
+    upsellOffered: upsell.upsellOffered,
+    upsellAccepted: upsell.upsellAccepted,
+    upsellSuccessRate: upsell.upsellSuccessRate,
   });
 });
 
@@ -1962,6 +2085,55 @@ router.get('/customers/monthly', requireFullAccessApi, async (req, res) => {
      order by date_trunc('month', completed_at) desc`
   );
   res.json(rows);
+});
+
+// Best sellers -- which real menu items actually move, by units and by
+// revenue, so a business can see what to push/restock rather than guess.
+// month optional: omitted means all-time (cumulative), YYYY-MM scopes to
+// one calendar month, same convention as /customers/monthly-stats.
+router.get('/sales/top-products', requireFullAccessApi, async (req, res) => {
+  const month = req.query.month;
+  if (month && !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM.' });
+  const dateFilter = month ? `and o.completed_at >= $1::date and o.completed_at < ($1::date + interval '1 month')` : '';
+  const { rows } = await pool.query(
+    `select p.name, p.category, sum(oi.quantity)::int as units_sold, coalesce(sum(oi.quantity * oi.price), 0) as revenue
+     from order_item oi
+     join product p on p.id = oi.product_id
+     join "order" o on o.id = oi.order_id
+     where o.status = 'completed' ${dateFilter}
+     group by p.id, p.name, p.category
+     order by units_sold desc
+     limit 10`,
+    month ? [`${month}-01`] : []
+  );
+  res.json(rows.map((r) => ({ name: r.name, category: r.category, unitsSold: r.units_sold, revenue: Number(r.revenue) })));
+});
+
+// Best-selling days -- aggregated by day of the WEEK (Monday..Sunday), not
+// by calendar date, since "which specific date sold most" tells a business
+// nothing repeatable to act on, but "Fridays and Saturdays are our busiest"
+// tells them exactly when to staff up or run a promo. dow: Postgres's
+// extract(dow) is 0=Sunday..6=Saturday; remapped below so the response is
+// always Monday-first, the order a business actually thinks in.
+router.get('/sales/by-day-of-week', requireFullAccessApi, async (req, res) => {
+  const month = req.query.month;
+  if (month && !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM.' });
+  const dateFilter = month ? `and completed_at >= $1::date and completed_at < ($1::date + interval '1 month')` : '';
+  const { rows } = await pool.query(
+    `select extract(dow from completed_at)::int as dow, count(*)::int as order_count, coalesce(sum(total), 0) as revenue
+     from "order"
+     where status = 'completed' ${dateFilter}
+     group by dow`,
+    month ? [`${month}-01`] : []
+  );
+  const byDow = new Map(rows.map((r) => [r.dow, r]));
+  const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const ordered = DAY_NAMES.map((name, i) => {
+    const dow = (i + 1) % 7; // Monday=1 ... Saturday=6, Sunday=0
+    const row = byDow.get(dow);
+    return { day: name, orderCount: row?.order_count || 0, revenue: Number(row?.revenue || 0) };
+  });
+  res.json(ordered);
 });
 
 // Deliberately its own narrow route (one field), not folded into a
@@ -2455,32 +2627,6 @@ router.post('/business-hours', requireEditorApi, async (req, res) => {
     [openingHours ? JSON.stringify(openingHours) : null]
   );
   res.json({ opening_hours: rows[0]?.opening_hours || null });
-});
-
-// Chidera, 2026-09-20: "a business can choose pos, flutterwave, paystack,
-// or manual". No row yet (every business before this feature shipped)
-// returns an all-null shape -- Settings shows "Not set", and every payment
-// call site keeps falling back to the legacy PAYMENT_PROVIDER env var
-// exactly as it always has (see payment_config's own schema comment).
-router.get('/payment-config', requireFullAccessApi, async (req, res) => {
-  const { rows } = await pool.query(`select * from payment_config limit 1`);
-  res.json(rows[0] || { provider: null, transfer_account_number: null, transfer_account_name: null, transfer_bank_name: null });
-});
-
-router.post('/payment-config', requireEditorApi, async (req, res) => {
-  const { provider, transfer_account_number, transfer_account_name, transfer_bank_name } = req.body;
-  const { rows } = await pool.query(
-    `insert into payment_config (business_id, provider, transfer_account_number, transfer_account_name, transfer_bank_name)
-     values ((select id from business limit 1), $1, $2, $3, $4)
-     on conflict (business_id) do update set
-       provider = excluded.provider,
-       transfer_account_number = excluded.transfer_account_number,
-       transfer_account_name = excluded.transfer_account_name,
-       transfer_bank_name = excluded.transfer_bank_name
-     returning *`,
-    [provider || null, transfer_account_number || null, transfer_account_name || null, transfer_bank_name || null]
-  );
-  res.json(rows[0]);
 });
 
 // Which Instagram account (if any) is actually connected right now, read
