@@ -52,8 +52,9 @@
 // (engine/flow.js) never even asks delivery/pickup for one, so asking here
 // too would be a real, unwanted new question. Only routes/menu-page.js
 // (general ordering) passes askFulfilment: true.
-export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthdayPrompt, namePath, showNamePrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
+export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthdayPrompt, namePath, showNamePrompt, businessName, subtitle, coverPhotoVersion, waNumber, channel = 'whatsapp', instagramHandle, webChatPath, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
+  const igHandle = String(instagramHandle || '').replace(/^@/, '').trim();
   const lightProducts = products.map((p) => ({
     id: p.id,
     name: p.name,
@@ -242,6 +243,9 @@ const SHOW_BIRTHDAY_PROMPT = ${JSON.stringify(Boolean(showBirthdayPrompt))};
 const NAME_PATH = ${JSON.stringify(namePath || null)};
 const SHOW_NAME_PROMPT = ${JSON.stringify(Boolean(showNamePrompt))};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
+const CHANNEL = ${JSON.stringify(channel)};
+const IG_HANDLE = ${JSON.stringify(igHandle)};
+const WEB_CHAT_PATH = ${JSON.stringify(webChatPath || null)};
 const ASK_FULFILMENT = ${JSON.stringify(Boolean(askFulfilment))};
 const DELIVERY_MODE = ${JSON.stringify(deliveryMode || null)};
 const DELIVERY_ZONES = ${JSON.stringify(deliveryZones || [])};
@@ -843,10 +847,28 @@ async function submitOrder() {
   }
   if (!res.ok) { goBtn.textContent = originalLabel; alert(data.error || 'Something went wrong.'); return; }
   document.body.innerHTML = '<div style="padding:60px 20px;text-align:center;font-family:Inter,sans-serif;"><h2 style="font-family:Fraunces,serif;">Order sent!</h2><p style="color:#6E6156;margin-top:8px;">Taking you back to the chat\\u2026</p></div>';
-  // Hands the guest straight back to the WhatsApp thread instead of
-  // leaving them stranded on this page -- wa.me is what WhatsApp's own
-  // in-app browser intercepts and swaps back to the chat for.
-  if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
+  // Chidera, 2026-09-21, real live report: "after i closed web from
+  // instagram it took me on whatsapp not back to ig where i placed the
+  // order" -- this redirect was built WhatsApp-only from the start (wa.me
+  // is what WhatsApp's own in-app browser intercepts and swaps back to
+  // the chat for), then fired unconditionally for every channel once
+  // Instagram customers started reaching this same page tonight.
+  // ig.me/m/<handle> is Instagram's own equivalent -- opens a DM thread
+  // with the business account the same way wa.me does for WhatsApp.
+  // Voice has no browser session to redirect at all, so it's left with
+  // no redirect (falls through to just showing "Order sent!"), same as
+  // WhatsApp with no number configured has always done.
+  // Chidera, 2026-09-22: the web-chat page (routes/web-chat.js) sends
+  // customers here to actually pick items -- once they submit, they
+  // belong back in that chat transcript (the next bubble, confirm-order or
+  // straight to payment if autoConfirm fired), never out to real WhatsApp.
+  if (CHANNEL === 'website' && WEB_CHAT_PATH) {
+    setTimeout(function () { window.location.href = WEB_CHAT_PATH; }, 900);
+  } else if (CHANNEL === 'instagram' && IG_HANDLE) {
+    setTimeout(function () { window.location.href = 'https://ig.me/m/' + IG_HANDLE; }, 900);
+  } else if (CHANNEL !== 'instagram' && WA_DIGITS) {
+    setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
+  }
 }
 
 // Chidera, 2026-09-17: "why is it restoring previous delivery choice? it

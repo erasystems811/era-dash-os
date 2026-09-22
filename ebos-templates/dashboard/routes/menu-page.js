@@ -7,7 +7,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderSingleOrderPayPage } from '../engine/menu-page-template.js';
-import { menuForBranch, resolveMenuBranding, resolveWaNumber } from './dinein-menu.js';
+import { menuForBranch, resolveMenuBranding, resolveWaNumber, resolveInstagramHandle } from './dinein-menu.js';
 import { handleWebMenuOrder, getOpenOrder, notifyCustomerClaimedPosPayment, ensureDynamicPosAccount } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { estimateFeeForAddress } from '../engine/delivery.js';
@@ -18,6 +18,19 @@ export const router = express.Router();
 async function resolveCustomer(token) {
   const { rows } = await pool.query('select * from customers where menu_token = $1', [token]);
   return rows[0] || null;
+}
+
+// Chidera, 2026-09-22: this same page is now also where the web-chat page
+// (routes/web-chat.js) sends a customer to actually pick items -- same
+// "in-memory override, real DB row untouched" pattern as flow.js's
+// completePayment (see 0060_website_chat.sql's own comment), keyed off
+// the same web_chat_active_at breadcrumb, touched on every request into
+// either page. Without this, an order submitted here would send real
+// WhatsApp messages for a customer who's actually mid-session on the chat
+// page.
+const WEB_CHAT_ACTIVE_WINDOW_MS = 30 * 60 * 1000;
+function isViaWebChat(customer) {
+  return Boolean(customer.web_chat_active_at) && new Date(customer.web_chat_active_at) > new Date(Date.now() - WEB_CHAT_ACTIVE_WINDOW_MS);
 }
 
 router.get('/:token/menu.json', async (req, res) => {
@@ -161,6 +174,14 @@ router.post('/:token/review', async (req, res) => {
   }
   if (!resolved.length) return res.status(400).json({ error: 'Sorry, nothing in your basket is available right now.' });
 
+  // In-memory only -- see isViaWebChat's own comment. Without this, every
+  // reply handleWebMenuOrder triggers (confirm-order, payment instructions)
+  // for a web-chat customer would go out as a real WhatsApp send instead
+  // of landing back in the chat transcript.
+  if (isViaWebChat(customer)) {
+    customer.channel = 'website';
+    await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
+  }
   await handleWebMenuOrder(customer, resolved, fulfilment);
   res.json({ ok: true });
 });
@@ -168,11 +189,14 @@ router.post('/:token/review', async (req, res) => {
 router.get('/:token', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
-  const [branding, products, pendingOrder, waNumber, crmRows, deliveryConfig] = await Promise.all([
+  const viaWebChat = isViaWebChat(customer);
+  if (viaWebChat) await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
+  const [branding, products, pendingOrder, waNumber, instagramHandle, crmRows, deliveryConfig] = await Promise.all([
     resolveMenuBranding(),
     menuForBranch(customer.branch_id),
     pendingOrderPayload(customer.id),
     resolveWaNumber(customer.branch_id),
+    resolveInstagramHandle(customer.branch_id),
     pool.query('select enabled, birthday_prompt_enabled, name_prompt_enabled from crm_config limit 1'),
     getDeliveryConfig(),
   ]);
@@ -206,6 +230,9 @@ router.get('/:token', async (req, res) => {
       subtitle: 'Pick what you would like, then review your order.',
       coverPhotoVersion: branding.cover_photo_version,
       waNumber,
+      channel: viaWebChat ? 'website' : customer.channel,
+      webChatPath: viaWebChat ? `/wa/${req.params.token}` : null,
+      instagramHandle,
       products,
       pendingOrder,
       initialCategory: req.query.cat || null,

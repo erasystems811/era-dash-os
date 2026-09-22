@@ -59,6 +59,11 @@ async function senderFor(customer) {
       return {};
     };
   }
+  // website: nothing to actually deliver anywhere -- the message ROW itself
+  // (written right after this by reply()'s own logMessage call) is what the
+  // web-chat page's poll endpoint picks up. Same no-op shape as voice's
+  // buffer above, just with nothing to buffer.
+  if (customer.channel === 'website') return () => ({});
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   return (to, text) => sendWhatsApp(to, text, credentials);
 }
@@ -87,13 +92,27 @@ function displayNameFor(customer) {
 // the customer types next. Found live, 2026-09-10, testing dine-in
 // feedback: a "not good" tap's own log line ended up prepended to the
 // customer's real follow-up comment.
-async function logMessage({ customerId, direction, channel, sender, body, trigger, platformMessageId, processed }) {
+// interactive -- structured payload (buttons/list/cta_url/document) for an
+// outbound website-channel message, added 2026-09-22 (see
+// 0060_website_chat.sql). Null for every other channel; the web-chat page
+// (routes/web-chat.js) renders a real bubble/button/list from this instead
+// of flattened text.
+async function logMessage({ customerId, direction, channel, sender, body, trigger, platformMessageId, processed, interactive }) {
   await pool.query(
-    `insert into message (customer_id, direction, channel, sender, body, trigger, platform_message_id, processed_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [customerId, direction, channel, sender, body, trigger || null, platformMessageId || null, processed ? new Date() : null]
+    `insert into message (customer_id, direction, channel, sender, body, trigger, platform_message_id, processed_at, interactive)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [customerId, direction, channel, sender, body, trigger || null, platformMessageId || null, processed ? new Date() : null, interactive ? JSON.stringify(interactive) : null]
   );
   await pool.query(`update customers set last_message = $1, last_message_at = now() where id = $2`, [body, customerId]);
+}
+
+// A thin, purpose-built export for routes/web-chat.js's own first-load
+// render (the first bubble, before any real dispatch has run for this
+// customer) -- logMessage itself stays module-private, this just fixes the
+// direction/channel/sender every caller outside this file needs, rather
+// than handing a route the full logMessage signature.
+export async function logWebsiteBubble({ customerId, body, trigger, interactive }) {
+  await logMessage({ customerId, direction: 'outbound', channel: 'website', sender: 'bot', body, trigger, interactive });
 }
 
 // Instagram's send response carries the new message's own id (message_id).
@@ -162,15 +181,22 @@ export async function reply(customer, text, logTag = 'bot_flow_step') {
 // Non-WhatsApp channels (Instagram) keep the plain text prompt, same as
 // every other button-vs-text gate in this file.
 export async function sendConfirmButtons(customer, bodyText, trigger) {
+  const buttons = [
+    { id: 'order_confirm_yes', title: 'Yes, confirm' },
+    { id: 'order_confirm_no', title: 'No, change it' },
+  ];
+  // website: a real tappable-button bubble on the chat page (routes/
+  // web-chat.js), same tap-through-the-normal-text-pipeline shape as
+  // WhatsApp's own buttons -- see that route's POST /:token/tap.
+  if (customer.channel === 'website') {
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger, interactive: { type: 'buttons', buttons } });
+    return;
+  }
   if (customer.channel !== 'whatsapp') {
     await reply(customer, `${bodyText} Reply yes to confirm, or let me know what you'd like to change.`, trigger);
     return;
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  const buttons = [
-    { id: 'order_confirm_yes', title: 'Yes, confirm' },
-    { id: 'order_confirm_no', title: 'No, change it' },
-  ];
   await sendWhatsAppButtons(recipientFor(customer), bodyText, buttons, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger });
 }
@@ -870,26 +896,62 @@ async function findSpecialsCategory(branchId) {
 // left for an AI call to react to -- greetingAckFor already does the same
 // tone-matching deterministically (used the same way in handleEnquiry/
 // handleCollectInfo already), just without the network round trip.
-async function handleGreeting(customer, text) {
-  // Chidera 2026-09-11: "welcome to <restaurant name>, what would you
-  // like to order" -- then, after an initial pass kept greetingAckFor's
-  // tone-matched prefix (Good morning!/Hey there!) alongside it: "not
-  // that hey there" -- and then: "add hello before the welcome". Plain
-  // "Hello!", not greetingAckFor's tone-matching (that's the "hey there"
-  // that was already turned down).
-  //
-  // Chidera, 2026-09-20: "we agreed a name so bot can refer to customer"
-  // -- customer.name is only ever set via the web menu's own name popup
-  // (routes/menu-page.js's POST /:token/name), never invented or guessed;
-  // this is the first place it's actually read back. Falls back to the
-  // exact same plain wording as before when it isn't set, which is still
-  // the common case until a business turns the popup on and customers
-  // start filling it in.
+// Chidera 2026-09-11: "welcome to <restaurant name>, what would you like to
+// order" -- then, after an initial pass kept greetingAckFor's tone-matched
+// prefix (Good morning!/Hey there!) alongside it: "not that hey there" --
+// and then: "add hello before the welcome". Plain "Hello!", not
+// greetingAckFor's tone-matching (that's the "hey there" that was already
+// turned down).
+//
+// Chidera, 2026-09-20: "we agreed a name so bot can refer to customer" --
+// customer.name is only ever set via the web menu's own name popup
+// (routes/menu-page.js's POST /:token/name), never invented or guessed;
+// this is the first place it's actually read back. Falls back to the exact
+// same plain wording as before when it isn't set, which is still the
+// common case until a business turns the popup on and customers start
+// filling it in.
+//
+// Split out from handleGreeting, 2026-09-22, so this FULL welcome text
+// (menu framing + specials) can be reused as the web-chat page's own first
+// bubble (routes/web-chat.js) instead of only ever being a real WhatsApp
+// send -- see sendStartOrderLink below for what the real WhatsApp message
+// shrinks to.
+// Exported for routes/web-chat.js's own first-load render -- see that
+// route's GET /:token.
+export async function buildGreetingContent(customer) {
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const businessName = bizRows[0]?.name || 'us';
   const message = customer.name
     ? `Hello ${customer.name}! Welcome to ${businessName}, what would you like to order?`
     : `Hello! Welcome to ${businessName}, what would you like to order?`;
+  const specialsCategory = await findSpecialsCategory(customer.branch_id);
+  return { message, businessName, specialsCategory };
+}
+
+// Chidera, 2026-09-22: "meta will start charging 14 naira per message...
+// there should be a greeting text o, like hello tap the link below to
+// place an order." The one real WhatsApp message a customer's first
+// contact gets (a plain "hi", or a "Place an order" button tap) -- shared
+// by handleGreeting and handleStartOrderTap so both converge on the exact
+// same short send. The FULL welcome text (buildGreetingContent above)
+// moves to the web-chat page's own first bubble (routes/web-chat.js),
+// never sent over the real Cloud API -- only this short line + one CTA
+// button is.
+async function sendStartOrderLink(customer) {
+  if (!process.env.PUBLIC_URL) {
+    const { message } = await buildGreetingContent(customer);
+    await reply(customer, message, 'greeting');
+    return;
+  }
+  const shortGreeting = customer.name ? `Hello ${customer.name}! Tap below to place your order.` : `Hello! Tap below to place your order.`;
+  const token = await ensureMenuToken(customer);
+  const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppCtaUrl(recipientFor(customer), shortGreeting, 'Place an order', chatUrl, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortGreeting, trigger: 'greeting', processed: true });
+}
+
+async function handleGreeting(customer, text) {
   // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
   // catch up to our current state" -- found live: an Instagram customer
   // got this bare greeting with NO menu link at all, ever, anywhere in
@@ -901,30 +963,31 @@ async function handleGreeting(customer, text) {
   // button (auto-linkified by Instagram's own client), same fallback
   // shape sendPaymentLinkButton/sendPosPaymentChoice already use.
   if (customer.channel === 'voice' || !process.env.PUBLIC_URL) {
+    const { message } = await buildGreetingContent(customer);
     await reply(customer, message, 'greeting');
     return;
   }
-  const token = await ensureMenuToken(customer);
-  const menuUrl = `${process.env.PUBLIC_URL}/m/${token}`;
-  const specialsCategory = await findSpecialsCategory(customer.branch_id);
   if (customer.channel === 'instagram') {
+    const { message, specialsCategory } = await buildGreetingContent(customer);
+    const token = await ensureMenuToken(customer);
+    const menuUrl = `${process.env.PUBLIC_URL}/m/${token}`;
     const body = specialsCategory
       ? `${message}\n\nMenu: ${menuUrl}\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
       : `${message}\n\nMenu: ${menuUrl}`;
     await reply(customer, body, 'greeting');
     return;
   }
-  const headerImageUrl = await businessCoverPhotoUrl();
-  const body = specialsCategory
-    ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
-    : message;
-  const credentials = await getWhatsAppCredentials(customer.branch_id);
-  // Chidera, 2026-09-20: "that see menu put 'tap here to see menu'"
-  // (also applied everywhere else this exact button showed up, for one
-  // consistent wording, not just this one call site). Exactly 20
-  // characters -- Meta's own cap on a CTA-URL/reply button's title.
-  await sendWhatsAppCtaUrl(recipientFor(customer), body, 'Tap here to see menu', menuUrl, credentials, headerImageUrl);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body, trigger: 'greeting', processed: true });
+  if (customer.channel === 'website') {
+    // Shouldn't normally be reached -- the real first bubble on the
+    // web-chat page is rendered directly by routes/web-chat.js calling
+    // buildGreetingContent itself, not by dispatching through here. Safe
+    // fallback (a plain bubble) in case a fresh greeting is ever
+    // classified mid-session while already on this channel.
+    const { message } = await buildGreetingContent(customer);
+    await reply(customer, message, 'greeting');
+    return;
+  }
+  await sendStartOrderLink(customer);
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,
@@ -1359,8 +1422,13 @@ async function nextUpsellGroup(order, orderItems) {
 // bare product id -- keeps this completely separate from the general
 // "View menu" list's own row-id space (menu-message.js), which a bare id
 // would otherwise collide with.
-async function sendUpsellList(customer, upsell, prefix = '') {
-  if (customer.channel !== 'whatsapp') return false;
+// Exported for sandbox/test-web-chat-ordering.mjs -- exercises this
+// function's website branch directly, since the real dispatch() path that
+// would normally reach it needs a live Anthropic key this environment
+// doesn't have (extractOrderModifications, called before any state-based
+// routing for an order past collect_info).
+export async function sendUpsellList(customer, upsell, prefix = '') {
+  if (customer.channel !== 'whatsapp' && customer.channel !== 'website') return false;
   const rows = upsell.options.slice(0, 8).map((p) => ({
     id: `upsell::${p.id}`,
     title: p.name.slice(0, 24),
@@ -1368,6 +1436,22 @@ async function sendUpsellList(customer, upsell, prefix = '') {
   }));
   rows.push({ id: 'upsell::skip', title: 'No thanks', description: `Skip ${upsell.label}` });
   const bodyText = `${prefix}Would you like to add ${upsell.label}?`.trim();
+  // website: same row ids as WhatsApp's list message (upsell::<id>,
+  // upsell::skip) -- a tap on the chat page posts the row id to
+  // POST /:token/tap, which calls handleUpsellListTap exactly as the real
+  // WhatsApp list_reply webhook event does today.
+  if (customer.channel === 'website') {
+    await logMessage({
+      customerId: customer.id,
+      direction: 'outbound',
+      channel: customer.channel,
+      sender: 'bot',
+      body: `${bodyText} We have: ${upsell.options.map((o) => o.name).join(', ')}.`,
+      trigger: 'upsell_offered_list',
+      interactive: { type: 'list', buttonText: 'Choose', sectionTitle: upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1), rows },
+    });
+    return true;
+  }
   // Chidera, 2026-09-20: two real gaps found investigating a report of a
   // plain-text upsell on pomodoro -- (1) this never resolved the branch's
   // own credentials, only the raw shared env var (fixed by passing
@@ -1622,8 +1706,8 @@ export async function handlePendingUpsell(customer, order, text) {
 // by sendUpsellList -- webhook-whatsapp.js routes here before its normal
 // menu-list row handling, since this id space is deliberately separate
 // from that one.
-export async function handleUpsellListTap({ phoneNumber, channelId, rowId, channel = 'whatsapp', branchId }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+export async function handleUpsellListTap({ phoneNumber, channelId, rowId, channel = 'whatsapp', branchId, customer: presetCustomer }) {
+  const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
   const order = await resolveCustomerOrder(customer);
   // A stale tap on an old list (the offer's already been answered another
   // way, or the order's moved on/gone) -- nothing to do, and nothing to
@@ -1803,13 +1887,18 @@ async function handleReconfirmAfterEdit(customer, order, text) {
 // sends its own title ("Delivery"/"Pickup") back through the normal text
 // pipeline (webhook-whatsapp.js), so extractAndApply/applyField handle it
 // exactly the same way a typed answer already does -- no new parsing.
-async function sendFieldPrompt(customer, fieldKey, promptText, trigger) {
-  if (fieldKey === 'fulfilment_type' && customer.channel === 'whatsapp') {
-    const credentials = await getWhatsAppCredentials(customer.branch_id);
+// Exported for the same reason as sendUpsellList above.
+export async function sendFieldPrompt(customer, fieldKey, promptText, trigger) {
+  if (fieldKey === 'fulfilment_type' && (customer.channel === 'whatsapp' || customer.channel === 'website')) {
     const buttons = [
       { id: 'fulfilment_delivery', title: 'Delivery' },
       { id: 'fulfilment_pickup', title: 'Pickup' },
     ];
+    if (customer.channel === 'website') {
+      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: trigger || 'bot_flow_step', interactive: { type: 'buttons', buttons } });
+      return;
+    }
+    const credentials = await getWhatsAppCredentials(customer.branch_id);
     await sendWhatsAppButtons(recipientFor(customer), promptText, buttons, credentials);
     await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: trigger || 'bot_flow_step' });
     return;
@@ -1826,12 +1915,16 @@ async function sendFieldPrompt(customer, fieldKey, promptText, trigger) {
 // botEngine.extractField boolean classification below needs no changes at
 // all -- it already understands "Yes"/"No" as well as any typed answer.
 async function sendYesNoConfirm(customer, promptText) {
-  if (customer.channel === 'whatsapp') {
-    const credentials = await getWhatsAppCredentials(customer.branch_id);
+  if (customer.channel === 'whatsapp' || customer.channel === 'website') {
     const buttons = [
       { id: 'confirm_yes', title: 'Yes' },
       { id: 'confirm_no', title: 'No' },
     ];
+    if (customer.channel === 'website') {
+      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: 'bot_flow_step', interactive: { type: 'buttons', buttons } });
+      return;
+    }
+    const credentials = await getWhatsAppCredentials(customer.branch_id);
     await sendWhatsAppButtons(recipientFor(customer), promptText, buttons, credentials);
     await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: 'bot_flow_step' });
     return;
@@ -2041,6 +2134,19 @@ async function sendPaymentLinkButton(customer, paymentUrl, bodyText) {
     await reply(customer, `${bodyText}\n\nPay here: ${paymentUrl}`);
     return;
   }
+  if (customer.channel === 'website') {
+    await logMessage({
+      customerId: customer.id,
+      direction: 'outbound',
+      channel: customer.channel,
+      sender: 'bot',
+      body: `${bodyText}\n[payment link sent: ${paymentUrl}]`,
+      trigger: 'payment_link',
+      processed: true,
+      interactive: { type: 'cta_url', buttonText: 'Pay now', url: paymentUrl },
+    });
+    return;
+  }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, 'Pay now', paymentUrl, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText}\n[payment link sent: ${paymentUrl}]`, trigger: 'payment_link', processed: true });
@@ -2098,6 +2204,14 @@ async function sendPosPaymentChoice(customer, order) {
   // link, auto-linkified by Instagram's own client.
   if (customer.channel === 'instagram') {
     await reply(customer, `Ready to pay?\n\n${url}`, 'pos_pay_choice');
+    return;
+  }
+  // website: same /m/:token/pay page every channel already uses (Transfer/
+  // Card choice, live payment-status polling) -- a bubble linking out to
+  // it, not a real WhatsApp send. Full on-page POS parity (claim-tap etc.)
+  // is Phase 2; this just closes the "falls through to a real send" gap.
+  if (customer.channel === 'website') {
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice', interactive: { type: 'cta_url', buttonText: 'Ready to pay?', url } });
     return;
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
@@ -2167,10 +2281,16 @@ export async function sendPaymentInstructions(customer, order) {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
       if (customer.channel === 'instagram') {
         await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
+        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
+      } else if (customer.channel === 'website') {
+        // website: a document-link bubble, not a real WhatsApp document
+        // send -- the page renders a tappable "View invoice" link from
+        // interactive.url.
+        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf', interactive: { type: 'document', filename: `invoice-${order.reference}.pdf`, url: invoicePdfUrl } });
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `invoice-${order.reference}.pdf`, `Invoice for order ${order.reference}`);
+        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
       }
-      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
       invoiceSent = true;
     } catch (err) {
       console.error(`Failed to send invoice PDF, falling back to a text link: ${err.message}`);
@@ -2541,10 +2661,13 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
       if (customer.channel === 'instagram') {
         await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
+        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
+      } else if (customer.channel === 'website') {
+        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf', interactive: { type: 'document', filename: `topup-${order.reference}.pdf`, url: invoicePdfUrl } });
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `topup-${order.reference}.pdf`, `Top-up invoice for order ${order.reference}`);
+        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
       }
-      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
       invoiceSent = true;
     } catch (err) {
       console.error(`Failed to send top-up invoice PDF, falling back to a text link: ${err.message}`);
@@ -3061,6 +3184,17 @@ export async function completePayment(orderId) {
 
   const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
   const customer = custRows[0];
+  // No live request/customer object to flip here -- this fires from
+  // Paystack's webhook, staff's "Confirm payment" click, or Moniepoint's
+  // auto-match, none of which have one. web_chat_active_at (touched on
+  // every request into routes/web-chat.js) is the persisted breadcrumb: if
+  // this customer's most recent turn was on the web-chat page recently,
+  // the payment-confirmed message becomes a bubble there instead of a real
+  // WhatsApp send. customers.channel itself is never touched -- a fresh
+  // WhatsApp text days later must still start the normal WhatsApp flow.
+  if (customer && customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(Date.now() - 30 * 60 * 1000)) {
+    customer.channel = 'website';
+  }
 
   await transitionOrder(order, 'payment_acceptance');
   // This function IS "payment confirmed" -- whether that's Paystack's own
@@ -4273,6 +4407,16 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
     await reply(customer, `${bodyText}\n\n${url}`, 'menu_shown');
     return true;
   }
+  // website: a "See menu"/"Finish my order" bubble that navigates OUT to
+  // /m/:token (the existing shop page, unchanged) -- the same hand-off
+  // shape as today's real WhatsApp CTA-URL button, just rendered as a
+  // bubble on the chat page instead of a real Meta send. This is the
+  // single highest-traffic call site in the whole engine (every "show me
+  // the menu" moment funnels through here).
+  if (customer.channel === 'website') {
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger: 'menu_shown', processed: true, interactive: { type: 'cta_url', buttonText: buttonTitle, url } });
+    return true;
+  }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   // Chidera, 2026-09-16: "ensure image appear on chat cause its not still
   // appearing" -- handleGreeting (this file, ~line 839) already resolved
@@ -4311,8 +4455,8 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
 // vaguer "what would you like to change" with no button at all) -- the
 // tap itself is already unambiguous, same reasoning as every other
 // instant button handler in this file. Chidera 2026-09-10.
-export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel = 'whatsapp', branchId, customer: presetCustomer }) {
+  const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: No, change it]', processed: true });
 
   // The reference demo's exact wording (Chidera 2026-09-10) plus one
@@ -4361,12 +4505,13 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
   if (!shown) await reply(customer, message, 'order_confirm_no');
 }
 
-export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId, customer: presetCustomer }) {
+  const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' , processed: true });
-  const shown = await sendWebMenuLink(customer, await menuGreetingBody());
-  if (shown) return;
-  await reply(customer, 'What would you like to order?', 'items_menu_shown');
+  // Same minimal-CTA-to-/wa/:token send as a plain "hi" now gets
+  // (sendStartOrderLink) -- a "Place an order" button tap and a fresh
+  // greeting converge on the same outcome, 2026-09-22.
+  await sendStartOrderLink(customer);
 }
 
 // The real order behind "Review order" on the web menu page (routes/
@@ -4594,8 +4739,13 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
   await finishItemsCollection(customer, order, 'Got it. ', { autoConfirm: Boolean(fulfilment) });
 }
 
-export async function handleMenuItemTap({ phoneNumber, channelId, product, channel = 'whatsapp', branchId }) {
-  const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
+// customer: an already-resolved customer object, passed by routes/web-chat.js
+// for a tap on the website channel -- findOrCreateCustomer ignores the
+// `channel` argument for an existing row (returns it exactly as stored), so
+// that alone can't carry the website-channel override for a returning
+// customer. Same passthrough shape handleWebMenuOrder already uses.
+export async function handleMenuItemTap({ phoneNumber, channelId, product, channel = 'whatsapp', branchId, customer: presetCustomer }) {
+  const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${product.name}]` , processed: true });
 
   let order = await resolveCustomerOrder(customer);
@@ -4727,6 +4877,31 @@ export async function handleInboundMessage({ phoneNumber, channelId, text, chann
     startTypingKeepAlive(customer, channel, messageId, channelId);
   }
   scheduleDebouncedProcessing(customer);
+}
+
+// The web-chat page's (routes/web-chat.js) own front door for typed free
+// text -- Chidera, 2026-09-22: "meta will start charging 14 naira per
+// message... the whole flow duplicated in a site." Deliberately does NOT
+// go through handleInboundMessage/scheduleDebouncedProcessing: that 2s
+// debounce (see DEBOUNCE_MS below) reloads the customer FRESH from the DB
+// once it fires (processPendingMessages), which would silently discard the
+// in-memory `customer.channel = 'website'` override routes/web-chat.js set
+// before calling this -- every reply from that point on would go out as a
+// REAL WhatsApp send instead of a bubble, defeating the entire point. Same
+// fix shape as handleVoiceTurn just below (calls handlePendingBatch
+// directly, for a different but related reason -- a live call can't
+// tolerate the debounce delay either) -- there's no batching need here
+// anyway, since each POST from the page is already one deliberate submit
+// (a Send-button tap), not WhatsApp's SMS-style rapid-fire bursts.
+export async function handleWebChatMessage({ customer, text }) {
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: text });
+  const { branchId: hoursBranchId, openingHours } = await branchHoursFor(customer);
+  const hours = checkOperatingHours(openingHours);
+  if (!hours.open) {
+    await handleClosedHoursMessage(customer, hours.opensAt, hoursBranchId);
+    return;
+  }
+  await handlePendingBatch(customer, text);
 }
 
 // Voice add-on's own front door onto this SAME engine (spec 0.6: "voice is

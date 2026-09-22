@@ -320,6 +320,11 @@ create index if not exists customers_last_message_at_idx on customers (last_mess
 alter table customers add column if not exists menu_token text;
 create unique index if not exists customers_menu_token_idx on customers (menu_token) where menu_token is not null;
 
+-- Touched on every request into the web-chat page (routes/web-chat.js) --
+-- see 0060_website_chat.sql for why this exists instead of writing
+-- 'website' into customers.channel directly.
+alter table customers add column if not exists web_chat_active_at timestamptz;
+
 create table if not exists product (
   id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -922,6 +927,11 @@ create table if not exists message (
   -- distinct from 'failed' so the UI can tell "gave up" from "fixed itself
   -- automatically" at a glance.
   delivery_status text check (delivery_status in ('sent', 'delivered', 'read', 'failed', 'retried')),
+  -- Structured payload for an interactive outbound message on the website
+  -- channel (buttons/list/cta_url/document) -- see 0060_website_chat.sql.
+  -- The web-chat page renders a real bubble/button/list from this instead
+  -- of flattened text; every other channel leaves this null.
+  interactive jsonb,
   created_at timestamptz not null default now()
 );
 create index if not exists message_platform_message_id_idx on message (platform_message_id) where platform_message_id is not null;
