@@ -124,8 +124,16 @@ async function main() {
 
   let targets;
   if (args.allEbos) {
-    targets = registry.clients.filter((c) => c.isEbos);
-    if (!targets.length) throw new Error('No client in the registry is marked isEbos: true.');
+    // sandbox clients (era-sandbox) are deliberately excluded from a bulk
+    // push -- Chidera, 2026-09-22, after an unfinished feature (real
+    // customer-facing "web chat" build) turned out to only be meant for
+    // era-demo but the lack of any real separation between "testing" and
+    // "live" made that a live worry, not a hypothetical one. A sandbox
+    // client only ever gets code via --client=<sandbox-name>, explicitly,
+    // never swept in by --all-ebos alongside real businesses. See
+    // create-client.mjs's --sandbox flag for how a client gets this flag.
+    targets = registry.clients.filter((c) => c.isEbos && !c.sandbox);
+    if (!targets.length) throw new Error('No client in the registry is marked isEbos: true (excluding sandbox clients).');
     console.log(`Pushing update to ${targets.length} EBOS business(es)...`);
   } else {
     const client = registry.clients.find((c) => c.name === args.client);

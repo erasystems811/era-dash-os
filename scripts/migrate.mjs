@@ -71,7 +71,13 @@ async function main() {
   }
 
   const registry = loadRegistry();
-  const targets = args.allEbos ? registry.clients.filter((c) => c.isEbos) : [registry.clients.find((c) => c.name === args.client)].filter(Boolean);
+  // Same sandbox exclusion as push-update.mjs's --all-ebos -- a schema
+  // change meant for real businesses should never silently also land on
+  // the sandbox (and vice versa: a sandbox-only migration being tested
+  // stays scoped to --client=<sandbox-name>, never swept into --all-ebos).
+  const targets = args.allEbos
+    ? registry.clients.filter((c) => c.isEbos && !c.sandbox)
+    : [registry.clients.find((c) => c.name === args.client)].filter(Boolean);
 
   if (!targets.length) {
     throw new Error(args.allEbos ? 'No client in the registry is marked isEbos: true.' : `No client "${args.client}" in the registry.`);

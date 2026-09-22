@@ -66,9 +66,16 @@ function parseArgs(argv) {
   // (--provider=hetzner) for a business that's staying on an existing
   // Hetzner setup, but a plain run of this script no longer touches
   // Hetzner by accident.
-  const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false, size: 'small', template: 'default', provider: 'oracle' };
+  const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false, size: 'small', template: 'default', provider: 'oracle', sandbox: false };
   for (const arg of argv) {
     if (arg === '--whatsapp') args.whatsapp = true;
+    // Marks this client sandbox:true in the registry -- push-update.mjs and
+    // migrate.mjs's --all-ebos both skip a sandbox client on purpose (see
+    // their own comments), so testing here can never leak onto a real
+    // business, and a real-business rollout never silently touches this
+    // one either. Chidera, 2026-09-22: "i cant keep mixing live client with
+    // test features."
+    else if (arg === '--sandbox') args.sandbox = true;
     else if (arg === '--pdf') args.pdf = true;
     else if (arg === '--skip-github') args.skipGithub = true;
     else if (arg.startsWith('--payment=')) args.payment = arg.split('=')[1];
@@ -83,7 +90,7 @@ function parseArgs(argv) {
     else if (arg.startsWith('--shared-server=')) args.sharedServer = arg.slice('--shared-server='.length);
     else if (arg === '--new-shared-server') args.newSharedServer = true;
   }
-  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--provider=oracle|hetzner|ovh|digitalocean] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server]');
+  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--provider=oracle|hetzner|ovh|digitalocean] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server] [--sandbox]');
   if (!['oracle', 'hetzner', 'ovh', 'digitalocean'].includes(args.provider)) throw new Error(`Unknown --provider="${args.provider}" -- only "oracle", "hetzner", "ovh" and "digitalocean" are wired up (see scripts/lib/oracle.mjs / hetzner.mjs / ovh.mjs / digitalocean.mjs).`);
   // A shared server's IP is provider-agnostic once it exists (join mode
   // never calls a provider API at all -- see the sharedMode==='join'
@@ -529,6 +536,7 @@ async function main() {
     // client's own site block from the shared Caddy.
     serverMode: sharedMode === 'none' ? 'dedicated' : 'shared',
     ...(sharedMode !== 'none' ? { hostedOn: ip, sharedPorts } : {}),
+    ...(args.sandbox ? { sandbox: true } : {}),
     // isEbos marks this registry entry as the EBOS deployment (not a normal
     // one-business client) so the panel knows to render it in "Businesses
     // (EBOS)" instead of "Clients", and ebosAdminToken lets the panel call

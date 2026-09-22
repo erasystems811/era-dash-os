@@ -75,7 +75,7 @@ router.post('/parse-menu', async (req, res) => {
 });
 
 router.post('/build', (req, res) => {
-  const { businessName, subdomain, size, provider, sharedServerMode, sharedServerIp, business, owner, branches, catalogue, botFields, botStates, knowledgeBase } = req.body;
+  const { businessName, subdomain, size, provider, sharedServerMode, sharedServerIp, business, owner, branches, catalogue, botFields, botStates, knowledgeBase, sandbox } = req.body;
 
   if (!businessName || !business?.type || !owner?.name || !owner?.email) {
     return res.status(400).json({ error: 'Business name, business type, owner name and owner email are all required before building.' });
@@ -92,6 +92,10 @@ router.post('/build', (req, res) => {
   const args = [`--name=${businessName}`, '--template=ebos', `--ebos-seed=${seedPath}`];
   if (subdomain) args.push(`--subdomain=${subdomain}`);
   if (size) args.push(`--size=${size}`);
+  // Sandbox toggle (no UI checkbox wired up for this yet -- passed straight
+  // through when a caller sends it) -- see create-client.mjs's --sandbox
+  // comment for what this actually protects.
+  if (sandbox) args.push('--sandbox');
   // Defaults to create-client.mjs's own default (currently 'oracle') when
   // not passed -- the workstation UI's own form controls whether this is
   // ever sent, same as size/subdomain above.
