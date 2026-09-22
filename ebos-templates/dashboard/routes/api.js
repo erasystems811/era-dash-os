@@ -265,6 +265,52 @@ router.get('/monitor/summary', requireEraAdmin, async (req, res) => {
   });
 });
 
+// Chidera, 2026-09-22: "meta will start charging 14 naira per message on
+// october first... my bot can end up texting lots of messages for just
+// one order if customer keeps typing back and forth." Meta is ending free
+// service-window messages on 2026-10-01 -- every outbound message this
+// business's bot sends (WhatsApp only; inbound is never billed) starts
+// costing real money past the first 1,000/month per WhatsApp number,
+// publicly reported at roughly NGN 14 each (no official per-country rate
+// from Meta as of this writing -- see PER_MESSAGE_NAIRA below, update it
+// the moment Meta publishes the real one). This turns that fear into a
+// real number: how many outbound WhatsApp messages this business actually
+// sent per order over the last 30 days, and what October would cost at
+// today's real order volume.
+const PER_MESSAGE_NAIRA = 14; // public reporting as of 2026-09, not Meta's own confirmed rate -- revisit
+const FREE_MESSAGES_PER_NUMBER = 1000; // per WhatsApp number, per month
+
+router.get('/monitor/messaging-cost', requireEraAdmin, async (req, res) => {
+  const days = Math.min(Number(req.query.days) || 30, 90);
+  const [{ rows: outboundRows }, { rows: orderRows }, { rows: numberRows }] = await Promise.all([
+    pool.query(
+      `select count(*) as count from message
+       where direction = 'outbound' and channel = 'whatsapp' and created_at >= now() - $1::interval`,
+      [`${days} days`]
+    ),
+    pool.query(`select count(*) as count from "order" where created_at >= now() - $1::interval`, [`${days} days`]),
+    pool.query(`select count(distinct phone_number_id) as count from branch_channel where channel = 'whatsapp' and phone_number_id is not null`),
+  ]);
+  const outboundWhatsapp = Number(outboundRows[0].count);
+  const orders = Number(orderRows[0].count);
+  // Zero rows means this business runs on the one shared .env number, not
+  // zero numbers -- see branch_channel's own table comment.
+  const whatsappNumbers = Math.max(1, Number(numberRows[0].count));
+  const freeAllowance = whatsappNumbers * FREE_MESSAGES_PER_NUMBER * (days / 30);
+  const billableMessages = Math.max(0, outboundWhatsapp - freeAllowance);
+  res.json({
+    days,
+    outboundWhatsapp,
+    orders,
+    avgMessagesPerOrder: orders ? Number((outboundWhatsapp / orders).toFixed(1)) : null,
+    whatsappNumbers,
+    freeAllowance: Math.round(freeAllowance),
+    billableMessages: Math.round(billableMessages),
+    projectedCostNaira: Math.round(billableMessages * PER_MESSAGE_NAIRA),
+    perMessageNaira: PER_MESSAGE_NAIRA,
+  });
+});
+
 // Raw-content half of the same panel -- deliberately not gated behind any
 // "flag" logic. The point Chidera asked for is to actually watch real
 // conversations across every business from one place, not wait for the
