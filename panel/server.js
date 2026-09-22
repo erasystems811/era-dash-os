@@ -12,6 +12,7 @@ import { router as workstationRoutes } from './routes/workstation.js';
 import { router as workstationEsfRoutes } from './routes/workstation-esf.js';
 import { main as runBotHealthCheck } from '../scripts/check-bot-health.mjs';
 import { main as runDeepHealthCheck } from '../scripts/deep-health-check.mjs';
+import { generateSecret as generateTotpSecret, verifyTotp, otpauthUri } from './lib/totp.mjs';
 
 const MIGRATIONS_DIR = path.join(process.cwd(), '..', 'ebos-templates', 'migrations');
 // Read once at boot, not per-request -- this is a static doc, not data.
@@ -281,6 +282,124 @@ if (process.env.PANEL_DISABLE_AUTH !== '1') {
     })
   );
 }
+
+// Second factor, on top of the password above -- Chidera, 2026-09-21:
+// "guarantee uptime" work flagged the panel login as the weakest specific
+// point (password-only, no 2FA). PANEL_2FA_ENABLED starts unset/'0'
+// deliberately: PANEL_TOTP_SECRET is generated the first time /2fa/setup
+// is opened, and enforcement only turns on once that's been added to a
+// real authenticator app and confirmed -- flipping this on blind, before
+// confirming a real code verifies, would be a self-inflicted lockout with
+// no password-reset flow to fall back on.
+//
+// Cookie is signed (HMAC over the expiry, keyed off the TOTP secret
+// itself -- one secret to manage, not two) rather than using a session
+// store, since this is a single-operator panel with no other session
+// state anywhere. Parsed by hand (no cookie-parser dependency) since this
+// is the only cookie this app ever sets or reads.
+function totpSessionSecretKey() {
+  return crypto.createHash('sha256').update(`${process.env.PANEL_TOTP_SECRET || ''}:2fa-session`).digest();
+}
+
+function signTwoFaCookie(expiresAt) {
+  const sig = crypto.createHmac('sha256', totpSessionSecretKey()).update(String(expiresAt)).digest('hex');
+  return `${expiresAt}.${sig}`;
+}
+
+function verifyTwoFaCookie(value) {
+  if (!value) return false;
+  const [expiresAtStr, sig] = value.split('.');
+  const expiresAt = Number(expiresAtStr);
+  if (!expiresAt || !sig || Date.now() > expiresAt) return false;
+  const expectedSig = crypto.createHmac('sha256', totpSessionSecretKey()).update(String(expiresAt)).digest('hex');
+  return sig.length === expectedSig.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig));
+}
+
+function readCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const [k, ...rest] = part.trim().split('=');
+    if (k === name) return decodeURIComponent(rest.join('='));
+  }
+  return null;
+}
+
+const TWO_FA_SESSION_MS = 12 * 60 * 60 * 1000; // 12 hours -- re-enter the code once a work session, not every request
+
+function twoFaPage({ error, redirectTo }) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verify -- ERA Dash OS</title>
+<style>body{font-family:sans-serif;max-width:360px;margin:15vh auto;padding:0 1rem;}
+input{padding:10px;width:100%;font-size:20px;letter-spacing:4px;text-align:center;margin:10px 0;}
+button{padding:10px 20px;width:100%;font-size:15px;cursor:pointer;}
+.err{color:#b00;font-size:14px;}</style></head>
+<body><h2>Enter your 6-digit code</h2>
+${error ? `<p class="err">${esc(error)}</p>` : ''}
+<form method="POST" action="/2fa/verify">
+<input type="hidden" name="redirect" value="${esc(redirectTo || '/')}">
+<input type="text" name="code" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" autofocus required maxlength="6">
+<button type="submit">Verify</button>
+</form></body></html>`;
+}
+
+if (process.env.PANEL_DISABLE_AUTH !== '1' && process.env.PANEL_2FA_ENABLED === '1') {
+  app.use((req, res, next) => {
+    if (req.path === '/2fa' || req.path === '/2fa/verify' || req.path === '/2fa/setup') return next();
+    if (verifyTwoFaCookie(readCookie(req, 'era_2fa'))) return next();
+    if (req.method !== 'GET') return res.status(403).json({ error: 'Two-factor verification required.' });
+    res.redirect(`/2fa?redirect=${encodeURIComponent(req.originalUrl)}`);
+  });
+}
+
+app.get('/2fa', (req, res) => {
+  res.send(twoFaPage({ redirectTo: req.query.redirect }));
+});
+
+app.post('/2fa/verify', express.urlencoded({ extended: false }), (req, res) => {
+  const { code, redirect } = req.body;
+  if (!process.env.PANEL_TOTP_SECRET || !verifyTotp(process.env.PANEL_TOTP_SECRET, code)) {
+    return res.status(401).send(twoFaPage({ error: 'Wrong or expired code -- try again.', redirectTo: redirect }));
+  }
+  const expiresAt = Date.now() + TWO_FA_SESSION_MS;
+  res.setHeader('Set-Cookie', `era_2fa=${signTwoFaCookie(expiresAt)}; HttpOnly; SameSite=Strict; Max-Age=${TWO_FA_SESSION_MS / 1000}; Path=/`);
+  res.redirect(redirect && redirect.startsWith('/') ? redirect : '/');
+});
+
+// Setup/re-view page -- generates PANEL_TOTP_SECRET the first time it's
+// opened (never overwrites an existing one, so re-opening this later
+// doesn't invalidate an authenticator app already set up), shows the
+// manual-entry key and otpauth:// URI (every authenticator app accepts
+// either scanning a QR of that URI or typing it/the key in by hand -- no
+// QR-generation library needed just to show the same string as text).
+// Reachable behind basic auth alone, deliberately, even before
+// PANEL_2FA_ENABLED is turned on -- this is how that first real code gets
+// confirmed before enforcement flips on.
+app.get('/2fa/setup', (req, res) => {
+  if (!process.env.PANEL_TOTP_SECRET) {
+    const secret = generateTotpSecret();
+    patchSecrets({ PANEL_TOTP_SECRET: secret });
+    process.env.PANEL_TOTP_SECRET = secret;
+  }
+  const uri = otpauthUri(process.env.PANEL_TOTP_SECRET, process.env.PANEL_USER || 'admin');
+  const enabled = process.env.PANEL_2FA_ENABLED === '1';
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Two-factor setup -- ERA Dash OS</title>
+<style>body{font-family:sans-serif;max-width:520px;margin:2rem auto;padding:0 1rem;}
+code{background:#f0f0f0;padding:8px 10px;display:block;font-size:16px;letter-spacing:2px;word-break:break-all;border-radius:4px;margin:10px 0;}
+.status{padding:8px 12px;border-radius:4px;margin:10px 0;font-size:14px;}
+.on{background:#e6f4ea;color:#1a7a3d;} .off{background:#fff3cd;color:#8a5b0a;}</style></head>
+<body><h2>Two-factor authentication</h2>
+<p class="status ${enabled ? 'on' : 'off'}">${enabled ? 'Enforced -- a code is required on every login.' : 'Not enforced yet -- set up your authenticator app below, then ask to turn enforcement on.'}</p>
+<p>Add this to Google Authenticator, Authy, or any TOTP app. Scan isn't available here (no camera-facing UI), so use "enter a setup key manually":</p>
+<p><b>Account:</b> ERA Dash OS (${esc(process.env.PANEL_USER || 'admin')})</p>
+<p><b>Key:</b></p>
+<code>${esc(process.env.PANEL_TOTP_SECRET)}</code>
+<p><b>Full URI</b> (some apps accept pasting this directly):</p>
+<code>${esc(uri)}</code>
+<p>Once it's added, open <a href="/2fa">/2fa</a> in another tab and confirm a code actually verifies before enforcement is turned on.</p>
+</body></html>`);
+});
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -634,6 +753,16 @@ function businessesSection(ebosClients) {
     <button type="button" onclick="runBackupNow()">Run backup now</button>
     <p class="muted" style="margin-top:14px;">A backup nobody's ever restored isn't verified, it's just a hope. This actually restores each client's latest backup into a disposable test database, confirms real data comes back, then discards it -- runs automatically every Sunday, or right now:</p>
     <button type="button" onclick="verifyBackupsNow()">Verify backups now</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Messaging cost exposure (Meta's Oct 1, 2026 per-message pricing)</legend>
+    <p class="muted">From Oct 1, every WhatsApp message a bot sends past the first 1,000/month per number stops being free -- publicly reported at roughly NGN14 each (Meta hasn't confirmed the exact rate; update PER_MESSAGE_NAIRA in routes/api.js the moment they do). This is each business's real outbound-message-per-order average over the last 30 days, and what that volume would have cost at today's rate -- not a guess.</p>
+    <button type="button" onclick="loadMessagingCost()">Check messaging cost exposure</button>
+    <table style="margin-top:10px;">
+      <tr><th>Business</th><th>Orders (30d)</th><th>Outbound WhatsApp msgs</th><th title="Total outbound WhatsApp messages divided by orders in the same window -- the number that actually explains the risk.">Avg msgs / order</th><th>Free allowance</th><th>Billable msgs</th><th>Projected cost</th></tr>
+      <tbody id="messagingCostRows"><tr><td colspan="7">Not checked yet.</td></tr></tbody>
+    </table>
   </fieldset>
 
   <fieldset>
@@ -1236,6 +1365,38 @@ function fmtUsd(value) {
   return value == null ? '?' : '$' + Number(value).toFixed(2);
 }
 
+function fmtNaira(value) {
+  return value == null ? '?' : 'NGN' + Number(value).toLocaleString();
+}
+
+async function loadMessagingCost() {
+  const el = document.getElementById('messagingCostRows');
+  if (!el) return;
+  el.innerHTML = '<tr><td colspan="7">Checking every business live, this can take a moment...</td></tr>';
+  try {
+    const res = await fetch('/api/ebos/messaging-cost');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed to load');
+    el.innerHTML = data.length
+      ? data.map((b) =>
+          '<tr>'
+          + '<td>' + escClient(b.displayName) + '</td>'
+          + (b.error
+            ? '<td colspan="6" class="danger">Error: ' + escClient(b.error) + '</td>'
+            : '<td>' + b.orders + '</td>'
+              + '<td>' + b.outboundWhatsapp + '</td>'
+              + '<td>' + (b.avgMessagesPerOrder ?? '?') + '</td>'
+              + '<td>' + b.freeAllowance + '</td>'
+              + '<td>' + b.billableMessages + '</td>'
+              + '<td>' + (b.projectedCostNaira > 0 ? '<strong class="danger">' + fmtNaira(b.projectedCostNaira) + '</strong>' : fmtNaira(b.projectedCostNaira)) + '</td>')
+          + '</tr>'
+        ).join('')
+      : '<tr><td colspan="7">No businesses yet.</td></tr>';
+  } catch (err) {
+    el.innerHTML = '<tr><td colspan="7">Error: ' + escClient(err.message) + '</td></tr>';
+  }
+}
+
 function renderEbosTotals(data) {
   const totalsEl = document.getElementById('ebosTotals');
   if (!totalsEl) return;
@@ -1813,6 +1974,30 @@ app.get('/api/ebos/status', async (req, res) => {
   }
   const statuses = await Promise.all(ebosClients.map((c) => ebosBusinessStatus(c, hetznerToken)));
   res.json(statuses);
+});
+
+// Chidera, 2026-09-22: "meta will start charging 14 naira per message on
+// october first... my bot can end up texting lots of messages for just
+// one order if customer keeps typing back and forth." Pulls each
+// business's own real answer (ebos-templates/dashboard/routes/api.js's
+// GET /monitor/messaging-cost) over HTTPS, same as every other EBOS panel
+// check -- no SSH, nothing to read locally, works from wherever this
+// panel itself runs. Sorted worst-exposure-first so the businesses that
+// actually need attention aren't buried below ones that don't.
+app.get('/api/ebos/messaging-cost', async (req, res) => {
+  const ebosClients = getEbosClients(loadRegistry());
+  const results = await Promise.all(
+    ebosClients.map(async (c) => {
+      try {
+        const data = await callBusinessApi(c, '/api/monitor/messaging-cost');
+        return { client: c.name, displayName: c.displayName || c.name, ...data };
+      } catch (err) {
+        return { client: c.name, displayName: c.displayName || c.name, error: err.message };
+      }
+    })
+  );
+  results.sort((a, b) => (b.projectedCostNaira || 0) - (a.projectedCostNaira || 0));
+  res.json(results);
 });
 
 // Bot Monitoring's raw-content half -- merges every business's recent
