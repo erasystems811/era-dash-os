@@ -22,6 +22,7 @@ import {
   handleUpsellListTap,
   handleOrderConfirmNoTap,
   logWebsiteBubble,
+  getOpenOrder,
 } from '../engine/flow.js';
 
 export const router = express.Router();
@@ -53,6 +54,25 @@ router.get('/:token', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
   await touchWebChatActive(customer.id);
+  // Chidera, 2026-09-23: "anytime they start using the link let whatever
+  // stage they are in ... not be restarting ... let it keep them where
+  // they stopped." getOpenOrder's own 3h freshness window only gets
+  // refreshed by something that actually touches the order -- a customer
+  // who reopens this link just to look, without immediately typing or
+  // tapping anything, was getting nothing refreshed by that alone. If
+  // their order was already close to 3h since its last real touch, the
+  // page would still show their full past history (messageHistory has no
+  // staleness filter) while their NEXT action silently fell through
+  // resolveCustomerOrder into a brand new order -- restarting from
+  // scratch even though the page looked like nothing had changed. Calling
+  // getOpenOrder here (side effect only, same as routes/menu-page.js's
+  // pendingOrderPayload already does for /m/:token) keeps a still-open
+  // order alive for as long as the customer keeps checking back at least
+  // once every 3 hours -- a genuinely days-old abandoned order still goes
+  // stale on purpose (prices/availability may have changed by then), this
+  // only stops "I was still looking at it" from silently counting as
+  // abandonment.
+  await getOpenOrder(customer.id);
 
   let history = await messageHistory(customer.id);
   // First visit -- nothing logged on the website channel for this customer
