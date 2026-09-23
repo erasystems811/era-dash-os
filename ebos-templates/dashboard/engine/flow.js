@@ -975,6 +975,38 @@ async function sendStartOrderLink(customer) {
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortGreeting, trigger: 'greeting', processed: true });
 }
 
+// Chidera, 2026-09-23: "i need customer complaint and all those in the
+// site as well... a site they are given where they can chat there too, to
+// lay their complaints... i have to reduce billable text all round."
+// Reuses the SAME /wa/:token page the ordering flow already uses -- no new
+// page needed, the real free-text pipeline (routes/web-chat.js's
+// /:token/message -> handleWebChatMessage -> handlePendingBatch) already
+// classifies free text into 'complaint'/wantsHuman exactly like real
+// WhatsApp text does, it just never had an entry point that DIDN'T assume
+// ordering. Calling handover() straight from here (like this branch used
+// to) would alert staff with nothing but "customer asked for a person" --
+// no actual complaint yet, since they haven't said what's wrong -- and
+// spend a real WhatsApp send doing it. One short link instead: once they
+// actually type their complaint on the page, THAT free-text turn re-runs
+// this exact classifyIntent branch and fires the real handover with their
+// real words, landing as a free website bubble (customer.channel is
+// 'website' by then) and a staff alert via push where available
+// (notifyStaff). ?ctx=complaint tells the page's own first-bubble render
+// (routes/web-chat.js) to greet them about their complaint, not the normal
+// "what would you like to order?".
+export async function sendComplaintLink(customer) {
+  if (!process.env.PUBLIC_URL) {
+    await reply(customer, `I'm sorry to hear that. Please tell me what happened and I'll get someone to help.`, 'complaint_redirect');
+    return;
+  }
+  const token = await ensureMenuToken(customer);
+  const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}?ctx=complaint`;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  const shortMessage = `I'm sorry to hear that. Tap below to tell us what happened.`;
+  await sendWhatsAppCtaUrl(recipientFor(customer), shortMessage, 'Tell us more', chatUrl, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortMessage, trigger: 'complaint_redirect', processed: true });
+}
+
 async function handleGreeting(customer, text) {
   // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
   // catch up to our current state" -- found live: an Instagram customer
@@ -4352,12 +4384,8 @@ async function handlePendingBatch(customer, text) {
   }
 
   const { intent, wantsHuman } = isPureGreeting(text) ? { intent: 'greeting', wantsHuman: false } : await classifyIntent(text);
-  if (wantsHuman) {
-    await handover(customer, 'Customer asked for a person');
-    return;
-  }
-  if (intent === 'complaint') {
-    await handover(customer, 'Customer message classified as a complaint');
+  if (wantsHuman || intent === 'complaint') {
+    await sendComplaintLink(customer);
     return;
   }
   if (intent === 'greeting') {

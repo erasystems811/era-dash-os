@@ -82,16 +82,31 @@ router.get('/:token', async (req, res) => {
   // -- never a real Cloud API send, just a logged row this page renders
   // straight back to itself.
   if (!history.length) {
-    const { message, specialsCategory } = await buildGreetingContent(customer);
-    const menuToken = await ensureMenuToken(customer);
-    const menuUrl = `${process.env.PUBLIC_URL}/m/${menuToken}`;
-    // Same specials line Instagram's own greeting already shows (flow.js's
-    // buildGreetingContent/handleGreeting) -- a second, auto-linked URL
-    // inside the body text, not a second bubble.
-    const body = specialsCategory
-      ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
-      : message;
-    await logWebsiteBubble({ customerId: customer.id, body, trigger: 'greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
+    // Chidera, 2026-09-23: "i need customer complaint and all those in the
+    // site as well." flow.js's sendComplaintLink sends this exact same
+    // /wa/:token link (no new page) with ?ctx=complaint -- a first-time
+    // visitor arriving that way shouldn't be greeted with "what would you
+    // like to order?", they came here to explain a problem. A returning
+    // customer (history already non-empty) is unaffected either way, this
+    // only shapes the very first bubble a brand-new visit ever sees.
+    if (req.query.ctx === 'complaint') {
+      await logWebsiteBubble({
+        customerId: customer.id,
+        body: `Sorry to hear that. Please tell us what happened and we'll help sort it out.`,
+        trigger: 'complaint_greeting',
+      });
+    } else {
+      const { message, specialsCategory } = await buildGreetingContent(customer);
+      const menuToken = await ensureMenuToken(customer);
+      const menuUrl = `${process.env.PUBLIC_URL}/m/${menuToken}`;
+      // Same specials line Instagram's own greeting already shows (flow.js's
+      // buildGreetingContent/handleGreeting) -- a second, auto-linked URL
+      // inside the body text, not a second bubble.
+      const body = specialsCategory
+        ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
+        : message;
+      await logWebsiteBubble({ customerId: customer.id, body, trigger: 'greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
+    }
     history = await messageHistory(customer.id);
   }
 
