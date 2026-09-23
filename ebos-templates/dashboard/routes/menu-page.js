@@ -257,6 +257,11 @@ async function findPayment(order) {
 router.get('/:token/pay', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
+  // Same breadcrumb every other route into this page touches -- a
+  // customer can land here straight from a "Ready to pay?" bubble
+  // (sendPosPaymentChoice) without having hit /review first, so this
+  // can't assume web_chat_active_at is already fresh.
+  if (isViaWebChat(customer)) await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const order = await getOpenOrder(customer.id);
   const payment = order ? await findPayment(order) : null;
@@ -321,6 +326,17 @@ router.get('/:token/pay/status', async (req, res) => {
 router.post('/:token/pay/claim', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  // Same in-memory override as /review above -- without it,
+  // notifyCustomerClaimedPosPayment's staff-handover branch (Moniepoint
+  // hasn't matched the transfer yet) would reply() a real WhatsApp
+  // message to a customer who's actually on the chat page right now.
+  // Found while wiring up full web-chat POS parity, 2026-09-23 -- this
+  // route was the one write path into notifyCustomerClaimedPosPayment
+  // that never got the override every other route here already has.
+  if (isViaWebChat(customer)) {
+    customer.channel = 'website';
+    await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
+  }
   const order = await getOpenOrder(customer.id);
   if (!order) return res.status(404).json({ error: 'No open order right now.' });
   const payment = await findPayment(order);
