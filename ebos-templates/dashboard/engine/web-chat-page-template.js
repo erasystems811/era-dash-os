@@ -70,6 +70,16 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   .actionrow:active{background:rgba(255,255,255,.04)}
   .actionrow .icon{flex:none;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:15px}
   .actionrow .desc{color:var(--text2);font-weight:400;font-size:12.5px;display:block}
+  /* cta_url/document rows ("See menu", "View invoice") read as plain text
+     links, not buttons -- Chidera, 2026-09-23: "either make it look like
+     a real button or put a tap here type of text." Doing both: a filled
+     pill chip (visibly a tappable control, not inline text) plus an
+     explicit "Tap to open" caption underneath it. */
+  .linkwrap{padding:10px 12px 12px}
+  .linkbtn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--accent);border:none;border-radius:8px;color:#04120d;font-weight:700;font-size:14.5px;padding:11px 12px;cursor:pointer;text-decoration:none;font-family:inherit}
+  .linkbtn:active{background:#03946f}
+  .linkbtn .icon{font-size:15px}
+  .linkcaption{display:block;text-align:center;color:var(--text2);font-size:12px;margin-top:6px}
   /* List-message bottom sheet */
   #listSheet{position:fixed;inset:0;display:none;z-index:20}
   #listSheet.open{display:block}
@@ -160,10 +170,10 @@ function renderActions(interactive) {
     return '<div class="actions"><button type="button" class="actionrow" data-open-list="1"><span class="icon">&#9776;</span>' + esc(interactive.buttonText || 'Choose') + '</button></div>';
   }
   if (interactive.type === 'cta_url') {
-    return '<div class="actions"><a class="actionrow" href="' + esc(interactive.url) + '"><span class="icon">&#8663;</span>' + esc(interactive.buttonText || 'Open') + '</a></div>';
+    return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '"><span class="icon">&#8663;</span>' + esc(interactive.buttonText || 'Open') + '</a><span class="linkcaption">Tap to open</span></div>';
   }
   if (interactive.type === 'document') {
-    return '<div class="actions"><a class="actionrow" href="' + esc(interactive.url) + '" target="_blank" rel="noopener"><span class="icon">&#128196;</span>' + esc(interactive.filename || 'View document') + '</a></div>';
+    return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '" target="_blank" rel="noopener"><span class="icon">&#128196;</span>' + esc(interactive.filename || 'View document') + '</a><span class="linkcaption">Tap to view</span></div>';
   }
   return '';
 }
