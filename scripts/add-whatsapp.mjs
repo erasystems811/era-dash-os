@@ -50,6 +50,23 @@ async function main() {
   await copyToRemote(client.ip, tmpFile, `${remoteDir}/.env`);
   await runRemote(client.ip, `chmod 600 ${remoteDir}/.env && cd ${remoteDir} && docker compose up -d`);
 
+  // Chidera, 2026-09-16: "i texted pomodoro no reply" -- root cause was
+  // here. Embedded Signup (panel/server.js's /api/connect/:token/complete)
+  // subscribes ERA's Meta app to the WABA as part of that flow; this
+  // manual-entry path never did, so Meta never sends a single webhook
+  // event for a client connected this way -- routing/server health is
+  // irrelevant, the message never leaves Meta's side. Same call as that
+  // flow, idempotent (safe to POST even if already subscribed).
+  const subRes = await fetch(`https://graph.facebook.com/v21.0/${args['waba-id']}/subscribed_apps`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${args.token}` },
+  });
+  const subData = await subRes.json();
+  if (!subRes.ok || !subData.success) {
+    throw new Error(`WABA subscription failed: ${subData.error?.message || subRes.status} -- WhatsApp env vars were still saved, but Meta will not deliver any messages until this succeeds. Re-run this script to retry.`);
+  }
+  console.log('Subscribed ERA\'s app to this WABA -- Meta will now deliver webhook events for this number.');
+
   // whatsappPhoneNumberId is what panel/server.js's shared WhatsApp router
   // (/webhook/whatsapp) matches an inbound message's phone_number_id
   // against to know which client it belongs to -- without this, a client

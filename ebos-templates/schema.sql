@@ -375,6 +375,15 @@ create table if not exists product (
   -- style adding the items in the deal and how much and name of deal."
   -- What's actually IN the combo lives in product_combo_item below.
   is_combo boolean not null default false,
+  -- Reading order (bulk-import assigns it in source order; a manually
+  -- added item gets none until repositioned) -- a real menu is rarely
+  -- alphabetical, see migrations/0045_product_position.sql. Folded in here
+  -- (was only ever an `alter table`, never added to this file) after it
+  -- broke POST /catalogue for a brand-new client: create-client.mjs seeds
+  -- a fresh database from this file alone, never the migrations/ folder,
+  -- so any client created since 0045 shipped had no position column at
+  -- all until someone happened to run a manual migration backfill.
+  position integer,
   created_at timestamptz not null default now()
 );
 
@@ -534,7 +543,13 @@ create table if not exists order_item (
   product_id uuid not null references product(id),
   quantity integer not null default 1,
   price numeric(12, 2) not null,
-  modification text
+  modification text,
+  -- Chidera, 2026-09-20: joint dine-in ordering -- whoever added this
+  -- specific line, so a shared table order can later be billed together
+  -- or split by who actually ordered what. Null for every non-dine-in
+  -- order and for any dine-in line predating this. See
+  -- migrations/0050_joint_dinein.sql.
+  added_by_customer_id uuid references customers(id)
 );
 
 -- Per-item customization questions (water: room temp or cold, rice:
@@ -545,6 +560,13 @@ create table if not exists product_question (
   product_id uuid not null references product(id) on delete cascade,
   question text not null,
   position integer not null default 0,
+  -- Nullable -- a question with no options defined keeps the exact same
+  -- free-text input on the web menu page it always had; only a question a
+  -- business has actually given real choices to gets the faster dropdown-
+  -- plus-optional-note UI. Chidera, 2026-09-20: "should not be a text
+  -- thing they should pick from dropdown and still be able to write extra
+  -- note(optional), so it can be faster." (migrations/0049)
+  options text[],
   created_at timestamptz not null default now()
 );
 create index if not exists product_question_product_idx on product_question (product_id);
@@ -929,9 +951,43 @@ create table if not exists order_topup (
   items jsonb not null,
   amount numeric(12,2) not null,
   payment_status text not null default 'pending' check (payment_status in ('pending', 'proof_submitted', 'confirmed')),
+  -- 0052, Chidera 2026-09-20: "totally stop sending account number...
+  -- use just paystack" -- a top-up now gets its own real Paystack
+  -- transaction (engine/payment.js's initializePaystackTopupTransaction),
+  -- not just bank-transfer instructions.
+  payment_reference text,
+  payment_link_url text,
   created_at timestamptz not null default now()
 );
 create index if not exists order_topup_order_idx on order_topup (order_id);
+
+-- Chidera, 2026-09-20: joint dine-in ordering, split/joint payment -- one
+-- row per actual charge attempt against an order, not one column on the
+-- order itself, so a table's bill can be paid as one whole-order charge
+-- (covers_item_ids null) or as one-or-more group charges, each covering
+-- only the items its own payers actually ordered. reference is our own
+-- bookkeeping id (order.reference + '-P' + n), never sent to Moniepoint --
+-- confirmation is matched by amount/time against real pos_transaction rows
+-- (engine/webhook-moniepoint.js), not by reference. provider defaults to
+-- 'pos' -- "i said use pos not paystack," the whole point being the bot
+-- auto-confirms a real POS transaction (card or transfer to the
+-- terminal's linked account) with no staff step, closing a real staff-
+-- fraud vector (staff redirecting customers to their own personal account
+-- number instead). See migrations/0050_joint_dinein.sql.
+create table if not exists order_payment (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references "order"(id) on delete cascade,
+  provider text not null default 'pos' check (provider in ('pos', 'paystack', 'manual')),
+  reference text not null unique,
+  amount numeric(12, 2) not null,
+  status text not null default 'pending' check (status in ('pending', 'confirmed', 'failed')),
+  covers_item_ids uuid[],
+  paid_by_customer_id uuid references customers(id),
+  created_at timestamptz not null default now(),
+  confirmed_at timestamptz
+);
+create index if not exists order_payment_order_idx on order_payment (order_id);
+create index if not exists order_payment_pending_amount_idx on order_payment (amount) where status = 'pending';
 
 -- Every payment-proof image a customer sends, kept -- not overwritten the
 -- way order.payment_proof_url used to be. A top-up after the original
@@ -1014,6 +1070,20 @@ create table if not exists table_session (
 );
 create unique index if not exists table_session_one_open_idx on table_session (table_id) where closed_at is null;
 create index if not exists table_session_branch_idx on table_session (branch_id);
+
+-- Chidera, 2026-09-20: joint dine-in ordering -- who's currently part of
+-- an open table sitting, recorded the first time each guest actually
+-- interacts with the table (scans, or the shared order page loads for
+-- them), not a roster they have to explicitly join. See
+-- migrations/0050_joint_dinein.sql.
+create table if not exists table_session_guest (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references table_session(id) on delete cascade,
+  customer_id uuid not null references customers(id) on delete cascade,
+  joined_at timestamptz not null default now(),
+  unique (session_id, customer_id)
+);
+create index if not exists table_session_guest_session_idx on table_session_guest (session_id);
 
 create table if not exists waiter_call (
   id uuid primary key default gen_random_uuid(),
@@ -1101,6 +1171,103 @@ alter table "order" add column if not exists payment_mode text not null default 
 -- bring out again. Chidera 2026-09-11: "confirming payment is different
 -- from marking served so there should be 2 piplines."
 alter table "order" add column if not exists served_at timestamptz;
+
+-- 0053, Chidera 2026-09-20: "on the staff card let there be a clear
+-- demarcation for add on, so they know what has been served and what has
+-- just been added on." A snapshot of {product_id: quantity} taken the
+-- moment served_at above is last set -- order_item has no stable row
+-- identity across a resubmit (the web review route deletes and
+-- reinserts every line each time), so this is a pure diff-against-
+-- current-quantities signal instead, correct regardless of how an
+-- add-on actually got added (web or chat).
+alter table "order" add column if not exists served_item_snapshot jsonb;
+
+-- ---------------------------------------------------------------------------
+-- Folded in from migrations/0042-0048 (never added to this file at the
+-- time -- create-client.mjs seeds a brand-new client from this file
+-- alone, never the migrations/ folder, so every one of these was
+-- genuinely missing for any client created after its own migration
+-- shipped, the same class of gap a manual migration backfill exists to
+-- catch on an EXISTING client). See each numbered migration file for the
+-- original reasoning; kept brief here.
+-- ---------------------------------------------------------------------------
+
+-- "Let them know immediately they open" (Chidera, 2026-09-16). One pending
+-- row per customer -- the partial unique index means messaging again
+-- during the same closed period never queues a second notification.
+create table if not exists hours_notify_request (
+  id uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references customers(id) on delete cascade,
+  branch_id uuid references branch(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  notified_at timestamptz
+);
+create unique index if not exists hours_notify_request_pending_idx on hours_notify_request(customer_id) where notified_at is null;
+create index if not exists hours_notify_request_branch_idx on hours_notify_request(branch_id) where notified_at is null;
+
+-- Customer database (CRM) add-on -- toggleable per business, same
+-- "ERA switches these, not the client" shape as delivery_config/
+-- voice_config/dinein_config above. birthday_prompt_enabled (0047,
+-- Chidera: "not every restaurant needs it, let it be a toogle on or off
+-- capability") defaults true so a business already on CRM keeps behaving
+-- exactly as it does today.
+create table if not exists crm_config (
+  business_id uuid primary key references business(id),
+  enabled boolean not null default false,
+  birthday_prompt_enabled boolean not null default true,
+  -- 0051, Chidera 2026-09-20: "we agreed a name so bot can refer to
+  -- customer" -- same toggle shape as birthday_prompt_enabled just above.
+  name_prompt_enabled boolean not null default true
+);
+alter table customers add column if not exists birthday date;
+
+-- POS sync add-on -- reads sales that already happened on a physical
+-- Moniepoint terminal into the dashboard as a real transaction list,
+-- separate from PAYMENT_PROVIDER/payment.js (which collects money FROM a
+-- customer through the bot).
+create table if not exists pos_sync_config (
+  business_id uuid primary key references business(id),
+  enabled boolean not null default false,
+  provider text not null default 'moniepoint' check (provider in ('moniepoint')),
+  api_key text,
+  webhook_username text,
+  webhook_password text,
+  connected_at timestamptz
+);
+create table if not exists pos_transaction (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null default 'moniepoint',
+  provider_reference text not null,
+  amount numeric(12, 2) not null,
+  occurred_at timestamptz not null default now(),
+  raw_payload jsonb,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists pos_transaction_provider_ref_idx on pos_transaction(provider, provider_reference);
+create index if not exists pos_transaction_occurred_at_idx on pos_transaction(occurred_at desc);
+
+-- Who gets pinged the moment a payment clears and an order is ready to
+-- start preparing (kitchen/ops), separate from handover_alerts (customer-
+-- service escalations). Chidera, 2026-09-16.
+alter table staff add column if not exists order_alerts boolean not null default false;
+
+-- ERA's own prepaid message wallet (engine/wallet.js) -- WhatsApp gives no
+-- self-service spending cap, so this enforces one in code. Deliberately
+-- off by default and built well ahead of being turned on for anyone real,
+-- Chidera's own call, 2026-09-17: "build it first, roll out later."
+-- balance_kobo/rate_kobo_per_message: kobo (integer), never naira
+-- (numeric), so a per-message deduction is always an exact integer
+-- subtraction, never a float rounding error compounding over thousands
+-- of messages.
+create table if not exists message_wallet (
+  business_id uuid primary key references business(id),
+  enabled boolean not null default false,
+  balance_kobo bigint not null default 0,
+  rate_kobo_per_message integer not null default 1400,
+  free_messages_per_month integer not null default 1500,
+  free_reset_month text not null default to_char(now(), 'YYYY-MM'),
+  free_messages_this_month integer not null default 0
+);
 
 create table if not exists activity_log (
   id uuid primary key default gen_random_uuid(),

@@ -228,7 +228,32 @@ export default function Orders() {
   // `orders` (lib/auth.js's scopeToWorkArea), and 'in_house' never reaches
   // this page in the first place (App.jsx redirects it to /in-house).
   const [dineinEnabled, setDineinEnabled] = useState(false);
+  // Chidera, 2026-09-16: "why is there a ring rider in the card when
+  // delivery is not toggled on" -- the button only ever checked the
+  // ORDER's own fulfilment_type === 'delivery' (a real value even when the
+  // business has no own-rider system at all -- a delivery order can exist
+  // without ERA's Delivery add-on being switched on), never whether this
+  // business's delivery mode is actually 'own_riders'. Ringing a rider on
+  // a business with zero riders configured would either no-op or error.
+  const [ownRidersEnabled, setOwnRidersEnabled] = useState(false);
   const [activeTab, setActiveTab] = useState('online');
+  // Chidera, 2026-09-17: "the link is meant to open the specific kanban
+  // inside for that order not the pipeline surface" -- the "ready to
+  // prepare" staff alert links here with ?order=<id> (flow.js's
+  // completePayment); once the board's own data has loaded, scroll that
+  // one card into view and outline it briefly so staff land right on it
+  // instead of hunting for it among everything else in the pipeline.
+  useEffect(() => {
+    if (!orders) return;
+    const orderId = new URLSearchParams(window.location.search).get('order');
+    if (!orderId) return;
+    const el = document.getElementById(`order-${orderId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('highlight');
+    const timeout = setTimeout(() => el.classList.remove('highlight'), 4000);
+    return () => clearTimeout(timeout);
+  }, [orders]);
   // Two real pipelines, not one -- Chidera 2026-09-11: "confirming payment
   // is different from marking served so there should be 2 piplines."
   // 'serving' = not yet served_at (a Served button). 'awaitingPayment' =
@@ -259,6 +284,7 @@ export default function Orders() {
     api.get(`/orders${q}`).then(setOrders);
     api.get(`/orders/stats/today${q}`).then(setToday);
     api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
+    api.get('/delivery-config').then((c) => setOwnRidersEnabled(c?.mode === 'own_riders'));
     loadInHouse();
   }
 
@@ -414,17 +440,34 @@ export default function Orders() {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
                 {col.orders.map((o) => (
-                  <Link key={o.id} to={`/orders/${o.id}`} className="docket">
+                  <Link key={o.id} id={`order-${o.id}`} to={`/orders/${o.id}`} className="docket">
                     <div className="row1">
                       <span className="no mono">Table {o.table_label}</span>
                     </div>
                     {o.items?.length > 0 && (
                       <ul>
-                        {o.items.map((item, i) => (
-                          <li key={i}>
-                            <b>{item.quantity}</b> {item.name}
-                          </li>
-                        ))}
+                        {o.items.map((item, i) => {
+                          // newQty -- Chidera, 2026-09-20: "on the staff
+                          // card let there be a clear demarcation for
+                          // add on." Same diff InHouse.jsx's own dine-in
+                          // board shows -- this is the same data, just a
+                          // second surface for it (Orders.jsx's own In
+                          // House tab).
+                          const newQty = item.newQty || 0;
+                          return (
+                            <li key={i}>
+                              <b>{item.quantity}</b> {item.name}
+                              {item.answers?.length > 0 && (
+                                <span className="hint"> ({item.answers.map((a) => a.answer).join(', ')})</span>
+                              )}
+                              {newQty === item.quantity ? (
+                                <span className="new-badge">NEW</span>
+                              ) : newQty > 0 ? (
+                                <span className="new-part"> ({newQty} new)</span>
+                              ) : null}
+                            </li>
+                          );
+                        })}
                       </ul>
                     )}
                     <div className="foot">
@@ -513,7 +556,7 @@ export default function Orders() {
                 {colOrders.map((o) => {
                   const waiting = waitingSince(o.created_at);
                   return (
-                    <Link key={o.id} to={`/orders/${o.id}`} className="docket">
+                    <Link key={o.id} id={`order-${o.id}`} to={`/orders/${o.id}`} className="docket">
                       <div className="row1">
                         <span className="no mono">{o.reference}</span>
                         {o.customer_channel && <span className={`chan ${o.customer_channel}`}>{o.customer_channel}</span>}
@@ -526,6 +569,9 @@ export default function Orders() {
                           {o.items.map((item, i) => (
                             <li key={i}>
                               <b>{item.quantity}</b> {item.name}
+                              {item.answers?.length > 0 && (
+                                <span className="hint"> ({item.answers.map((a) => a.answer).join(', ')})</span>
+                              )}
                             </li>
                           ))}
                         </ul>
@@ -547,7 +593,7 @@ export default function Orders() {
                                 {nextStageFor(o).label}
                               </button>
                             ))}
-                      {canEdit(staff) && o.status === 'ready' && o.fulfilment_type === 'delivery' && (
+                      {canEdit(staff) && ownRidersEnabled && o.status === 'ready' && o.fulfilment_type === 'delivery' && (
                         <button style={{ marginTop: 8, width: '100%' }} className="secondary" onClick={(e) => ringRider(e, o.id)}>
                           Ring rider
                         </button>

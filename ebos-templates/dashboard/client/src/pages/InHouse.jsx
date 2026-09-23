@@ -72,11 +72,39 @@ export default function InHouse() {
               </div>
               {o.items?.length > 0 && (
                 <ul>
-                  {o.items.map((item, i) => (
-                    <li key={i}>
-                      <b>{item.quantity}</b> {item.name}
-                    </li>
-                  ))}
+                  {o.items.map((item, i) => {
+                    // newQty -- Chidera, 2026-09-11: "on the staff card
+                    // let there be a clear demarcation for add on, so
+                    // they know what has been served and what has just
+                    // been added on." Diffed server-side (routes/
+                    // dinein.js's itemsWithServedDiff) against a
+                    // snapshot taken the moment "Served" was last
+                    // tapped -- 0 means this line hasn't changed since;
+                    // the whole quantity means it's a genuinely new
+                    // line; anything in between is a mix (some already
+                    // out, more just ordered).
+                    const newQty = item.newQty || 0;
+                    const servedQty = item.quantity - newQty;
+                    return (
+                      <li key={i}>
+                        {newQty === 0 ? (
+                          <>
+                            <b>{item.quantity}</b> {item.name}
+                          </>
+                        ) : newQty === item.quantity ? (
+                          <>
+                            <b>{item.quantity}</b> {item.name}
+                            <span className="new-badge">NEW</span>
+                          </>
+                        ) : (
+                          <>
+                            <b>{item.quantity}</b> {item.name}
+                            <span className="new-part">({newQty} new)</span>
+                          </>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
               <div className="foot">

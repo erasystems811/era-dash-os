@@ -34,6 +34,7 @@ const DineIn = lazy(() => import('./pages/DineIn.jsx'));
 const InHouse = lazy(() => import('./pages/InHouse.jsx'));
 const Feedback = lazy(() => import('./pages/Feedback.jsx'));
 const Customers = lazy(() => import('./pages/Customers.jsx'));
+const Crm = lazy(() => import('./pages/Crm.jsx'));
 const Pos = lazy(() => import('./pages/Pos.jsx'));
 
 // Every path a PIN-tier (Tier 3) session is allowed to land on -- matches
@@ -95,6 +96,7 @@ export default function App() {
           <Route path="/voice" element={<Voice />} />
           <Route path="/dinein" element={<DineIn />} />
           <Route path="/customers" element={<Customers />} />
+          <Route path="/crm" element={<Crm />} />
           <Route path="/pos" element={<Pos />} />
           <Route path="/in-house" element={<InHouse />} />
           <Route path="/conversations" element={<Conversations />} />

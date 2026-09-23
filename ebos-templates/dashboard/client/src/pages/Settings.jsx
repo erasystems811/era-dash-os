@@ -23,6 +23,12 @@ export default function Settings() {
   const [waSaved, setWaSaved] = useState(false);
   const [waError, setWaError] = useState(null);
   const [uploadingField, setUploadingField] = useState(null);
+  // Chidera, 2026-09-16: "let it never happen again" -- the cover photo is
+  // what actually attaches to the WhatsApp menu-link message itself (see
+  // flow.js's businessCoverPhotoUrl), so a low-res one there is the most
+  // visible place this can go wrong. Keyed by field so logo/cover warn
+  // independently.
+  const [photoWarnings, setPhotoWarnings] = useState({});
   const [hoursOpen, setHoursOpen] = useState('');
   const [hoursClose, setHoursClose] = useState('');
   const [hoursSaved, setHoursSaved] = useState(false);
@@ -75,11 +81,18 @@ export default function Settings() {
     setSaved(false);
     setSaveError(null);
     setUploadingField(field);
+    setPhotoWarnings((w) => ({ ...w, [field]: null }));
     try {
-      const compressed = await compressImageToDataUrl(file);
-      const updated = await api.post('/business', { ...business, [field]: compressed });
+      const { dataUrl, isLowRes } = await compressImageToDataUrl(file);
+      const updated = await api.post('/business', { ...business, [field]: dataUrl });
       setBusiness(updated);
       setSaved(true);
+      if (isLowRes) {
+        setPhotoWarnings((w) => ({
+          ...w,
+          [field]: 'This photo is quite small -- it may look blurry wherever it shows (the menu page, or the photo attached to the WhatsApp menu message). A closer, higher-resolution photo will look sharper.',
+        }));
+      }
     } catch (err) {
       setSaveError(err.message);
     } finally {
@@ -243,6 +256,7 @@ export default function Settings() {
               {business.logo_data_url && <img src={business.logo_data_url} alt="Logo" style={{ maxHeight: 40, display: 'block', marginBottom: 8 }} />}
               {editable && <input type="file" accept="image/*" onChange={onLogoChange} disabled={uploadingField === 'logo_data_url'} />}
               {uploadingField === 'logo_data_url' && <p className="hint">Uploading...</p>}
+              {photoWarnings.logo_data_url && <p className="hint" style={{ color: 'var(--warn, #b4700f)' }}>{photoWarnings.logo_data_url}</p>}
             </div>
             <div className="field">
               <label>Brand colour</label>
@@ -258,6 +272,7 @@ export default function Settings() {
               )}
               {editable && <input type="file" accept="image/*" onChange={onCoverPhotoChange} disabled={uploadingField === 'cover_photo_data_url'} />}
               {uploadingField === 'cover_photo_data_url' && <p className="hint">Uploading...</p>}
+              {photoWarnings.cover_photo_data_url && <p className="hint" style={{ color: 'var(--warn, #b4700f)' }}>{photoWarnings.cover_photo_data_url}</p>}
             </div>
           </div>
           <h3>Payment</h3>

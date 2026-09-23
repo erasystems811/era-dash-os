@@ -12,7 +12,7 @@ import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCt
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice } from './documents.js';
-import { initializePaystackTransaction } from './payment.js';
+import { initializePaystackTransaction, initializePaystackTopupTransaction } from './payment.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
@@ -135,7 +135,7 @@ function normalizeDashes(text) {
 // `logTag` is our own bookkeeping (message.trigger, any string), separate
 // from bot-engine/send.js's ALLOWED_TRIGGERS, which every real send here
 // satisfies with 'bot_flow_step'.
-async function reply(customer, text, logTag = 'bot_flow_step') {
+export async function reply(customer, text, logTag = 'bot_flow_step') {
   const clean = normalizeDashes(text);
   const sendResult = await botEngine.sendMessage({ trigger: 'bot_flow_step', to: recipientFor(customer), text: clean, whatsappSend: await senderFor(customer) });
   await logMessage({
@@ -512,6 +512,20 @@ export async function handoverRecipients() {
   return biz[0]?.handover_number ? [{ phoneNumber: toWhatsAppDigits(biz[0].handover_number), staffId: null }] : [];
 }
 
+// A separate list from handoverRecipients -- Chidera, 2026-09-16: "a staff
+// number should be able to get a confirmed order after paystack has
+// automatically confirmed payment on their whatsapp without accessing the
+// back end... i think an owner doesnt want staff to get the whole back
+// end." handover_alerts is who deals with a customer escalation
+// (owner/manager, usually); order_alerts is who needs to know the moment a
+// payment clears and an order is ready to prep (kitchen/ops staff) --
+// deliberately no fallback to business.handover_number here: an unset
+// order_alerts list just means nobody gets pinged, not "guess who to tell."
+export async function orderAlertRecipients() {
+  const { rows } = await pool.query(`select id, phone_number from staff where order_alerts = true and phone_number is not null`);
+  return rows.map((s) => ({ phoneNumber: toWhatsAppDigits(s.phone_number), staffId: s.id }));
+}
+
 // Every staff alert below (a handover, a voice callback, a delivery
 // escalation) shares the same real failure mode sendStaffReply's own
 // synchronous fallback already handles for CUSTOMER messages: WhatsApp
@@ -597,7 +611,18 @@ const SYSTEM_ERROR_HANDOVER_REASON = 'Unexpected error while processing customer
 // handover that isn't really about confirming anything -- e.g. the bot
 // itself broke (see the error-recovery catch in scheduleDebouncedProcessing)
 // and that phrasing reads as evasive rather than honest about what happened.
-async function handover(customer, reason, extra, ackText) {
+// primaryLink: Chidera, 2026-09-20: "when you sent handover for receipt
+// confirmation the board opened the conversation instead of where the
+// receipt actually is" -- the payment-proof handover already built a real
+// `confirm: .../orders/<id>` link (straight into the order card, see its
+// own 2026-09-03 comment on that), but only ever as a plain text LINE
+// inside the alert body -- the actual tappable BUTTON below was hardcoded
+// to the generic /conversations/<id> board regardless, so that's the one
+// staff actually tapped. { path, title } overrides both the magic-link
+// destination and the button's own title; every other call site passes
+// nothing and keeps getting the generic conversation link exactly as
+// before, since none of them have anywhere more specific to send staff.
+async function handover(customer, reason, extra, ackText, primaryLink) {
   await pool.query(`update customers set handled_by = 'staff', handover_at = now(), handover_reason = $1 where id = $2`, [reason, customer.id]);
 
   // Voice add-on only (spec A8, Phase 1/call-forwarding -- no live transfer
@@ -678,23 +703,33 @@ async function handover(customer, reason, extra, ackText) {
     transcript
   );
   const extraLines = extra ? `\n${Object.values(extra).filter(Boolean).join('\n')}` : '';
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
   for (const { phoneNumber: to, staffId } of recipients) {
-    // A magic link, not a bare dashboard URL -- tapping it signs this exact
-    // staff member straight in (createMagicLink/consumeMagicLink, lib/
-    // auth.js) and lands them on this conversation, no separate login, no
-    // leaving WhatsApp first. Chidera 2026-09-11: "can handover numbers get
-    // to handle whatever it is internally in whatsapp without leaving the
-    // app... they can access the dashboard internally." Falls back to the
-    // old bare (login-required) link when this recipient has no staffId --
-    // the business.handover_number fallback isn't a real staff account, so
-    // there's no session to bind a token to.
-    const link = process.env.PUBLIC_URL
-      ? staffId
-        ? `\n${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/conversations/${customer.id}`)}`
-        : `\n${process.env.PUBLIC_URL}/conversations/${customer.id}`
-      : '';
-    const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}${link}`;
+    const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}`;
     await sendStaffAlert(to, alert);
+
+    // Chidera, 2026-09-16: "when a handover is sent the link should be
+    // open in the whatsapp chat, they dnt have to leave to a site" -- this
+    // used to append the link as plain text onto the alert above, which
+    // opens the device's own external browser when tapped. A real CTA-URL
+    // button instead, same mechanism handleStaffCommand's "text dashboard"
+    // link already uses (opens inside WhatsApp's own in-app browser). A
+    // magic link (not a bare dashboard URL) signs this exact staff member
+    // straight in and lands them on this conversation, no separate login
+    // -- falls back to the old bare (login-required) link when this
+    // recipient has no staffId, since business.handover_number's fallback
+    // isn't a real staff account with a session to bind a token to.
+    if (!process.env.PUBLIC_URL) continue;
+    const path = primaryLink?.path || `/conversations/${customer.id}`;
+    const title = primaryLink?.title || 'Open Conversation';
+    const link = staffId
+      ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
+      : `${process.env.PUBLIC_URL}${path}`;
+    try {
+      await sendWhatsAppCtaUrl(to, `Tap below to open this conversation.`, title, link, credentials);
+    } catch (err) {
+      console.error(`Failed to send handover conversation link to ${to}:`, err.message);
+    }
   }
 }
 
@@ -803,9 +838,19 @@ async function handleGreeting(customer, text) {
   // that hey there" -- and then: "add hello before the welcome". Plain
   // "Hello!", not greetingAckFor's tone-matching (that's the "hey there"
   // that was already turned down).
+  //
+  // Chidera, 2026-09-20: "we agreed a name so bot can refer to customer"
+  // -- customer.name is only ever set via the web menu's own name popup
+  // (routes/menu-page.js's POST /:token/name), never invented or guessed;
+  // this is the first place it's actually read back. Falls back to the
+  // exact same plain wording as before when it isn't set, which is still
+  // the common case until a business turns the popup on and customers
+  // start filling it in.
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const businessName = bizRows[0]?.name || 'us';
-  const message = `Hello! Welcome to ${businessName}, what would you like to order?`;
+  const message = customer.name
+    ? `Hello ${customer.name}! Welcome to ${businessName}, what would you like to order?`
+    : `Hello! Welcome to ${businessName}, what would you like to order?`;
   if (customer.channel !== 'whatsapp') {
     await reply(customer, message, 'greeting');
     return;
@@ -822,7 +867,11 @@ async function handleGreeting(customer, text) {
     ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
     : message;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), body, 'See menu', menuUrl, credentials, headerImageUrl);
+  // Chidera, 2026-09-20: "that see menu put 'tap here to see menu'"
+  // (also applied everywhere else this exact button showed up, for one
+  // consistent wording, not just this one call site). Exactly 20
+  // characters -- Meta's own cap on a CTA-URL/reply button's title.
+  await sendWhatsAppCtaUrl(recipientFor(customer), body, 'Tap here to see menu', menuUrl, credentials, headerImageUrl);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body, trigger: 'greeting', processed: true });
 }
 
@@ -901,9 +950,21 @@ async function handleEnquiry(customer, text) {
   await reply(customer, "Let me check on that for you, one moment.", 'kb_miss');
 }
 
-async function summariseOrder(order) {
+export async function summariseOrder(order) {
+  // Chidera, 2026-09-17: "when you ask those penne or spaghetti questions
+  // or cold or room temperature, you dont record it anywhere??" -- it was
+  // recorded (order_item_answer), just never read back into any message
+  // anyone actually sees. Joined in here since summariseOrder already
+  // feeds both the customer's own confirm message and the staff prep
+  // alert -- one fix covers both.
   const { rows } = await pool.query(
-    `select p.name, oi.quantity, oi.price from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+    `select p.name, oi.quantity, oi.price,
+       coalesce(
+         (select string_agg(oa.answer, ', ' order by oa.created_at)
+          from order_item_answer oa where oa.order_item_id = oi.id),
+         ''
+       ) as answer_summary
+     from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [order.id]
   );
   const lines = rows.map((r) => `${r.quantity}x ${r.name} (NGN ${r.price} each)`).join(', ');
@@ -914,7 +975,7 @@ async function summariseOrder(order) {
   // way not paragraph". Colon separator, not a dash -- reply()'s own
   // normalizeDashes turns " - " into ", ", which would silently collapse
   // this right back into a run-on line.
-  const itemLines = rows.map((r) => `${r.quantity}x ${r.name}: NGN ${r.price}`);
+  const itemLines = rows.map((r) => `${r.quantity}x ${r.name}${r.answer_summary ? ` (${r.answer_summary})` : ''}: NGN ${r.price}`);
   const itemsTotal = rows.reduce((sum, r) => sum + Number(r.price) * r.quantity, 0);
   // delivery_fee is 0 until handleCollectFulfilment sets it (only known once
   // fulfilment_type/address are collected, and only for real Chowdeck
@@ -974,6 +1035,21 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
       // who writes their whole order in one go should never have to repeat
       // it back one item at a time.
       const { matched, ambiguous } = await extractOrderItems(text, order.branch_id);
+      // Chidera, 2026-09-17: "a customer texted she wanted to order alfredo
+      // pasta and the bot attended to her with text which is good but at
+      // the begining he would have also sent the menu text... some
+      // customers may not know thats available" -- this "already shown"
+      // check used to only be computed inside the !matched.length branch
+      // below, so a message that named a real item successfully on the
+      // very first try (skipping that branch entirely) never triggered the
+      // menu send at all -- the customer who names one dish they already
+      // know about never finds out what else is on offer. Computed once,
+      // shared by both branches, so "first items interaction on this
+      // order" means the same thing whether or not the message matched.
+      const { rows: menuAlreadyShown } = await pool.query(
+        `select 1 from message where customer_id = $1 and trigger = 'items_menu_shown' and created_at >= $2 limit 1`,
+        [customer.id, order.created_at]
+      );
       if (!matched.length) {
         // A vague mention that could genuinely mean more than one real item
         // ("rice" when both jollof and fried rice exist) -- ask which one,
@@ -998,11 +1074,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         // fast. After that, a short nudge instead: they can already see
         // what's on offer, no need to recite it back every time nothing
         // matches.
-        const { rows: shown } = await pool.query(
-          `select 1 from message where customer_id = $1 and trigger = 'items_menu_shown' and created_at >= $2 limit 1`,
-          [customer.id, order.created_at]
-        );
-        if (shown.length) {
+        if (menuAlreadyShown.length) {
           await send(`You can check what we have and let me know what you'd like.`, 'items_reask');
         } else {
           // The real web menu page (engine/menu-page-template.js) beats
@@ -1021,25 +1093,53 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
           // fallback now.
           let catalogShown = false;
           if (customer.channel !== 'instagram') {
-            catalogShown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.").catch((err) => {
+            catalogShown = await sendWebMenuLink(customer, await menuGreetingBody()).catch((err) => {
               console.error('sendWebMenuLink failed:', err.message);
               return false;
             });
           }
-          // Found live: this used to call fieldPrompt('items', ...)
-          // unconditionally, which -- whenever there's no menu photo either
-          // -- falls back to naming every item as text. That ran even when
-          // the button above had just succeeded, so a customer got the
-          // button AND a full text list of the same items in the same
-          // turn. The button already covers "here's what's available"
-          // once it's actually sent; only fall back to fieldPrompt's own
-          // text-list behaviour when it didn't.
-          await send(catalogShown ? 'What would you like to order?' : await fieldPrompt('items', 'What would you like to order?', order.branch_id), 'items_menu_shown');
+          // Found live, 2026-09-16: "why is bot sending me 2 text? the text
+          // with menu is meant to contain the whole text" -- the fix above
+          // (only 2026-09-10's note) stopped the full text ITEM LIST from
+          // duplicating the button, but still sent a second, shorter
+          // message ("What would you like to order?") right after every
+          // time the button itself succeeded -- genuinely redundant, since
+          // sendWebMenuLink's own body text ("Here's our menu, take a look
+          // and let me know what you'd like.") already asks exactly that.
+          // Only send anything more when the button DIDN'T go out --
+          // Instagram (no CTA-URL button type) or a real send failure --
+          // where fieldPrompt's text listing is the only way the customer
+          // gets to see the menu at all.
+          if (!catalogShown) {
+            await send(await fieldPrompt('items', 'What would you like to order?', order.branch_id), 'items_menu_shown');
+          } else {
+            await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[covered by menu button above, no separate text sent]', trigger: 'items_menu_shown', processed: true });
+          }
         }
         return;
       }
       for (const m of matched) {
         await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, m.productId, m.quantity, m.price]);
+      }
+      // Named a real item straight away, first try -- still worth showing
+      // the full menu once (see the comment on menuAlreadyShown above):
+      // they only told us about the one dish they already had in mind, not
+      // everything else on offer. Sent ahead of the normal text reply
+      // below, not instead of it -- "attended to her with text... at the
+      // beginning he would have also sent the menu."
+      if (!menuAlreadyShown.length && customer.channel !== 'instagram') {
+        const sent = await sendWebMenuLink(customer, await menuGreetingBody()).catch((err) => {
+          console.error('sendWebMenuLink failed:', err.message);
+          return false;
+        });
+        // sendWebMenuLink's own logMessage tags itself 'menu_shown', not
+        // 'items_menu_shown' -- that second, specific trigger is what
+        // menuAlreadyShown's own query above looks for, so it has to be
+        // logged here too or every later message in this same order would
+        // think the menu was never shown and keep re-sending it.
+        if (sent) {
+          await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[covered by menu button above, no separate text sent]', trigger: 'items_menu_shown', processed: true });
+        }
       }
       // The clear items above still get added -- the ambiguous part just
       // rides along on whatever reply comes next (branch, confirm, etc.)
@@ -1067,7 +1167,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
         // the very next thing that runs from here (nothing else follows
         // this branch), so a bare acknowledgment is enough -- the real
         // breakdown shows up once, in that message.
-        await applyOrderModifications(order, mods, { allowRemovals: true });
+        await applyOrderModifications(order, mods, { allowRemovals: true }, customer);
         prefix = `${prefix}Got it. `;
       } else {
         const fields = await loadBotFields();
@@ -1086,7 +1186,7 @@ async function handleCollectInfo(customer, order, text, greetingPrefix = '') {
     Object.assign(order, reloaded[0]);
   }
 
-  return finishItemsCollection(customer, order, prefix);
+  return finishItemsCollection(customer, order, prefix, { preferTextForQuestions: true });
 }
 
 // Finds the earliest catalogue-question still unanswered across every item
@@ -1137,13 +1237,18 @@ async function askNextItemQuestion(orderId) {
 // just never fire for almost anyone. Folded into 'drink's own keywords
 // instead, so a business that DOES give it a distinct category still
 // gets it offered, under the same "would you like a drink" ask.
-const UPSELL_GROUPS = [
+// Exported so routes/api.js's upsell-success-rate stat can tell whether an
+// offered category actually landed in the final order using the exact same
+// keyword matching nextUpsellGroup itself uses to decide a category's
+// already satisfied -- one source of truth for what counts as a match,
+// not a second guess at the same keywords.
+export const UPSELL_GROUPS = [
   { key: 'drink', keywords: ['drink', 'beverage', 'juice', 'water'], label: 'a drink' },
   { key: 'protein', keywords: ['protein', 'meat'], label: 'a protein' },
   { key: 'snack', keywords: ['snack', 'small chop', 'appetiser', 'appetizer', 'starter'], label: 'a snack' },
 ];
 
-function categoryMatchesGroup(category, keywords) {
+export function categoryMatchesGroup(category, keywords) {
   if (!category) return false;
   const lower = category.toLowerCase();
   return keywords.some((k) => lower.includes(k));
@@ -1166,11 +1271,17 @@ function catalogueOptions(menu, keywords) {
 // either satisfied or already declined.
 async function nextUpsellGroup(order, orderItems) {
   if (!orderItems.length) return null;
+  // Chidera, 2026-09-20: "only upsell once" -- this used to track each
+  // group (drink/protein/snack) separately, so a single order could get
+  // offered a drink, then later a protein, then later a snack, up to
+  // three separate upsell messages. One upsell offer per order, total,
+  // regardless of category -- any prior offer at all (accepted or
+  // declined) means none of this runs again for this order.
+  const offered = order.upsell_offered || [];
+  if (offered.length) return null;
   const menu = await resolveMenu(order.branch_id);
   const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
-  const offered = order.upsell_offered || [];
   for (const group of UPSELL_GROUPS) {
-    if (offered.includes(group.key)) continue;
     const options = catalogueOptions(menu, group.keywords);
     if (!options.length) continue;
     const orderHasIt = orderedCategories.some((c) => categoryMatchesGroup(c, group.keywords));
@@ -1198,7 +1309,6 @@ async function nextUpsellGroup(order, orderItems) {
 // would otherwise collide with.
 async function sendUpsellList(customer, upsell, prefix = '') {
   if (customer.channel !== 'whatsapp') return false;
-  if (!process.env.META_PHONE_NUMBER_ID || !process.env.META_ACCESS_TOKEN) return false;
   const rows = upsell.options.slice(0, 8).map((p) => ({
     id: `upsell::${p.id}`,
     title: p.name.slice(0, 24),
@@ -1206,17 +1316,35 @@ async function sendUpsellList(customer, upsell, prefix = '') {
   }));
   rows.push({ id: 'upsell::skip', title: 'No thanks', description: `Skip ${upsell.label}` });
   const bodyText = `${prefix}Would you like to add ${upsell.label}?`.trim();
-  await sendListMessage(recipientFor(customer), {
-    bodyText,
-    buttonText: 'Choose',
-    sectionTitle: upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1),
-    rows,
-  });
+  // Chidera, 2026-09-20: two real gaps found investigating a report of a
+  // plain-text upsell on pomodoro -- (1) this never resolved the branch's
+  // own credentials, only the raw shared env var (fixed by passing
+  // getWhatsAppCredentials through, same as every other send in this
+  // file); (2) a genuine Meta-side failure here had nothing catching it,
+  // so it would have thrown all the way out of finishItemsCollection
+  // instead of degrading to the plain-text fallback that already exists
+  // right below this function's own call site. Couldn't actually confirm
+  // which of the two explains that specific report (the success log and
+  // the text fallback wrote the exact same body, so the dashboard
+  // couldn't tell them apart either) -- trigger is now different for each
+  // path specifically so that's answerable for real next time, not guessed.
+  try {
+    const credentials = await getWhatsAppCredentials(customer.branch_id);
+    await sendListMessage(recipientFor(customer), {
+      bodyText,
+      buttonText: 'Choose',
+      sectionTitle: upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1),
+      rows,
+    }, credentials);
+  } catch (err) {
+    console.error(`sendUpsellList: list send failed, falling back to text: ${err.message}`);
+    return false;
+  }
   // Logged as the real bodyText actually sent (including any order-so-far
   // readback), not a separate hand-written string -- was drifting from
   // what the customer actually saw, so the dashboard transcript read
   // differently than the real conversation did.
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText} We have: ${upsell.options.map((o) => o.name).join(', ')}.`, trigger: 'upsell_offered' });
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText} We have: ${upsell.options.map((o) => o.name).join(', ')}.`, trigger: 'upsell_offered_list' });
   return true;
 }
 
@@ -1243,7 +1371,29 @@ async function orderSoFarSummary(order) {
 // is reached -- including right after handlePendingUpsell adds a drink,
 // so a drink that itself has a product_question ("hot or cold?") still
 // gets asked, the same as if it had been the very first item ordered.
-export async function finishItemsCollection(customer, order, prefix = '') {
+// autoConfirm: Chidera, 2026-09-17: "full review before submit... making
+// the WhatsApp confirm yes/no unnecessary." Defaulted false everywhere --
+// every existing caller (typed WhatsApp, handlePendingItemQuestion,
+// handlePendingUpsell) keeps asking the real yes/no exactly as before.
+// Only handleWebMenuOrder ever passes true, and only when the submission
+// carried a real fulfilment choice -- meaning it came through the site's
+// own review sheet (items + delivery/pickup + total, all already shown
+// and confirmed there), not a stray/incomplete web hit. Item-question and
+// missing-field checks below still run unconditionally either way -- a
+// genuinely unanswered question still gets asked over WhatsApp rather
+// than silently skipped; autoConfirm only ever replaces the FINAL
+// yes/no ask, once nothing else was actually outstanding.
+// deltaLines -- Chidera, 2026-09-20: "when they add on send them the yes
+// to confirm button and place the ordr, let their total and items be
+// compounding in the ready to pay stuff." An add-on round (order already
+// confirmed once before) still gets the same real yes/no confirm gate
+// every round does -- just scoped to what's NEW this round (deltaLines),
+// not the whole running order restated again. The full, ever-growing
+// total/item list is what the ready-to-pay page shows (routes/dinein-
+// menu.js's payStatusPayload, already reading the one shared order's
+// live total) -- that's where "compounding" belongs, not every chat
+// message. null (the default) means the normal, first-round full summary.
+export async function finishItemsCollection(customer, order, prefix = '', { autoConfirm = false, preferTextForQuestions = false, deltaLines = null } = {}) {
   const nextQuestion = await askNextItemQuestion(order.id);
   if (nextQuestion) {
     await pool.query('update "order" set pending_question_order_item_id = $1, pending_question_id = $2 where id = $3', [
@@ -1251,6 +1401,31 @@ export async function finishItemsCollection(customer, order, prefix = '') {
       nextQuestion.question_id,
       order.id,
     ]);
+    // Chidera, 2026-09-20: "let ... details of food specification eg. cold
+    // or room temp be processes in the flow on the website to save cost"
+    // -- one web link (the general menu page, already pre-loaded with this
+    // exact pending order -- see routes/menu-page.js's pendingOrderPayload
+    // and menu-page-template.js's firstUnansweredKey) covers every
+    // outstanding item-question in one visit instead of one Meta message
+    // per question.
+    //
+    // preferTextForQuestions -- Chidera, 2026-09-20, real report (Emmanuel,
+    // era-demo): "if they are already using text no need to send them back
+    // to the menu to answer cold or not, just go text it." A customer who
+    // placed THIS item by typing (not tapping through the web menu or a
+    // button) is already mid-conversation in plain text -- redirecting
+    // them to a web link for one short question is a worse experience
+    // than just asking it, not a cheaper one. Set true by every
+    // text-originated caller below; left false (web link first, same as
+    // before) for every web/button-tap-originated caller, where a link is
+    // the natural continuation of what they were already doing.
+    // pending_question_order_item_id/_id above are still set regardless,
+    // so a customer who ignores the link and just types an answer anyway
+    // (handlePendingItemQuestion) still works exactly as before.
+    if (!preferTextForQuestions) {
+      const shownLink = await sendWebMenuLink(customer, `${prefix}Just need a couple more details on your order -- tap below to finish up.`, 'Finish my order', null, null, order);
+      if (shownLink) return;
+    }
     const soFar = await orderSoFarSummary(order);
     await reply(customer, `${prefix}${soFar}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
     return;
@@ -1274,7 +1449,7 @@ export async function finishItemsCollection(customer, order, prefix = '') {
     const soFar = await orderSoFarSummary(order);
     const sent = await sendUpsellList(customer, upsell, `${prefix}${soFar}`);
     if (!sent) {
-      await reply(customer, `${prefix}${soFar}Would you like to add ${upsell.label}? We have: ${upsell.options.map((o) => o.name).join(', ')}.`.trim(), 'upsell_offered');
+      await reply(customer, `${prefix}${soFar}Would you like to add ${upsell.label}? We have: ${upsell.options.map((o) => o.name).join(', ')}.`.trim(), 'upsell_offered_text');
     }
     return;
   }
@@ -1284,8 +1459,26 @@ export async function finishItemsCollection(customer, order, prefix = '') {
   const { itemLines, total } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
   await transitionOrder(order, 'confirm_order');
-  const summary = [...itemLines, `Total: NGN ${total}`].join('\n');
-  await sendConfirmButtons(customer, `${prefix}To confirm:\n${summary}`.trim(), 'order_confirm_asked');
+
+  if (autoConfirm) {
+    // Same confirmed_at + handleCollectFulfilment(customer, order, null)
+    // pair handleConfirmOrder itself uses right after a real typed/tapped
+    // "yes" -- handleCollectFulfilment does its own transitionOrder to
+    // confirm_payment once fulfilment's resolved (already is here, see
+    // applyWebFulfilment), so it goes straight to payment instructions
+    // instead of a fresh yes/no ask for an order already reviewed and
+    // confirmed on the site itself.
+    await pool.query(`update "order" set confirmed_at = now() where id = $1`, [order.id]);
+    order.confirmed_at = new Date();
+    await handleCollectFulfilment(customer, order, null);
+    return;
+  }
+
+  const summary = deltaLines
+    ? [...deltaLines, `Table's total is now: NGN ${total}`].join('\n')
+    : [...itemLines, `Total: NGN ${total}`].join('\n');
+  const heading = deltaLines ? 'Add on:' : 'To confirm:';
+  await sendConfirmButtons(customer, `${prefix}${heading}\n${summary}`.trim(), 'order_confirm_asked');
 }
 
 // The reply to the upsell question above. Checked in order:
@@ -1319,18 +1512,23 @@ async function handlePendingUpsell(customer, order, text) {
     // Same reasoning as handleCollectInfo's own mods branch -- no "your
     // order's now X" here, finishItemsCollection's own confirm message is
     // the one place that lists it.
-    await applyOrderModifications(order, mods, { allowRemovals: true });
-    return finishItemsCollection(customer, order, 'Got it. ');
+    await applyOrderModifications(order, mods, { allowRemovals: true }, customer);
+    return finishItemsCollection(customer, order, 'Got it. ', { preferTextForQuestions: true });
   }
 
   const { matched } = await extractOrderItems(text, order.branch_id);
   if (matched.length) {
     order.pending_upsell_category = null;
     await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+    // added_by_customer_id -- same fix as applyOrderModifications' own
+    // insert (Chidera, 2026-09-20: "why are you seperating it" re a
+    // chicken added via this exact upsell path). A second, parallel
+    // insert this function has always had its own copy of, missed the
+    // first time through.
     for (const m of matched) {
-      await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, m.productId, m.quantity, m.price]);
+      await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, m.productId, m.quantity, m.price, customer.id]);
     }
-    return finishItemsCollection(customer, order, `Added ${matched.map((m) => `${m.quantity}x ${m.name}`).join(', ')}. `);
+    return finishItemsCollection(customer, order, `Added ${matched.map((m) => `${m.quantity}x ${m.name}`).join(', ')}. `, { preferTextForQuestions: true });
   }
 
   const wantsQuestion = 'Are they saying yes, they would like to add one, without yet naming which specific option?';
@@ -1353,7 +1551,7 @@ async function handlePendingUpsell(customer, order, text) {
 
   order.pending_upsell_category = null;
   await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
-  return finishItemsCollection(customer, order, '');
+  return finishItemsCollection(customer, order, '', { preferTextForQuestions: true });
 }
 
 // A tap on sendUpsellList's List Message above -- the zero-AI-cost path,
@@ -1416,8 +1614,10 @@ async function handlePendingItemQuestion(customer, order, text) {
 
   // finishItemsCollection's own item-question check (its very first thing)
   // picks up the next unanswered question itself if there is one -- no
-  // need to duplicate that lookup here too.
-  return finishItemsCollection(customer, order, 'Got it. ');
+  // need to duplicate that lookup here too. preferTextForQuestions --
+  // they just answered this one by typing, so a second outstanding
+  // question stays in text too, not a web-link detour.
+  return finishItemsCollection(customer, order, 'Got it. ', { preferTextForQuestions: true });
 }
 
 // "Confirmed" (order.status) and "engine_state = confirm_order" are not the
@@ -1428,7 +1628,7 @@ async function handlePendingItemQuestion(customer, order, text) {
 // deciding whether to order this" from "ordering it, now working out how it
 // gets to them" -- asking for an address is not the same step as agreeing
 // to buy.
-async function handleConfirmOrder(customer, order, text) {
+export async function handleConfirmOrder(customer, order, text) {
   // A plain "no" doesn't reliably mean "cancel this entirely" -- they may
   // just want to change something, or hesitate for a reason unrelated to
   // wanting out. So "no" never cancels here: it just asks what to change,
@@ -1474,6 +1674,16 @@ async function handleConfirmOrder(customer, order, text) {
 
   await pool.query(`update "order" set confirmed_at = now() where id = $1`, [order.id]);
   order.confirmed_at = new Date();
+  // Chidera, 2026-09-20: "when they add on send them the yes to confirm
+  // button and place the ordr" -- the staff "table added more" alert
+  // (resetServedForAddOn) now fires HERE, on the real yes tap, not the
+  // moment the item was inserted -- same two-step "shown, then confirmed"
+  // shape the very first round of an order already has. order.served_at
+  // still holds whatever it was before this round started (nothing
+  // resets it earlier anymore), so this is a genuine no-op for a first-
+  // ever order (never served yet) and the real, intended alert for a
+  // repeat add-on round on a table that had already been served.
+  await resetServedForAddOn(order);
   await handleCollectFulfilment(customer, order, null);
 }
 
@@ -1597,6 +1807,17 @@ async function handleCollectFulfilment(customer, order, text) {
 
   const stillOutstanding = await missingFulfilmentFields(order);
   if (stillOutstanding.length) {
+    // Chidera, 2026-09-20: "let delivery/pickup details processing ... be
+    // processes in the flow on the website to save cost" -- one web link
+    // covers delivery-vs-pickup, the real address, AND (own_riders) a real
+    // zone dropdown in a single visit, instead of the multi-message
+    // text chain this used to be (delivery or pickup? -> address? ->
+    // "is that X area?" -> confirm/retry ...). A customer who ignores the
+    // link and just types an answer anyway still works exactly as before
+    // (the `text !== null` block above this one is untouched) -- this is
+    // the cheaper default, never the only path.
+    const shownLink = await sendWebMenuLink(customer, 'Just need your delivery/pickup details -- tap below to finish up.', 'Finish my order', null, null, order);
+    if (shownLink) return;
     const fields = await loadBotFields();
     const nextField = fields.find((f) => f.key === stillOutstanding[0]);
     await sendFieldPrompt(customer, stillOutstanding[0], await fieldPrompt(stillOutstanding[0], nextField?.question, order.branch_id));
@@ -1725,14 +1946,47 @@ async function handleCollectFulfilment(customer, order, text) {
 // bank-transfer flow unchanged. Falls back to bank details if the Paystack
 // call itself fails (a network hiccup, a bad key) rather than leaving the
 // customer stuck with neither.
+// Shared by sendPaymentInstructions and its repeat-reminder counterpart --
+// same real send, same reasoning (see buildPayLine's own comment on why
+// the URL travels as a button, not embedded text) either time it's needed.
+//
+// Chidera, 2026-09-17: "cutting from ~15 to ~10 messages per order... but
+// be careful let the current quality not drop" -- `bodyText` used to be a
+// separate plain-text reply sent right before this (e.g. "Please pay NGN
+// X using the button below."), immediately followed by this exact button
+// with a near-empty body ("Tap below to pay securely."). WhatsApp's own
+// CTA-URL body field already holds up to 1024 characters, so that lead-in
+// text now travels AS the button's own body instead of its own separate
+// message -- same information, same button, one send instead of two. Only
+// on Instagram (no CTA-URL button type) does bodyText still need its own
+// plain-text line ahead of the raw link.
+async function sendPaymentLinkButton(customer, paymentUrl, bodyText) {
+  if (customer.channel === 'instagram') {
+    await reply(customer, `${bodyText}\n\nPay here: ${paymentUrl}`);
+    return;
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, 'Pay now', paymentUrl, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText}\n[payment link sent: ${paymentUrl}]`, trigger: 'payment_link', processed: true });
+}
+
 async function buildPayLine(order, customer, { amount, amountLabel }) {
   if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
     try {
       const url = await initializePaystackTransaction({ order, customer, amount });
       if (url) {
+        // Chidera, 2026-09-16: "i actually got a payment link o, but it
+        // opened out of whatsapp not in" -- the URL used to be embedded
+        // straight into this plain-text line, so WhatsApp rendered it as
+        // an ordinary tappable link (opens the phone's own browser, same
+        // as any link in any text message). paymentUrl is now returned
+        // separately so the caller can send it as a real CTA-URL button
+        // instead, exactly like the menu link and the handover link
+        // already do -- opens inside WhatsApp's own in-app browser.
         return {
-          payLine: `Please pay NGN ${amountLabel} here: ${url}\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
+          payLine: `Please pay NGN ${amountLabel} using the button below.\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
           needsHandover: false,
+          paymentUrl: url,
         };
       }
     } catch (err) {
@@ -1747,6 +2001,7 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       ? `Please pay NGN ${amountLabel}.\n\nBank: ${b.bank_name}\nAccount number: ${b.bank_account_number}\nAccount name: ${b.bank_account_name}\n\nThen send proof of payment here.`
       : `Your total is NGN ${amountLabel}. Let me get someone to confirm payment details with you.`,
     needsHandover: !hasBankDetails,
+    paymentUrl: null,
   };
 }
 
@@ -1798,8 +2053,12 @@ async function sendPaymentInstructions(customer, order) {
   // exactly the kind of thing that's easy to misread or fat-finger
   // copying out -- each on its own line reads the way a real transfer
   // slip would.
-  const { payLine, needsHandover } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
-  await reply(customer, `${invoiceLine}\n\n${payLine}`);
+  const { payLine, needsHandover, paymentUrl } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
+  if (paymentUrl) {
+    await sendPaymentLinkButton(customer, paymentUrl, `${invoiceLine}\n\n${payLine}`);
+  } else {
+    await reply(customer, `${invoiceLine}\n\n${payLine}`);
+  }
   // ackText false -- payLine already told them someone will confirm payment
   // details (see above), same double-ack bug as the others fixed 2026-09-03.
   if (needsHandover) await handover(customer, 'Order ready for payment but no payment method is configured for this business yet', null, false);
@@ -2003,8 +2262,12 @@ async function handleWaitingOnPayment(customer, order, text) {
   // underlying fact (how to pay), just on a repeat reminder, so it must
   // never say something different (a stale bank-transfer reminder after
   // the business switched to Paystack would be a real lie).
-  const { payLine, needsHandover } = await buildPayLine(order, customer, { amount: order.total, amountLabel: order.total });
-  await reply(customer, payLine, 'payment_reminder');
+  const { payLine, needsHandover, paymentUrl } = await buildPayLine(order, customer, { amount: order.total, amountLabel: order.total });
+  if (paymentUrl) {
+    await sendPaymentLinkButton(customer, paymentUrl, payLine);
+  } else {
+    await reply(customer, payLine, 'payment_reminder');
+  }
   if (needsHandover) await handover(customer, 'Customer waiting on payment but no payment link/bank details are available', null, false);
 }
 
@@ -2036,7 +2299,18 @@ async function clearPendingQuestionIfOnItem(order, orderItemId) {
   await pool.query('update "order" set pending_question_order_item_id = null, pending_question_id = null where id = $1', [order.id]);
 }
 
-async function applyOrderModifications(order, mods, { allowRemovals }) {
+// customer -- Chidera, 2026-09-20, real report: "what do you mean by a
+// guest-chicken... was it not the same number that ordered chicken
+// through an upsell? why are you seperating it?" Root cause: this insert
+// never set added_by_customer_id at all, unlike the web-menu review
+// route's own item insert (which always does) -- so any item added
+// through a typed-chat path, upsell acceptance included
+// (handlePendingUpsell below), landed with added_by_customer_id null,
+// and pendingOrderPayload's labelFor falls back to "a guest" for a null
+// id no matter whose real number it actually was. Now attributed to
+// whichever customer is actually in this conversation, same as every
+// other item-adding path already does.
+export async function applyOrderModifications(order, mods, { allowRemovals }, customer) {
   const { rows: existingItems } = await pool.query('select id, product_id, quantity from order_item where order_id = $1', [order.id]);
   let addedValue = 0;
 
@@ -2045,7 +2319,7 @@ async function applyOrderModifications(order, mods, { allowRemovals }) {
     if (existing) {
       await pool.query('update order_item set quantity = quantity + $1 where id = $2', [item.quantity, existing.id]);
     } else {
-      await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
+      await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, item.productId, item.quantity, item.price, customer?.id || null]);
     }
     addedValue += item.quantity * Number(item.price);
   }
@@ -2065,15 +2339,17 @@ async function applyOrderModifications(order, mods, { allowRemovals }) {
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
   // A dine-in order already marked served that gets something added to it
   // needs serving again -- back to In House's first pipeline, not sitting
-  // in the second (awaiting payment) still showing the old items. No-op
-  // for every other case: an online order never sets served_at at all, and
-  // a dine-in order not yet served is already null. Chidera 2026-09-11:
-  // "even if staff marks served and it goes to the next pipeline and they
-  // still add it should go back to first pipeline."
-  if (mods.adds.length && order.channel === 'dinein' && order.served_at) {
-    await pool.query(`update "order" set served_at = null where id = $1`, [order.id]);
-    order.served_at = null;
-  }
+  // in the second (awaiting payment) still showing the old items. Chidera
+  // 2026-09-11: "even if staff marks served and it goes to the next
+  // pipeline and they still add it should go back to first pipeline."
+  //
+  // Deliberately NOT fired here anymore -- Chidera, 2026-09-20: "when they
+  // add on send them the yes to confirm button and place the ordr." This
+  // used to fire the moment an item was inserted, before the customer had
+  // even confirmed the add-on -- staff could see "back to Serving" before
+  // the guest had actually decided to go through with it. handleConfirmOrder
+  // now calls resetServedForAddOn itself, on the real yes tap, same two-
+  // step "shown, then confirmed" shape the very first round already has.
   return { itemLines, total, addedValue };
 }
 
@@ -2117,15 +2393,27 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
       ? `Here's your top-up invoice: ${invoiceUrl}`
       : `Your top-up invoice is ready.`;
 
-  // Deliberately still bank-transfer-only, not buildPayLine -- a top-up is
-  // extra money on an ALREADY-paid order, and Paystack's own transaction
-  // reference has to be unique per charge, so re-using order.reference here
-  // (as buildPayLine does) would collide with the original payment's own
-  // Paystack transaction. Auto-confirming a top-up needs its own reference
-  // scheme and its own webhook resolution (order_topup isn't looked up by
-  // findOrderByPaymentReference at all today) -- real, separate work, not
-  // built ahead of a client actually needing it (same reasoning hours.js
-  // itself already uses for not over-building).
+  // Chidera, 2026-09-20: "totally stop sending account number for era
+  // demo and use just paystack" -- used to be deliberately bank-transfer-
+  // only (own comment here said reusing order.reference would collide
+  // with the original payment's own Paystack transaction). Now that every
+  // reference is unique per attempt (payment.js's callPaystackInitialize),
+  // that blocker's gone -- try Paystack first, same as buildPayLine
+  // already does for the main order, falling back to bank details only
+  // when Paystack genuinely isn't configured or the call itself fails.
+  let paymentUrl = null;
+  if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
+    try {
+      paymentUrl = await initializePaystackTopupTransaction({ topupId, order, customer, amount: addedValue });
+    } catch (err) {
+      console.error(`Paystack initialize failed for topup ${topupId}, falling back to bank details: ${err.message}`);
+    }
+  }
+  if (paymentUrl) {
+    const payLine = `Please pay NGN ${addedValue} for the extra item(s) using the button below.`;
+    await sendPaymentLinkButton(customer, paymentUrl, `Got it, added on:\n${itemLines}\n\n${invoiceLine}\n\n${payLine}`);
+    return;
+  }
   const { rows: biz } = await pool.query('select bank_name, bank_account_number, bank_account_name from business limit 1');
   const b = biz[0] || {};
   const hasBankDetails = b.bank_name && b.bank_account_number && b.bank_account_name;
@@ -2139,6 +2427,20 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
 
 async function handleOrderModification(customer, order, mods) {
   const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
+  // Captured before applyOrderModifications -- Chidera, 2026-09-20: "when
+  // they add on send them the yes to confirm button and place the ordr."
+  // Dine-in never sets payment_status to confirmed/accepted until it's
+  // actually marked paid post-serving (payment happens AFTER eating), so
+  // `paid` above is always false for a served-but-unpaid table -- an
+  // add-on there used to fall all the way through to the same full "Got
+  // it, your order: [the WHOLE running bill] New total... confirm?"
+  // re-ask every other pre-payment edit gets. wasAlreadyConfirmed (this
+  // order already went through its own real yes once before) is what
+  // actually distinguishes a repeat add-on from the genuinely first-ever
+  // order -- a repeat round still gets its own real yes/no confirm gate,
+  // just scoped to what's new (deltaLines below), not the whole order
+  // restated again.
+  const wasAlreadyConfirmed = Boolean(order.confirmed_at);
 
   if (paid && (mods.removes.length || mods.sets.length)) {
     // A change/removal after payment needs a real person -- Chidera
@@ -2153,12 +2455,28 @@ async function handleOrderModification(customer, order, mods) {
     if (!mods.adds.length) return;
   }
 
-  const { itemLines, total, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid });
+  const { itemLines, total, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid }, customer);
   const summary = itemLines.join('\n');
 
   if (paid) {
     await sendTopupInvoice(customer, order, mods.adds, addedValue);
     return;
+  }
+
+  // Pure addition only -- a removal or change alongside it is a rarer,
+  // more substantial edit that still deserves the fuller read-back below,
+  // not folded into a quick "add on" confirm that would silently skip
+  // over what was taken off. preferTextForQuestions -- this whole path
+  // only runs from a TYPED reply (dispatch's own mods-detection), so any
+  // item question the new line needs stays in text too (Chidera,
+  // 2026-09-20, real report re Emmanuel: "if they are already using text
+  // no need to send them back to the menu... just go text it").
+  if (wasAlreadyConfirmed && mods.adds.length && !mods.removes.length && !mods.sets.length) {
+    await pool.query(`update "order" set confirmed_at = null where id = $1`, [order.id]);
+    order.confirmed_at = null;
+    const deltaLines = mods.adds.map((i) => `${i.quantity}x ${i.name}`);
+    await restartItemsCollection(order);
+    return finishItemsCollection(customer, order, '', { preferTextForQuestions: true, deltaLines });
   }
 
   // Any edit before payment needs a fresh yes -- whether still picking
@@ -2285,7 +2603,20 @@ function classifyPureAck(text) {
 // long" got told the truth from days ago, not the truth right now. Every
 // stage own_riders actually moves through (orderStages.js's own pipeline
 // comment): preparation -> ready -> delivery/in_transit -> completed.
+// Chidera, 2026-09-20: a second real bug, found from a real report -- this
+// had no dine-in case at all, so a table order reaching this same code
+// path (it does -- handleCollectFulfilment's at_table branch walks it
+// through to engine_state 'fulfilment' same as any other order) always
+// fell through to the delivery/pickup default and said "Paid and being
+// prepared for pickup" -- wrong on both counts: dine-in never collects
+// payment through the bot at all (settled at the table, after being
+// served), and it was never pickup or delivery to begin with.
 function fulfilmentStatusLine(order) {
+  if (order.payment_mode === 'at_table') {
+    return order.served_at
+      ? `You've been served -- pay at the table whenever you're ready.`
+      : `Your order's being prepared -- pay at the table once you've been served.`;
+  }
   if (order.status === 'ready') {
     return order.fulfilment_type === 'delivery' ? `Paid and ready, waiting on a rider to pick it up.` : `Paid and ready for pickup whenever you are.`;
   }
@@ -2304,8 +2635,29 @@ function fulfilmentStatusLine(order) {
 // needs no reply at all -- repeating "already paid and being prepared"
 // after every acknowledgment reads as not listening, not as helpful.
 async function handleFulfilmentStageMessage(customer, order, text) {
-  // Pure ack/thanks is already handled once, universally, at the top of
-  // handlePendingBatch -- text never reaches here if it was one.
+  // Chidera, 2026-09-20: "if customer just says okay or alright or all
+  // these reply that means okay or agreement, bot doesnt need to say
+  // anything again, save my api" -- this comment used to claim pure ack/
+  // thanks was already filtered out upstream (handlePendingBatch), but
+  // that filter only stays silent when there's NO open order at all --
+  // deliberately, so a plain "okay" while payment is still outstanding
+  // still gets the payment nudge (see its own comment). An order sitting
+  // here, already paid and just being prepared, always HAS an open order,
+  // so a plain "okay" always fell through to this function anyway, which
+  // never actually checked for one itself -- burning a delay-complaint AI
+  // call, an answerOrThenShowMenu AI call, and a repeated "already being
+  // prepared" message on every single acknowledgment. This is the one
+  // place that comment's own claim needed to actually be true.
+  const ackType = classifyPureAck(text);
+  if (ackType === 'ack') return;
+  if (ackType === 'thanks') {
+    await reply(customer, `You're welcome!`, 'thanks_ack');
+    return;
+  }
+  if (ackType === 'decline') {
+    await reply(customer, `Okay!`, 'decline_ack');
+    return;
+  }
 
   // Repeated frustration about the wait is a real complaint, not a status
   // question -- answering it with delivery/pickup facts misses that they're
@@ -2333,7 +2685,7 @@ async function handleFulfilmentStageMessage(customer, order, text) {
 // never silence, never pretending nothing happened -- but always hands the
 // actual logistics off to a person rather than silently re-booking a rider
 // or charging more on its own.
-async function handlePostPaymentFulfilmentChange(customer, order, newType) {
+export async function handlePostPaymentFulfilmentChange(customer, order, newType) {
   const previousType = order.fulfilment_type;
   await pool.query(`update "order" set fulfilment_type = $1 where id = $2`, [newType, order.id]);
   order.fulfilment_type = newType;
@@ -2344,15 +2696,37 @@ async function handlePostPaymentFulfilmentChange(customer, order, newType) {
   // pickup line completePayment already sends. Switching the other way
   // (to delivery) still genuinely needs a person (a rider to book, a real
   // delivery fee to work out), so that keeps the handover below.
+  //
+  // Chidera, 2026-09-20: real report -- "i changed to pick up why wasnt
+  // the order recalculated to take out delivery fee." Root cause: this
+  // used to only update fulfilment_type, never delivery_fee/total, unlike
+  // the pre-payment version of this same switch (handleFulfilmentChange
+  // above). Since the order's ALREADY paid, silently shrinking total
+  // would misrepresent what actually got collected -- the real fact is a
+  // refund is owed. delivery_fee/total are still corrected here (so the
+  // dashboard/invoice reflect what the order is genuinely worth now, not
+  // a stale delivery-inclusive figure), and the handover below names the
+  // exact refund amount instead of a vague "sort that out."
   if (newType === 'pickup') {
+    const oldFee = Number(order.delivery_fee || 0);
+    if (oldFee > 0) {
+      const newTotal = Number(order.total) - oldFee;
+      await pool.query(`update "order" set delivery_fee = 0, total = $1 where id = $2`, [newTotal, order.id]);
+      order.delivery_fee = 0;
+      order.total = newTotal;
+    }
     const { rows: bizRows } = await pool.query('select address, phone_number from business limit 1');
     const biz = bizRows[0] || {};
     const branchRows = order.branch_id ? (await pool.query('select address, phone_number from branch where id = $1', [order.branch_id])).rows : [];
     const b = branchRows[0] || {};
+    const refundLine = oldFee > 0 ? ` Since you'd already paid the delivery fee, we'll refund you NGN ${oldFee} for that.` : '';
     await reply(
       customer,
-      `Okay, this is the pickup address: ${b.address || biz.address || 'our location'}. When your order is ready I'll let you know so you can pick it up.`
+      `Okay, this is the pickup address: ${b.address || biz.address || 'our location'}. When your order is ready I'll let you know so you can pick it up.${refundLine}`
     );
+    if (oldFee > 0) {
+      await handover(customer, `Customer switched an already-paid order from delivery to pickup -- they're owed a NGN ${oldFee} delivery fee refund`, null, false);
+    }
     return;
   }
 
@@ -2485,6 +2859,34 @@ export async function notifyDeliverySearching(orderId, trackingPath) {
   );
 }
 
+// Called from the Paystack webhook once a TOP-UP is verified (see
+// completePayment just below for the main-order equivalent) -- Chidera,
+// 2026-09-20: "totally stop sending account number... use just paystack."
+// Deliberately does NOT touch the order's own status/engine_state -- the
+// order itself is already fully paid and moving through its own
+// lifecycle; a topup is just extra money for items already added
+// (applyOrderModifications already inserted them regardless of payment).
+export async function completeTopupPayment(topupId) {
+  const { rows } = await pool.query('select * from order_topup where id = $1', [topupId]);
+  const topup = rows[0];
+  if (!topup || topup.payment_status === 'confirmed') return;
+  await pool.query(`update order_topup set payment_status = 'confirmed' where id = $1`, [topupId]);
+
+  const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [topup.order_id]);
+  const order = orderRows[0];
+  if (!order) return;
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+  const customer = custRows[0];
+  if (customer) await reply(customer, `Payment received for your top-up on order ${order.reference} -- thank you!`);
+
+  const orderRecipients = await orderAlertRecipients();
+  if (orderRecipients.length) {
+    const itemLines = (topup.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ');
+    const alertText = `Top-up payment confirmed on order ${order.reference}: ${itemLines} (NGN ${topup.amount}).`;
+    for (const { phoneNumber: to } of orderRecipients) await sendStaffAlert(to, alertText);
+  }
+}
+
 // Called from the Paystack webhook once a payment is verified -- not part
 // of handleInboundMessage's request/reply loop, since payment confirmation
 // arrives from Paystack, not from the customer's next WhatsApp message.
@@ -2537,6 +2939,47 @@ export async function completePayment(orderId) {
   // still message in to add something while it's being prepared/delivered.
   // Staff marking it completed on the dashboard (routes/api.js) is what
   // actually closes it.
+
+  // Chidera, 2026-09-16: "a staff number should be able to get a confirmed
+  // order after paystack has automatically confirmed payment on their
+  // whatsapp without accessing the back end... the open link will just
+  // show the kanban so they can click the ready button." A plain text
+  // alert (what/who/how much), then a separate CTA-URL button opening the
+  // kanban board itself -- same two-message shape as handover()'s own
+  // conversation-link alert just above, landing on '/' (the board, same
+  // page PIN-tier staff already land on) rather than a specific order's
+  // page, since the "ready" action lives on the board's own order card,
+  // not a detail page.
+  const orderRecipients = await orderAlertRecipients();
+  if (orderRecipients.length) {
+    // Chidera, 2026-09-16: "when reporting to staff what to prepare, make
+    // it structured not like a paragraph" -- was using summariseOrder's
+    // `lines` (a single comma-run paragraph, its own comment says so
+    // explicitly), not `itemLines` (one item per line), which the
+    // customer-facing confirm message already switched to 2026-09-10 for
+    // the exact same reason. Staff reading what to prepare deserves the
+    // same structured format, not a regression back to the paragraph.
+    const { itemLines, total } = await summariseOrder(order);
+    const alertText = `Payment confirmed, ready to prepare: ${displayNameFor(customer)} (${order.fulfilment_type || 'pickup'})\n${itemLines.join('\n')}\nTotal: NGN ${total}`;
+    for (const { phoneNumber: to, staffId } of orderRecipients) {
+      await sendStaffAlert(to, alertText);
+      if (!process.env.PUBLIC_URL || !staffId) continue;
+      try {
+        // Chidera, 2026-09-17: "the link is meant to open the specific
+        // kanban inside for that order not the pipeline surface" -- still
+        // the board itself, not a detail page (her own earlier call: "the
+        // kanban not the conversation... the ready button" lives on the
+        // board's own card), just landing scrolled to and highlighting
+        // THIS order's card instead of the customer having to hunt for it
+        // among everything else in the pipeline. Orders.jsx reads ?order=.
+        const link = `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/?order=${order.id}`)}`;
+        const credentials = await getWhatsAppCredentials(order.branch_id);
+        await sendWhatsAppCtaUrl(to, `Tap below to open the board.`, 'Open Orders', link, credentials);
+      } catch (err) {
+        console.error(`Failed to send order-alert board link to ${to}:`, err.message);
+      }
+    }
+  }
 }
 
 // WhatsApp gives no typing indicator on the business side, so there is no
@@ -2827,13 +3270,73 @@ async function getDineinConfig() {
   return rows[0] || null;
 }
 
-async function sendDineinWelcome(customer, table) {
+// Joint dine-in, Stage 1 (fancy-whistling-pearl.md): records itself the
+// first time each guest actually interacts with the table -- a scan, or
+// the shared web page loading for them -- rather than a roster anyone has
+// to explicitly join. Exported for routes/dinein-menu.js (the shared page
+// itself) as well as this file's own scan handling below.
+export async function upsertTableGuest(sessionId, customerId) {
+  await pool.query(
+    `insert into table_session_guest (session_id, customer_id) values ($1, $2) on conflict (session_id, customer_id) do nothing`,
+    [sessionId, customerId]
+  );
+}
+
+// The ONE shared order for a table's current sitting, regardless of which
+// guest is asking -- replaces the old getOpenOrder(customerId) on the
+// dine-in web routes, which always resolved back to whoever's customer
+// row the caller happened to pass in, not "the table's order." Order
+// ownership (order.customer_id) still stays the session's own original
+// scanner -- every existing single-customer assumption elsewhere (
+// receipts, feedback requests, the fulfilment status line) keeps working
+// unchanged; only line-level attribution is per-guest (order_item.
+// added_by_customer_id, set by the caller after this returns).
+// status not in ('completed', 'cancelled'), not status = 'new' -- Stage 2
+// (fancy-whistling-pearl.md): "they can also add to the order already
+// served and the waiter will get add on order notification... the bill
+// can pile up as conclusive," Chidera's own words for the joint dine-in
+// concept. A table reopening the web menu after being served (or even
+// after confirming, before serving) adds onto the SAME still-open bill,
+// not a second separate kitchen ticket -- matches the broader definition
+// getOpenOrder already uses for the chat-typed add path (engine_state not
+// in completed/cancelled), which is how applyOrderModifications' own
+// served_at reset could already reach a served order even before this
+// existed; this brings the web path in line with it, not a new rule.
+export async function getOrCreateTableOrder(session, table, customer) {
+  await upsertTableGuest(session.id, customer.id);
+  const { rows } = await pool.query(
+    `select * from "order" where session_id = $1 and status not in ('completed', 'cancelled') order by created_at desc limit 1`,
+    [session.id]
+  );
+  if (rows[0]) return rows[0];
+  const ref = newReference('ORD');
+  const { rows: created } = await pool.query(
+    `insert into "order" (customer_id, reference, branch_id, channel, table_id, session_id, fulfilment_type, payment_mode, engine_state, status)
+     values ($1, $2, $3, 'dinein', $4, $5, 'table', 'at_table', 'collect_info', 'new') returning *`,
+    [session.customer_id, ref, table.branch_id, table.id, session.id]
+  );
+  return created[0];
+}
+
+// joiningActiveTable -- Chidera, joint dine-in concept: "is it possible
+// that when a persons scans a qr for a table let everyone on that table be
+// able to join in and see each other". A guest scanning a table that
+// already has another guest's order open gets told there's something to
+// join, not the same first-timer "what would you like to do" -- their own
+// button taps already resolve into that same shared order either way
+// (currentDineinSession now matches table_session_guest too), this is
+// purely the wording matching what's actually true for them.
+async function sendDineinWelcome(customer, table, { joiningActiveTable = false } = {}) {
   const dinein = await getDineinConfig();
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const biz = bizRows[0];
-  const body = `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
+  const body = joiningActiveTable
+    ? `Welcome to ${biz?.name || 'us'}! Table ${table.label} has an active order -- add to it, or see what's already been ordered.`
+    : `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
   const buttons = [
-    { id: 'dinein_menu', title: 'See the menu' },
+    // Chidera, 2026-09-20: "that see menu put 'tap here to see menu'" --
+    // exactly 20 characters, Meta's own cap on a reply button's title too.
+    { id: 'dinein_menu', title: 'Tap here to see menu' },
     { id: 'dinein_specials', title: "Today's specials" },
   ];
   // Same cover-photo mechanism the normal chat greeting already uses
@@ -2876,8 +3379,21 @@ async function handleDineinScan(customer, text) {
   // own tables had a stray leading space in their stored label, which
   // \s+ above strips out of the scanned text but never out of the stored
   // value, so an exact match against the untrimmed label failed forever).
+  //
+  // $1::uuid is null or branch_id = $1 -- Chidera, 2026-09-20, real
+  // report: "why does it still ask me what table am i on" even scanning a
+  // real, correctly-labelled QR. Root cause, confirmed against era-demo's
+  // real data: this was a strict branch_id = $1 match, and
+  // customer.branch_id is null for era-demo's real customers (no
+  // branch_channel mapping to resolve one from -- the exact same class of
+  // bug already fixed today in menuForBranch/resolveMenu). NULL never
+  // equals anything in SQL, so this could never find ANY table for those
+  // customers, no matter how correct their scan was -- every real "Menu
+  // Table 1" landed here and fell straight to "Please, what table are you
+  // at?" This was never a QR-stability problem; the qr_token (and the
+  // label it encodes) were already fixed and correct the whole time.
   const { rows: tableRows } = await pool.query(
-    `select * from restaurant_table where branch_id = $1 and lower(trim(label)) = lower($2) and status = 'active'`,
+    `select * from restaurant_table where ($1::uuid is null or branch_id = $1) and lower(trim(label)) = lower($2) and status = 'active'`,
     [customer.branch_id, label]
   );
   const table = tableRows[0];
@@ -2892,11 +3408,25 @@ async function handleDineinScan(customer, text) {
   // open a duplicate (table_session_one_open_idx enforces this at the DB
   // level too, this is just avoiding hitting that constraint at all).
   const { rows: sessionRows } = await pool.query(`select * from table_session where table_id = $1 and closed_at is null`, [table.id]);
-  if (!sessionRows.length) {
-    await pool.query(`insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3)`, [table.id, table.branch_id, customer.id]);
+  let session = sessionRows[0];
+  let joiningActiveTable = false;
+  if (!session) {
+    const { rows: created } = await pool.query(
+      `insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3) returning *`,
+      [table.id, table.branch_id, customer.id]
+    );
+    session = created[0];
+  } else if (session.customer_id !== customer.id) {
+    // A second (or third...) guest scanning the same table's own code,
+    // not the original opener -- joint dine-in, Stage 1. table_session_
+    // guest is what lets currentDineinSession/the shared order page
+    // recognize them from here on, same as the original scanner already
+    // could via session.customer_id.
+    joiningActiveTable = true;
   }
+  await upsertTableGuest(session.id, customer.id);
 
-  await sendDineinWelcome(customer, table);
+  await sendDineinWelcome(customer, table, { joiningActiveTable });
   return true;
 }
 
@@ -2904,11 +3434,19 @@ async function handleDineinScan(customer, text) {
 // customer's own most recent open table_session, not re-parsed from
 // anything in the tap itself (a button tap carries no table info of its
 // own, unlike the scan message).
+//
+// Also matches via table_session_guest, not just ts.customer_id -- Stage 1
+// of the joint dine-in plan (fancy-whistling-pearl.md): a second guest at
+// the same table never opens the session, they join one already open, so
+// ts.customer_id alone (only ever the FIRST scanner) left every other
+// guest's own button taps with "please scan your table's QR code to get
+// started" even though they very much had.
 async function currentDineinSession(customer) {
   const { rows } = await pool.query(
     `select ts.*, rt.label as table_label, rt.qr_token
      from table_session ts join restaurant_table rt on rt.id = ts.table_id
-     where ts.customer_id = $1 and ts.closed_at is null
+     where ts.closed_at is null
+       and (ts.customer_id = $1 or exists (select 1 from table_session_guest g where g.session_id = ts.id and g.customer_id = $1))
      order by ts.opened_at desc limit 1`,
     [customer.id]
   );
@@ -2936,11 +3474,278 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
     return;
   }
   const specialsCategory = buttonId === 'dinein_specials' ? await findSpecialsCategory(customer.branch_id) : null;
-  const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}${specialsCategory ? `?cat=${encodeURIComponent(specialsCategory)}` : ''}`;
+  // g=<menu_token> -- joint dine-in, Stage 1: every guest at the table
+  // gets the SAME qrToken (it identifies the table, not them), so this is
+  // the only thing that lets the shared page tell which guest is actually
+  // looking at it right now -- reuses the existing per-customer menu_token
+  // (ensureMenuToken) rather than inventing a second kind of token.
+  const guestToken = await ensureMenuToken(customer);
+  const params = new URLSearchParams();
+  if (specialsCategory) params.set('cat', specialsCategory);
+  params.set('g', guestToken);
+  const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}?${params.toString()}`;
   const bodyText = buttonId === 'dinein_specials' ? `Here's today's specials for Table ${session.table_label}.` : `Here's our menu for Table ${session.table_label}.`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonId === 'dinein_specials' ? 'See specials' : 'View menu', url, credentials);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
+}
+
+// Whether every order in a table_session is settled -- the single source
+// of truth for "can this table close", shared between the manual
+// Close-table button (routes/dinein.js) and closeTableSessionIfSettled's
+// automatic trigger below (both the manual "Mark paid" path in
+// routes/api.js and, joint dine-in Stage 3, a POS transaction
+// auto-confirming an order_payment).
+async function sessionIsSettled(sessionId) {
+  const { rows } = await pool.query(
+    `select count(*) from "order" where session_id = $1 and status not in ('completed', 'cancelled')`,
+    [sessionId]
+  );
+  return Number(rows[0].count) === 0;
+}
+
+// Closes an open table_session if -- and only if -- every order in it is
+// settled; a no-op (returns null) otherwise. closedBy distinguishes who
+// actually closed it ('staff' for the manual button, 'auto' for an
+// automatic trigger -- either the last order being marked paid, or Stage
+// 3's own POS auto-confirm) -- both valid per schema.sql's check
+// constraint on table_session.closed_by. Moved here from routes/dinein.js
+// (Stage 3) so engine/webhook-moniepoint.js -- which has no HTTP request/
+// staff session of its own to route through -- can call it directly,
+// same layer completePayment/completeTopupPayment already live in.
+export async function closeTableSessionIfSettled(sessionId, { closedBy, staffId = null } = {}) {
+  if (!(await sessionIsSettled(sessionId))) return null;
+  const { rows } = await pool.query(
+    `update table_session set closed_at = now(), closed_by = $1, closed_by_staff = $2
+     where id = $3 and closed_at is null returning *`,
+    [closedBy, staffId, sessionId]
+  );
+  return rows[0] || null;
+}
+
+// Joint dine-in, Stage 3: "they can choose pay together or split payment
+// so each pay their own but its like a table open order, and they can
+// pick whose bill too can be joint." guestIds is who this particular
+// group is paying for (always includes the tapping guest themselves,
+// validated by the caller against table_session_guest same as every
+// other guest-claim in this file) -- covers_item_ids is every order_item
+// any of those guests added. null (not an array) specifically means
+// "every guest who has anything on the order is included," matching
+// schema.sql's own "null = whole order" convention, so a single
+// confirmed payment with covers_item_ids null is recognized as full
+// settlement without needing every item id spelled out.
+//
+// Reuses an existing PENDING payment for the exact same guest set instead
+// of creating a new one each time the pay page reloads -- a guest
+// refreshing (or two guests on the same phone somehow both landing here)
+// must not spawn duplicate POS amounts waiting to be matched.
+export async function createOrderPayment(order, guestIds, actingCustomerId) {
+  const { rows: allItems } = await pool.query('select id, product_id, quantity, price, added_by_customer_id from order_item where order_id = $1', [order.id]);
+  const { rows: allGuestRows } = await pool.query(
+    `select customer_id from table_session_guest where session_id = $1
+     union select customer_id from table_session where id = $1`,
+    [order.session_id]
+  );
+  const allGuestIds = allGuestRows.map((g) => g.customer_id);
+  const wholeOrder = allGuestIds.length > 0 && allGuestIds.every((id) => guestIds.includes(id));
+
+  const coveredItems = wholeOrder ? allItems : allItems.filter((i) => guestIds.includes(i.added_by_customer_id));
+  const amount = coveredItems.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
+  const coversItemIds = wholeOrder ? null : coveredItems.map((i) => i.id);
+
+  // Same-shape existing pending payment -- exact same coverage, still
+  // pending -- gets reused rather than duplicated. Array comparison via a
+  // sorted-JSON string is enough here (small arrays, no real risk of a
+  // false match) -- null vs null (whole order) also matches correctly
+  // since both stringify the same way.
+  const key = JSON.stringify((coversItemIds || []).slice().sort());
+  const { rows: pendingRows } = await pool.query(`select * from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
+  const existing = pendingRows.find((p) => {
+    const pKey = JSON.stringify((p.covers_item_ids || []).slice().sort());
+    return (p.covers_item_ids === null) === (coversItemIds === null) && pKey === key;
+  });
+  if (existing) return existing;
+
+  // Our own bookkeeping id, never sent to Moniepoint (schema.sql's own
+  // comment on this table) -- confirmation is matched by amount/time
+  // against real pos_transaction rows, not by reference.
+  const reference = `${order.reference}-P${randomBytes(3).toString('hex').toUpperCase()}`;
+  const { rows: created } = await pool.query(
+    `insert into order_payment (order_id, provider, reference, amount, covers_item_ids, paid_by_customer_id)
+     values ($1, 'pos', $2, $3, $4, $5) returning *`,
+    [order.id, reference, amount, coversItemIds, actingCustomerId]
+  );
+  return created[0];
+}
+
+// Confirms one order_payment (POS auto-match below, or a future staff
+// tie-break resolution) -- then checks whether the ORDER itself is now
+// fully covered by every confirmed payment together (a single whole-order
+// one, or the union of split/joint groups covering every real item),
+// completing it exactly the same way the manual "Mark paid" dashboard
+// button already does (routes/api.js's POST /orders/:id/status) so
+// nothing downstream (feedback, table auto-close) has to know which path
+// got it there. Partial settlement -- some groups paid, one hasn't --
+// leaves the order open, still visibly "awaiting payment" for the rest.
+export async function confirmOrderPayment(orderPaymentId) {
+  const { rows } = await pool.query(
+    `update order_payment set status = 'confirmed', confirmed_at = now() where id = $1 and status = 'pending' returning *`,
+    [orderPaymentId]
+  );
+  const payment = rows[0];
+  if (!payment) return null;
+
+  const { rows: allItems } = await pool.query('select id from order_item where order_id = $1', [payment.order_id]);
+  const { rows: confirmedPayments } = await pool.query(
+    `select covers_item_ids from order_payment where order_id = $1 and status = 'confirmed'`,
+    [payment.order_id]
+  );
+  const wholeOrderPaid = confirmedPayments.some((p) => p.covers_item_ids === null);
+  const covered = new Set();
+  for (const p of confirmedPayments) for (const id of p.covers_item_ids || []) covered.add(id);
+  const fullyCovered = wholeOrderPaid || (allItems.length > 0 && allItems.every((i) => covered.has(i.id)));
+  if (!fullyCovered) return payment;
+
+  const { rows: orderRows } = await pool.query(
+    `update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1 returning *`,
+    [payment.order_id]
+  );
+  const order = orderRows[0];
+  if (order) {
+    sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
+    if (order.session_id) {
+      closeTableSessionIfSettled(order.session_id, { closedBy: 'auto' }).catch((err) => console.error('closeTableSessionIfSettled failed:', err.message));
+    }
+  }
+  return payment;
+}
+
+// Joint dine-in, Stage 3: "if there is an exact amount sent at same time
+// then staff should be asked which table" -- Chidera's own call, confirmed
+// as the right approach. Called right after engine/webhook-moniepoint.js
+// inserts a new pos_transaction -- matches it against every PENDING
+// order_payment with the same amount inside a short recent window (a few
+// minutes: long enough for someone to actually walk up and tap the
+// terminal after requesting payment, short enough that two genuinely
+// unrelated transactions at the same amount rarely land in it together).
+// Zero matches -- nothing to reconcile automatically, the transaction
+// stays logged as-is (a non-order sale, or paid a way not expected here).
+// Exactly one -- auto-confirm it, no staff involved, which is the entire
+// point (closes the staff-fraud gap this whole plan started from). Two
+// or more -- a genuine tie, never guessed at with real money: staff gets
+// asked which one instead.
+export async function matchPosTransactionToPayment(transaction) {
+  const { rows: candidates } = await pool.query(
+    `select op.*, o.table_id, rt.label as table_label
+     from order_payment op
+       join "order" o on o.id = op.order_id
+       left join restaurant_table rt on rt.id = o.table_id
+     where op.status = 'pending' and op.amount = $1
+       and op.created_at > now() - interval '15 minutes'`,
+    [transaction.amount]
+  );
+  if (candidates.length === 1) {
+    await confirmOrderPayment(candidates[0].id);
+    return;
+  }
+  if (candidates.length > 1) {
+    const orderRecipients = await orderAlertRecipients();
+    if (orderRecipients.length) {
+      // No " -- " / standalone dash -- bot-engine/send.js's sanitizeText
+      // rejects that as banned formatting (found live, via this exact
+      // alert, not assumed). Line breaks + "label: value" instead, same
+      // convention every other structured staff alert in this file uses.
+      const list = candidates.map((c) => `Table ${c.table_label || '?'}: NGN ${c.amount}`).join('\n');
+      const alertText = `A POS payment of NGN ${transaction.amount} matched more than one table waiting to pay:\n${list}\n\nNot auto-confirmed, to avoid crediting the wrong table. Please confirm the right one from In House, Awaiting payment, Mark paid.`;
+      for (const { phoneNumber: to } of orderRecipients) await sendStaffAlert(to, alertText);
+    }
+  }
+}
+
+// Joint dine-in, Stage 2: "food comes first before payment unlike normal
+// ordering... they can pay when ever they are ready." Called from
+// routes/dinein.js's POST /orders/:id/served the moment staff taps
+// "Served" -- every guest who's actually been part of this table's
+// sitting (table_session_guest, plus the original scanner as a defensive
+// fallback) gets their OWN "Ready to pay" link, same ?g=<menu_token>
+// per-guest identity mechanism as every other dine-in link (see
+// handleDineinButtonTap above). Stage 3 builds out the real split/joint
+// payment page this links to.
+export async function notifyGuestsReadyToPay(order) {
+  if (!process.env.PUBLIC_URL || order.channel !== 'dinein' || !order.table_id || !order.session_id) return;
+  const { rows: tableRows } = await pool.query('select label, qr_token, branch_id from restaurant_table where id = $1', [order.table_id]);
+  const table = tableRows[0];
+  if (!table) return;
+  const { rows: guests } = await pool.query(
+    `select c.* from customers c where c.id in (
+       select customer_id from table_session_guest where session_id = $1
+       union select customer_id from table_session where id = $1
+     )`,
+    [order.session_id]
+  );
+  if (!guests.length) return;
+  const { total } = await summariseOrder(order);
+  const credentials = await getWhatsAppCredentials(order.branch_id);
+  for (const guest of guests) {
+    try {
+      const token = await ensureMenuToken(guest);
+      const url = `${process.env.PUBLIC_URL}/t/${table.qr_token}/pay?g=${token}`;
+      await sendWhatsAppCtaUrl(recipientFor(guest), `Table ${table.label} is served! Total so far: NGN ${total}.`, 'Ready to pay', url, credentials);
+      await logMessage({ customerId: guest.id, direction: 'outbound', channel: guest.channel, sender: 'bot', body: `[ready to pay link sent: ${url}]`, trigger: 'dinein_ready_to_pay' });
+    } catch (err) {
+      // Best-effort, per guest -- one guest's send failing (a stale
+      // number, WhatsApp's 24h window) must never stop the others from
+      // getting told the table's ready.
+      console.error(`Failed to send ready-to-pay link to ${guest.id}:`, err.message);
+    }
+  }
+}
+
+// Joint dine-in, Stage 2: "even if staff marks served and it goes to the
+// next pipeline and they still add it should go back to first pipeline"
+// (the original chat-only version of this rule, applyOrderModifications
+// below) now also alerts staff -- "Table X added more after being
+// served" -- reusing orderAlertRecipients/sendStaffAlert exactly as
+// completePayment's own ready-to-prepare ping already does, not new
+// plumbing. Exported and shared between applyOrderModifications (typed-
+// chat adds) and routes/dinein-menu.js's web review route (which
+// replaces the whole basket rather than diffing adds/removes, so it
+// can't reuse applyOrderModifications itself) -- one place decides what
+// "served, then added to" means and what it does about it.
+// Joint dine-in, Stage 2: getOrCreateTableOrder can now reopen an order
+// that's already walked all the way through to 'fulfilment' (confirmed,
+// being prepared, or even already served) -- finishItemsCollection
+// unconditionally calls transitionOrder(order, 'check_availability'),
+// which the state machine only allows FROM 'collect_info'
+// (schema.sql's bot_state seed), so re-running it on a further-along order
+// threw "confirm_order -> check_availability is not an allowed move"
+// (found via the sandbox test's post-serve add-on case, not assumed).
+// This is a deliberate restart of the collection sub-cycle for the new
+// round of items, not a normal forward move the state machine's own
+// transition table should have to model -- same reasoning a brand-new
+// order already gets away with (INSERT sets engine_state = 'collect_info'
+// directly, no transitionOrder call at all). No-op when the order's
+// already there (the ordinary still-deciding-the-first-round case).
+export async function restartItemsCollection(order) {
+  if (order.engine_state === 'collect_info') return;
+  await pool.query(`update "order" set engine_state = 'collect_info' where id = $1`, [order.id]);
+  order.engine_state = 'collect_info';
+}
+
+export async function resetServedForAddOn(order) {
+  if (!(order.channel === 'dinein' && order.served_at)) return false;
+  await pool.query(`update "order" set served_at = null where id = $1`, [order.id]);
+  order.served_at = null;
+  const orderRecipients = await orderAlertRecipients();
+  if (orderRecipients.length && order.table_id) {
+    const { rows: tableRows } = await pool.query('select label from restaurant_table where id = $1', [order.table_id]);
+    const { itemLines } = await summariseOrder(order);
+    const alertText = `Table ${tableRows[0]?.label || '?'} added more after being served:\n${itemLines.join('\n')}`;
+    for (const { phoneNumber: to } of orderRecipients) {
+      await sendStaffAlert(to, alertText);
+    }
+  }
+  return true;
 }
 
 // Unified feedback -- replaces the old dine-in-only, table-close-delayed,
@@ -3136,7 +3941,7 @@ async function handlePendingBatch(customer, text) {
 // table). Returns false (no real send) when PUBLIC_URL isn't configured,
 // same "genuinely inert without it" gate every other PUBLIC_URL-dependent
 // send in this file already follows.
-async function ensureMenuToken(customer) {
+export async function ensureMenuToken(customer) {
   if (customer.menu_token) return customer.menu_token;
   const token = randomBytes(12).toString('hex');
   await pool.query('update customers set menu_token = $1 where id = $2', [token, customer.id]);
@@ -3164,12 +3969,83 @@ async function businessCoverPhotoUrl() {
   return rows[0]?.v ? `${process.env.PUBLIC_URL}/photo/cover?v=${rows[0].v}` : null;
 }
 
-async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null, headerImageUrl = null) {
+// Chidera, 2026-09-16: "the photo text should have a greeting na. dont
+// era demo have gretig? add Hello! welcome to Pomodoro food truck, then
+// one line space before here is our menu, take a look and pick what you
+// like" -- handleGreeting (this file, ~line 830) already says "Hello!
+// Welcome to X" but ONLY for a plain "hi" with nothing else in it; a
+// message that already expresses order intent (her own test: "I would
+// like to place an order") skips straight past it, so its greeting
+// mirrors the exact same business-name lookup for that other case.
+async function menuGreetingBody() {
+  const { rows } = await pool.query('select name from business limit 1');
+  const businessName = rows[0]?.name || 'us';
+  return `Hello! Welcome to ${businessName},\n\nHere's our menu, take a look and pick what you like.`;
+}
+
+// order -- optional, and the fix for a real gap found live, 2026-09-20,
+// Chidera: "i tapped the finish my order to add, i saw an empty cart."
+// Every caller here used to build /m/<this customer's own token> no
+// matter what order it was actually about -- fine for a normal order
+// (order.customer_id IS this customer), but wrong for a joint dine-in
+// order (Stage 1): order.customer_id is always the table's ORIGINAL
+// scanner, never whichever guest is currently mid-conversation, so
+// routes/menu-page.js's pendingOrderPayload(customer.id) found nothing
+// for any other guest -- a real, correctly-answered item question landed
+// on a page showing an empty basket. Passing the order here (when the
+// caller has one) routes a dine-in order to its own /t/:qrToken page
+// instead, with THIS guest's own ?g= token -- the one page that already
+// resolves the shared order by session, not by whose customer_id happens
+// to be on it (see routes/dinein-menu.js's resolveActingCustomer).
+async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', category = null, headerImageUrl = null, order = null) {
   if (!process.env.PUBLIC_URL) return false;
+  if (order?.channel === 'dinein' && order.table_id) {
+    const { rows } = await pool.query('select qr_token from restaurant_table where id = $1', [order.table_id]);
+    const qrToken = rows[0]?.qr_token;
+    if (qrToken) {
+      const guestToken = await ensureMenuToken(customer);
+      const params = new URLSearchParams({ g: guestToken });
+      if (category) params.set('cat', category);
+      const dineinUrl = `${process.env.PUBLIC_URL}/t/${qrToken}?${params.toString()}`;
+      const dineinCredentials = await getWhatsAppCredentials(customer.branch_id);
+      try {
+        await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, dineinUrl, dineinCredentials, headerImageUrl || (await businessCoverPhotoUrl()));
+      } catch (err) {
+        console.error(`sendWebMenuLink (dinein) failed, falling back to text: ${err.message}`);
+        return false;
+      }
+      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${dineinUrl}]`, trigger: 'menu_shown', processed: true });
+      return true;
+    }
+  }
   const token = await ensureMenuToken(customer);
   const url = `${process.env.PUBLIC_URL}/m/${token}${category ? `?cat=${encodeURIComponent(category)}` : ''}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, url, credentials, headerImageUrl);
+  // Chidera, 2026-09-16: "ensure image appear on chat cause its not still
+  // appearing" -- handleGreeting (this file, ~line 839) already resolved
+  // and passed businessCoverPhotoUrl() correctly, but every OTHER call
+  // site of this function (four of them) left headerImageUrl at its
+  // default of null, so a conversation that skips straight past the plain
+  // greeting -- e.g. the customer's first message already says "I want to
+  // order" -- never saw the cover photo at all. Resolving it here, once,
+  // as the fallback means every caller gets the photo without having to
+  // remember to ask for it.
+  const resolvedHeaderImageUrl = headerImageUrl || (await businessCoverPhotoUrl());
+  // Chidera, 2026-09-20: real gap found testing the new item-question/
+  // fulfilment links below -- a genuine send failure here (not just
+  // PUBLIC_URL being unset) used to throw straight out of this function,
+  // which a caller like handleOrderConfirmNoTap/handleStartOrderTap never
+  // caught -- a transient Meta hiccup would have silently dropped the
+  // whole reply instead of falling back to plain text. Some callers
+  // already wrapped this in their own `.catch(() => false)`; consolidated
+  // here instead so every caller, old and new, gets the same "never worse
+  // than a text prompt" guarantee for free.
+  try {
+    await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, url, credentials, resolvedHeaderImageUrl);
+  } catch (err) {
+    console.error(`sendWebMenuLink failed, falling back to text: ${err.message}`);
+    return false;
+  }
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'menu_shown', processed: true });
   return true;
 }
@@ -3194,22 +4070,46 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
   // change order and they dont end up changing anything it[']s confusing
   // on what they should do next."
   const message = "No problem. Open the menu again and change whatever you like, or just reply yes if you'd like to keep it as it is.";
-  const session = await currentDineinSession(customer);
-  if (session && process.env.PUBLIC_URL) {
-    const url = `${process.env.PUBLIC_URL}/t/${session.qr_token}`;
+  // Chidera, 2026-09-20: real bug, found from a real report -- this used to
+  // call currentDineinSession(customer), which answers "does this customer
+  // have ANY open dine-in table session at all, ever," not "is the order
+  // actually being reconsidered right now a dine-in order." A customer
+  // whose table session from days earlier was never explicitly closed got
+  // sent that stale table's own /t/ menu link for a completely unrelated,
+  // normal WhatsApp order -- silently diverting her into a dine-in re-order
+  // (no payment step) while the real order she was actually confirming sat
+  // abandoned mid-flow. Resolved directly off THIS order's own table_id
+  // now, never a customer-wide session lookup.
+  const order = await getOpenOrder(customer.id);
+  let tableToken = null;
+  if (order?.channel === 'dinein' && order.table_id) {
+    const { rows } = await pool.query('select qr_token from restaurant_table where id = $1', [order.table_id]);
+    tableToken = rows[0]?.qr_token || null;
+  }
+  if (tableToken && process.env.PUBLIC_URL) {
+    // ?g= -- Chidera, 2026-09-20: same empty-cart class of bug as
+    // finishItemsCollection's own "Finish my order" link (see
+    // sendWebMenuLink's comment) -- this link predates the joint dine-in
+    // guest-identity mechanism (Stage 1) and never carried this guest's
+    // own token, so a non-owner guest tapping "No, change it" landed on
+    // the table's shared page resolved back to the ORIGINAL scanner
+    // (resolveActingCustomer's own fallback), seeing that guest's basket
+    // instead of their own.
+    const guestToken = await ensureMenuToken(customer);
+    const url = `${process.env.PUBLIC_URL}/t/${tableToken}?g=${guestToken}`;
     const credentials = await getWhatsAppCredentials(customer.branch_id);
-    await sendWhatsAppCtaUrl(recipientFor(customer), message, 'See the menu', url, credentials);
+    await sendWhatsAppCtaUrl(recipientFor(customer), message, 'Tap here to see menu', url, credentials);
     await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'order_confirm_no', processed: true });
     return;
   }
-  const shown = await sendWebMenuLink(customer, message, 'See the menu');
+  const shown = await sendWebMenuLink(customer, message, 'Tap here to see menu');
   if (!shown) await reply(customer, message, 'order_confirm_no');
 }
 
 export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' , processed: true });
-  const shown = await sendWebMenuLink(customer, "Here's our menu, take a look and let me know what you'd like.");
+  const shown = await sendWebMenuLink(customer, await menuGreetingBody());
   if (shown) return;
   await reply(customer, 'What would you like to order?', 'items_menu_shown');
 }
@@ -3229,37 +4129,120 @@ export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'w
 // That means a second submission has to be diffed against what's already
 // on the order -- an untouched quantity is a no-op, a lowered one is a
 // real reduction/removal, and only a genuinely new product is an add.
-export async function handleWebMenuOrder(customer, items) {
-  let order = await getOpenOrder(customer.id);
+// Chidera, 2026-09-17: "so if a person is pick 2 pasta itll have to ask
+// for each + and if they picked 2 different a - will have to know for
+// which" -- a web order_item is identified by product+answers together,
+// not product alone, so two lines of the same product with different
+// answers (or no answers at all) never collide or get merged into one
+// row by mistake. Keys sort their own entries first so the same answers
+// submitted in a different object-key order (client) still match what
+// the DB's own json_object_agg happens to return (server) -- see
+// webLineKey below.
+function answersKey(answers) {
+  const a = answers || {};
+  return JSON.stringify(Object.keys(a).sort().map((k) => [k, a[k]]));
+}
+function webLineKey(productId, answers) {
+  return `${productId}::${answersKey(answers)}`;
+}
+async function insertWebOrderItem(orderId, item) {
+  const { rows } = await pool.query(
+    'insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4) returning id',
+    [orderId, item.productId, item.quantity, item.price]
+  );
+  const answers = item.answers || {};
+  for (const questionId of Object.keys(answers)) {
+    await pool.query(
+      'insert into order_item_answer (order_item_id, question_id, answer) values ($1, $2, $3)',
+      [rows[0].id, questionId, answers[questionId]]
+    );
+  }
+}
 
-  if (!order) {
+// Chidera, 2026-09-17: "lets think, the extra penne or spagetti and room
+// temp or what ever message could be on the site right?" -- same idea
+// extended to delivery/pickup and the address: writing them directly onto
+// the order/customer here (not waiting for the WhatsApp confirm step to
+// ask) is what makes missingFulfilmentFields (fields.js) find nothing
+// missing later, so handleCollectFulfilment sails straight through to
+// payment instead of re-asking something already answered on the site.
+// delivery_zone_id is set here too (own_riders only) rather than left for
+// handleCollectFulfilment's own guess-and-confirm text matching -- the web
+// page shows the customer a real dropdown of actual zone names, so there's
+// nothing left to guess. Never trusts the client's own fee claim, same
+// principle as never trusting its price/availability claims elsewhere in
+// this file -- the fee always comes from re-reading the real zone row.
+async function applyWebFulfilment(order, customer, fulfilment) {
+  if (!fulfilment || !fulfilment.type) return;
+  await pool.query('update "order" set fulfilment_type = $1 where id = $2', [fulfilment.type, order.id]);
+  order.fulfilment_type = fulfilment.type;
+  if (fulfilment.type !== 'delivery') return;
+
+  if (fulfilment.address) {
+    await pool.query('update customers set address = $1 where id = $2', [fulfilment.address, customer.id]);
+    customer.address = fulfilment.address;
+  }
+  if (fulfilment.zoneId) {
+    const { rows } = await pool.query(
+      `select * from delivery_zone where id = $1 and active = true and ($2::uuid is null or branch_id = $2 or branch_id is null)`,
+      [fulfilment.zoneId, order.branch_id]
+    );
+    const zone = rows[0];
+    if (zone) {
+      await pool.query('update "order" set delivery_zone_id = $1, delivery_fee = $2 where id = $3', [zone.id, zone.customer_fee, order.id]);
+      order.delivery_zone_id = zone.id;
+      order.delivery_fee = Number(zone.customer_fee);
+    }
+  }
+}
+
+export async function handleWebMenuOrder(customer, items, fulfilment) {
+  let order = await getOpenOrder(customer.id);
+  const isNewOrder = !order;
+
+  if (isNewOrder) {
     order = await createDraftOrder(customer.id, customer.branch_id);
     await transitionOrder(order, 'understand_request');
     await transitionOrder(order, 'collect_info');
-    for (const item of items) {
-      await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
-    }
-    await finishItemsCollection(customer, order, 'Got it. ');
+  }
+  await applyWebFulfilment(order, customer, fulfilment);
+
+  if (isNewOrder) {
+    for (const item of items) await insertWebOrderItem(order.id, item);
+    await finishItemsCollection(customer, order, 'Got it. ', { autoConfirm: Boolean(fulfilment) });
     return;
   }
 
-  const { rows: existingItems } = await pool.query('select id, product_id, quantity from order_item where order_id = $1', [order.id]);
-  const existingMap = new Map(existingItems.map((r) => [r.product_id, r.quantity]));
-  const existingIdMap = new Map(existingItems.map((r) => [r.product_id, r.id]));
-  const submittedIds = new Set(items.map((i) => i.productId));
+  // answers, one row per existing order_item -- json_object_agg returns
+  // NULL (not an empty object) when a product has no order_item_answer
+  // rows at all, same reason menuForBranch's own questions coalesce
+  // exists, so every no-question item still lands on the SAME key
+  // (webLineKey({})) the client uses for it, not a stray NULL-keyed one.
+  const { rows: existingItems } = await pool.query(
+    `select oi.id, oi.product_id, oi.quantity,
+       coalesce(
+         (select json_object_agg(oa.question_id, oa.answer) from order_item_answer oa where oa.order_item_id = oi.id),
+         '{}'
+       ) as answers
+     from order_item oi where oi.order_id = $1`,
+    [order.id]
+  );
+  const existingByKey = new Map(existingItems.map((r) => [webLineKey(r.product_id, r.answers), r]));
+  const submittedKeys = new Set(items.map((i) => webLineKey(i.productId, i.answers)));
 
   const adds = [];
   const sets = [];
   const removes = [];
   for (const item of items) {
-    if (existingMap.has(item.productId)) {
-      if (existingMap.get(item.productId) !== item.quantity) sets.push({ productId: item.productId, quantity: item.quantity });
+    const existing = existingByKey.get(webLineKey(item.productId, item.answers));
+    if (existing) {
+      if (existing.quantity !== item.quantity) sets.push({ itemId: existing.id, quantity: item.quantity });
     } else {
       adds.push(item);
     }
   }
-  for (const productId of existingMap.keys()) {
-    if (!submittedIds.has(productId)) removes.push({ productId });
+  for (const [key, row] of existingByKey) {
+    if (!submittedKeys.has(key)) removes.push({ itemId: row.id });
   }
   if (!adds.length && !sets.length && !removes.length) {
     // Was a silent return -- a real dead end. Chidera 2026-09-10: "if a
@@ -3279,13 +4262,52 @@ export async function handleWebMenuOrder(customer, items) {
       const summary = [...itemLines, `Total: NGN ${total}`].join('\n');
       await sendConfirmButtons(customer, `Your order:\n${summary}`, 'order_confirm_asked');
     } else {
-      await finishItemsCollection(customer, order, '');
+      await finishItemsCollection(customer, order, '', { autoConfirm: Boolean(fulfilment) });
     }
     return;
   }
 
+  // Not routed through handleOrderModification/applyOrderModifications --
+  // both match an existing order_item by product_id alone, which can't
+  // tell apart two lines of the same product with different answers.
+  // Mirrors their exact behavior (paid-order gate, top-up invoicing,
+  // re-confirm read-back) with a composite-key-aware apply instead, so
+  // the typed-WhatsApp path those two functions still serve stays
+  // completely untouched.
   if (['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
-    await handleOrderModification(customer, order, { adds, removes, sets });
+    const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
+    if (paid && (sets.length || removes.length)) {
+      await reply(customer, `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`);
+      await handover(customer, 'Customer wants to remove or change items on an already-paid order', null, false);
+      if (!adds.length) return;
+    }
+
+    let addedValue = 0;
+    for (const item of adds) {
+      await insertWebOrderItem(order.id, item);
+      addedValue += item.quantity * Number(item.price);
+    }
+    if (!paid) {
+      for (const item of sets) {
+        await pool.query('update order_item set quantity = $1 where id = $2', [item.quantity, item.itemId]);
+      }
+      for (const item of removes) {
+        await clearPendingQuestionIfOnItem(order, item.itemId);
+        await pool.query('delete from order_item where id = $1', [item.itemId]);
+      }
+    }
+
+    const { itemLines, total } = await summariseOrder(order);
+    await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
+    if (adds.length) await resetServedForAddOn(order);
+
+    if (paid) {
+      await sendTopupInvoice(customer, order, adds, addedValue);
+      return;
+    }
+    await pool.query(`update "order" set confirmed_at = null where id = $1`, [order.id]);
+    order.confirmed_at = null;
+    await sendConfirmButtons(customer, `Got it, your order:\n${itemLines.join('\n')}\nNew total: NGN ${total}.`, 'order_confirm_asked');
     return;
   }
 
@@ -3299,18 +4321,15 @@ export async function handleWebMenuOrder(customer, items) {
     order.pending_upsell_category = null;
     await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
   }
-  for (const item of adds) {
-    await pool.query('insert into order_item (order_id, product_id, quantity, price) values ($1, $2, $3, $4)', [order.id, item.productId, item.quantity, item.price]);
-  }
+  for (const item of adds) await insertWebOrderItem(order.id, item);
   for (const item of sets) {
-    await pool.query('update order_item set quantity = $1 where order_id = $2 and product_id = $3', [item.quantity, order.id, item.productId]);
+    await pool.query('update order_item set quantity = $1 where id = $2', [item.quantity, item.itemId]);
   }
   for (const item of removes) {
-    const itemId = existingIdMap.get(item.productId);
-    if (itemId) await clearPendingQuestionIfOnItem(order, itemId);
-    await pool.query('delete from order_item where order_id = $1 and product_id = $2', [order.id, item.productId]);
+    await clearPendingQuestionIfOnItem(order, item.itemId);
+    await pool.query('delete from order_item where id = $1', [item.itemId]);
   }
-  await finishItemsCollection(customer, order, 'Got it. ');
+  await finishItemsCollection(customer, order, 'Got it. ', { autoConfirm: Boolean(fulfilment) });
 }
 
 export async function handleMenuItemTap({ phoneNumber, channelId, product, channel = 'whatsapp', branchId }) {
@@ -3670,7 +4689,8 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
         // find it first.
         confirm: process.env.PUBLIC_URL ? `Confirm payment: ${process.env.PUBLIC_URL}/orders/${order.id}` : null,
       },
-      false // already sent its own ack ("Noted, I will confirm...") above
+      false, // already sent its own ack ("Noted, I will confirm...") above
+      { path: `/orders/${order.id}`, title: 'Confirm payment' }
     );
   } catch (err) {
     console.error(`Failed to download payment proof ${kind}:`, err);

@@ -24,15 +24,16 @@ import {
   magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, UPSELL_GROUPS, categoryMatchesGroup } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
+import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
 import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../engine/whatsapp-profile.js';
 import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort, deleteBestEffort } from '../engine/whatsapp-catalog.js';
 import { router as deliveryRoutes } from './delivery.js';
 import { router as voiceRoutes } from './voice.js';
-import { router as dineinRoutes, closeTableSessionIfSettled } from './dinein.js';
+import { router as dineinRoutes } from './dinein.js';
 import { encrypt } from '../lib/crypto.js';
 import { maybeDispatchOwnRiders, manuallyRingForRider } from '../engine/delivery-dispatch.js';
 import { offerBus } from '../engine/offer-bus.js';
@@ -469,16 +470,53 @@ router.get('/crm-config', async (req, res) => {
   const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
   if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
   if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
-  const { rows } = await pool.query(`select business_id, enabled from crm_config limit 1`);
-  res.json(rows[0] || { enabled: false });
+  const { rows } = await pool.query(`select business_id, enabled, birthday_prompt_enabled from crm_config limit 1`);
+  res.json(rows[0] || { enabled: false, birthday_prompt_enabled: true });
 });
 
+// Chidera, 2026-09-17: "that birthday pop up, not every restaurant needs
+// it, let it be a toogle on or off capability" -- birthdayPromptEnabled is
+// its own independent field now, not tied to CRM's own on/off. Both args
+// optional so the panel's two separate toggles (crm-mode, its own new
+// birthday-prompt-mode below) can each update just their own field without
+// clobbering the other's current value.
 router.post('/crm-config', requireEraAdmin, async (req, res) => {
+  const { enabled, birthdayPromptEnabled } = req.body;
+  const { rows } = await pool.query(
+    `insert into crm_config (business_id, enabled, birthday_prompt_enabled)
+     values ((select id from business limit 1), coalesce($1, false), coalesce($2, true))
+     on conflict (business_id) do update set
+       enabled = coalesce($1, crm_config.enabled),
+       birthday_prompt_enabled = coalesce($2, crm_config.birthday_prompt_enabled)
+     returning *`,
+    [enabled, birthdayPromptEnabled]
+  );
+  res.json(rows[0]);
+});
+
+// Chidera, 2026-09-17: "i give them 1500 free every month then they cover
+// the rest by putting money in an account... i extract it from there" --
+// ERA's own prepaid message wallet (engine/wallet.js), enabled/credited
+// ONLY from the panel side (requireEraAdmin), same "ERA switches these"
+// shape as every other add-on toggle. Deliberately no client-facing
+// self-service top-up yet -- she credits it herself once she's actually
+// received the money, outside this codebase.
+router.get('/wallet-status', requireEraAdmin, async (req, res) => {
+  res.json((await getWalletStatus()) || { enabled: false, balance_kobo: 0 });
+});
+
+router.post('/wallet-credit', requireEraAdmin, async (req, res) => {
+  const kobo = Math.round(Number(req.body?.naira) * 100);
+  if (!Number.isInteger(kobo) || kobo <= 0) return res.status(400).json({ error: 'A positive naira amount is required.' });
+  res.json(await creditWallet(kobo));
+});
+
+router.post('/wallet-mode', requireEraAdmin, async (req, res) => {
   const { enabled } = req.body;
   const { rows } = await pool.query(
-    `insert into crm_config (business_id, enabled) values ((select id from business limit 1), $1)
+    `insert into message_wallet (business_id, enabled) values ((select id from business limit 1), $1)
      on conflict (business_id) do update set enabled = excluded.enabled returning *`,
-    [enabled]
+    [Boolean(enabled)]
   );
   res.json(rows[0]);
 });
@@ -513,6 +551,56 @@ router.post('/pos-sync-config', requireEraAdmin, async (req, res) => {
 // (run once a client's real Moniepoint API access is in hand) ever calls
 // this, so a plain enable/disable click through the panel can never
 // accidentally wipe stored credentials by omitting them from the body.
+// Chidera, 2026-09-20: the real connection mechanism -- a webhook
+// subscription created through Moniepoint's own Settings UI (not the
+// API-key-based system /credentials above was built for, which never
+// actually worked) authenticates with an HMAC-SHA256 signature instead of
+// Basic auth, one secret, no Moniepoint API call needed to connect it at
+// all -- see engine/webhook-moniepoint.js's own comment for the full
+// mechanism. requireEraAdmin, same as /credentials -- POS sync stays an
+// ERA-switched add-on, not a self-service business-owner setting.
+router.post('/pos-sync-config/webhook-secret', requireEraAdmin, async (req, res) => {
+  const { secret } = req.body;
+  if (!secret) return res.status(400).json({ error: 'secret is required.' });
+  const { rows } = await pool.query(
+    `insert into pos_sync_config (business_id, enabled, provider, webhook_secret, connected_at)
+     values ((select id from business limit 1), true, 'moniepoint', $1, now())
+     on conflict (business_id) do update set webhook_secret = excluded.webhook_secret, enabled = true, connected_at = now()
+     returning business_id, enabled, provider, connected_at`,
+    [secret]
+  );
+  res.json(rows[0]);
+});
+
+// Chidera, 2026-09-21: "LET ME TRY ANOTHER ACCOUNT AND SEE IF IT WORKS" --
+// the real "POS as a Platform" API works after all, root cause of every
+// earlier "Invalid key provided" was scripts/add-pos-sync.mjs hitting the
+// wrong base URL and treating a single api_key as a bearer token directly
+// instead of exchanging clientId/clientSecret for one via POST
+// channel.moniepoint.com/v1/auth (see pos_sync_config's own schema
+// comment, and engine/moniepoint-api.js). Separate from /credentials
+// above (the old, dead single-api_key shape) -- this is the real one.
+// terminalSerial optional -- the client_id/client_secret pair alone is
+// enough to auth (engine/moniepoint-api.js), but ensureDynamicPosAccount
+// (flow.js) also needs the terminal serial to push a real one-time
+// payment request. Not required here since it's frequently sent together
+// but sometimes found/added later (the physical terminal's own sticker).
+router.post('/pos-sync-config/client-credentials', requireEraAdmin, async (req, res) => {
+  const { clientId, clientSecret, terminalSerial } = req.body;
+  if (!clientId || !clientSecret) return res.status(400).json({ error: 'clientId and clientSecret are required.' });
+  const { rows } = await pool.query(
+    `insert into pos_sync_config (business_id, enabled, provider, client_id, client_secret, terminal_serial, connected_at)
+     values ((select id from business limit 1), true, 'moniepoint', $1, $2, $3, now())
+     on conflict (business_id) do update set
+       client_id = excluded.client_id, client_secret = excluded.client_secret,
+       terminal_serial = coalesce(excluded.terminal_serial, pos_sync_config.terminal_serial),
+       enabled = true, connected_at = now()
+     returning business_id, enabled, provider, terminal_serial, connected_at`,
+    [clientId, clientSecret, terminalSerial || null]
+  );
+  res.json(rows[0]);
+});
+
 router.post('/pos-sync-config/credentials', requireEraAdmin, async (req, res) => {
   const { provider, apiKey, webhookUsername, webhookPassword } = req.body;
   if (!webhookUsername || !webhookPassword) return res.status(400).json({ error: 'webhookUsername and webhookPassword are required.' });
@@ -525,6 +613,43 @@ router.post('/pos-sync-config/credentials', requireEraAdmin, async (req, res) =>
        enabled = true, connected_at = now()
      returning business_id, enabled, provider, connected_at`,
     [provider || 'moniepoint', apiKey || null, webhookUsername, webhookPassword]
+  );
+  res.json(rows[0]);
+});
+
+// Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE
+// CLIENT DASHBOARD" -- how a business gets paid is ERA's own decision per
+// client, same as pos-sync-config just above, NOT something a business
+// owner picks in their own Settings. requireEraAdmin, above
+// router.use(requireStaffApi), for the same reason pos-sync-config is.
+// Chidera, 2026-09-21: "ISNT THERE ALREADY SPACE IN SETTING TO PUT ACCOUNT
+// NUMBER AND ALL?" -- yes, business.bank_name/bank_account_number/
+// bank_account_name (the existing "manual" proof-of-payment fields) --
+// this route only ever owns `provider`; transfer_* here is a read-only
+// join for display, same as engine/payment.js's getPaymentConfig().
+router.get('/payment-config', async (req, res) => {
+  const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
+  if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
+  if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
+  const { rows } = await pool.query(
+    `select pc.provider,
+            b.bank_name as transfer_bank_name,
+            b.bank_account_number as transfer_account_number,
+            b.bank_account_name as transfer_account_name
+     from business b
+     left join payment_config pc on pc.business_id = b.id
+     limit 1`
+  );
+  res.json(rows[0] || { provider: null, transfer_account_number: null, transfer_account_name: null, transfer_bank_name: null });
+});
+
+router.post('/payment-config', requireEraAdmin, async (req, res) => {
+  const { provider } = req.body;
+  const { rows } = await pool.query(
+    `insert into payment_config (business_id, provider) values ((select id from business limit 1), $1)
+     on conflict (business_id) do update set provider = excluded.provider
+     returning *`,
+    [provider || null]
   );
   res.json(rows[0]);
 });
@@ -752,7 +877,14 @@ router.get('/orders', async (req, res) => {
   const { rows } = await pool.query(
     `select o.*, c.name as customer_name, c.phone_number as customer_phone, c.channel as customer_channel,
             d.rider_name as rider_name,
-            (select coalesce(json_agg(json_build_object('name', p.name, 'quantity', oi.quantity)), '[]')
+            (select coalesce(json_agg(json_build_object(
+               'name', p.name, 'quantity', oi.quantity,
+               'answers', (
+                 select coalesce(json_agg(json_build_object('question', pq.question, 'answer', oa.answer) order by oa.created_at), '[]')
+                 from order_item_answer oa join product_question pq on pq.id = oa.question_id
+                 where oa.order_item_id = oi.id
+               )
+             )), '[]')
              from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
      from "order" o join customers c on c.id = o.customer_id
      left join delivery d on d.order_id = o.id
@@ -925,8 +1057,22 @@ router.get('/orders/:id', async (req, res) => {
   const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [req.params.id]);
   const order = orderRows[0];
   if (!order) return res.status(404).json({ error: 'Not found.' });
+  // Chidera, 2026-09-17: "when you ask those penne or spaghetti questions
+  // or cold or room temperature, you dont record it anywhere??" -- the
+  // answer was genuinely saved (order_item_answer, flow.js's
+  // askNextItemQuestion/its own insert), just never read back anywhere
+  // staff could see it -- captured, then invisible to whoever actually
+  // preps the order. json_agg here, not a separate query, since answers
+  // is naturally a per-item array.
   const { rows: items } = await pool.query(
-    `select oi.*, p.name from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+    `select oi.*, p.name,
+       coalesce(
+         (select json_agg(json_build_object('question', pq.question, 'answer', oa.answer) order by oa.created_at)
+          from order_item_answer oa join product_question pq on pq.id = oa.question_id
+          where oa.order_item_id = oi.id),
+         '[]'
+       ) as answers
+     from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [order.id]
   );
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
@@ -1397,13 +1543,21 @@ router.get('/catalogue/:id/questions', async (req, res) => {
   res.json(rows);
 });
 
+// options: Chidera, 2026-09-20: "should not be a text thing they should
+// pick from dropdown ... so it can be faster" -- optional; a staff member
+// leaving it blank keeps the exact same free-text question it always was.
+// Trimmed and empties dropped so a stray blank row typed in the Catalogue
+// UI never becomes a real, selectable dropdown option.
 router.post('/catalogue/:id/questions', requireStaffApi, async (req, res) => {
   const question = (req.body?.question || '').trim();
   if (!question) return res.status(400).json({ error: 'A question is required.' });
+  const options = Array.isArray(req.body?.options)
+    ? req.body.options.map((o) => String(o).trim()).filter(Boolean)
+    : [];
   const { rows: existing } = await pool.query('select coalesce(max(position), -1) as max_position from product_question where product_id = $1', [req.params.id]);
   const { rows } = await pool.query(
-    'insert into product_question (product_id, question, position) values ($1, $2, $3) returning *',
-    [req.params.id, question, existing[0].max_position + 1]
+    'insert into product_question (product_id, question, options, position) values ($1, $2, $3, $4) returning *',
+    [req.params.id, question, options.length ? options : null, existing[0].max_position + 1]
   );
   res.status(201).json(rows[0]);
 });
@@ -1602,6 +1756,45 @@ router.get('/customers', requireFullAccessApi, async (req, res) => {
   res.json(rows);
 });
 
+// How often an upsell offer actually landed. There's no explicit
+// "accepted" flag anywhere (a tapped or typed acceptance inserts an
+// order_item the exact same way any other item does -- see engine/flow.js's
+// handleUpsellListTap/handlePendingUpsell) -- so "accepted" is inferred the
+// same way nextUpsellGroup itself decides a category's already satisfied:
+// the completed order ends up containing a product whose category matches
+// the offered group's keywords. dateWhereSql/dateParams let the two
+// callers below scope this to "all time" or one calendar month without
+// duplicating the match-and-count logic itself.
+async function computeUpsellStats(dateWhereSql, dateParams) {
+  const { rows } = await pool.query(
+    `select o.upsell_offered,
+       coalesce(array_agg(distinct p.category) filter (where p.category is not null), '{}') as item_categories
+     from "order" o
+     left join order_item oi on oi.order_id = o.id
+     left join product p on p.id = oi.product_id
+     where o.status = 'completed' and o.upsell_offered != '{}' ${dateWhereSql}
+     group by o.id, o.upsell_offered`,
+    dateParams
+  );
+  let accepted = 0;
+  for (const row of rows) {
+    // Only one offer per order going forward (Chidera, 2026-09-20: "only
+    // upsell once"), but upsell_offered is still an array for older orders
+    // from before that -- the last entry is the one that was actually
+    // left standing when the order completed.
+    const key = row.upsell_offered[row.upsell_offered.length - 1];
+    const group = UPSELL_GROUPS.find((g) => g.key === key);
+    if (!group) continue;
+    if (row.item_categories.some((c) => categoryMatchesGroup(c, group.keywords))) accepted++;
+  }
+  const offered = rows.length;
+  return {
+    upsellOffered: offered,
+    upsellAccepted: accepted,
+    upsellSuccessRate: offered > 0 ? Math.round((accepted / offered) * 1000) / 10 : null,
+  };
+}
+
 // Dashboard cards/charts (Chidera, 2026-09-16, matching a client's own CRM
 // mockup) -- New = exactly 1 completed order, Repeat = 2+, VIP = top 10%
 // by total spend among customers who've ordered at least once. Retention
@@ -1611,7 +1804,7 @@ router.get('/customers', requireFullAccessApi, async (req, res) => {
 // trailing 30 days to the 30 days before that; a metric with nothing in
 // the prior window (deltaPct: null) shows as new rather than a fake "+infinity%".
 router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
-  const [totals, segments, thisMonth, lastMonth, daily] = await Promise.all([
+  const [totals, segments, thisMonth, lastMonth, daily, upsell] = await Promise.all([
     pool.query(`select count(*)::int as total_customers from customers`),
     pool.query(
       `with per_customer as (
@@ -1668,6 +1861,7 @@ router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
        group by date(completed_at)
        order by day`
     ),
+    computeUpsellStats('', []),
   ]);
 
   const s = segments.rows[0];
@@ -1690,7 +1884,246 @@ router.get('/customers/stats', requireFullAccessApi, async (req, res) => {
       revenuePct: pctChange(Number(thisMonth.rows[0].revenue), Number(lastMonth.rows[0].revenue)),
     },
     daily: daily.rows.map((r) => ({ day: r.day, newCustomers: r.new_customers, repeatCustomers: r.repeat_customers })),
+    upsellOffered: upsell.upsellOffered,
+    upsellAccepted: upsell.upsellAccepted,
+    upsellSuccessRate: upsell.upsellSuccessRate,
   });
+});
+
+// Same shape as /customers/stats above (stat cards + Customer Overview
+// chart + Customer Segments donut), scoped to one real calendar month
+// instead of all time. Chidera, 2026-09-16: "i didnt meant recent text by
+// month, i meant even revenue, retention, customers, should also be able
+// to be checked by month, customer overview and customer segment" -- the
+// plain monthly table (/customers/monthly above) covered the table view;
+// this is what lets Crm.jsx swap the stat cards/charts themselves to a
+// specific month, reusing the exact same rendering code either way.
+//
+// segments here still classify each customer by their real, all-time
+// segment (new/repeat/vip) -- there's no separate "this customer's segment
+// as of last month" concept anywhere else in this codebase, and inventing
+// one just for this view would answer a question nobody asked ("of the
+// people who bought in September, how many are VIPs overall" is the useful
+// question, not "were they a VIP specifically in September").
+router.get('/customers/monthly-stats', requireFullAccessApi, async (req, res) => {
+  const month = req.query.month; // 'YYYY-MM'
+  if (!/^\d{4}-\d{2}$/.test(month || '')) return res.status(400).json({ error: 'month must be YYYY-MM.' });
+  const start = `${month}-01`;
+
+  const [current, previous, segmentsByMonth, daily, upsell] = await Promise.all([
+    pool.query(
+      `with month_orders as (
+         select customer_id, total, completed_at,
+           row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed' and completed_at is not null
+       ),
+       per_customer as (
+         select customer_id, sum(total) as month_spend, min(order_rank) as first_rank
+         from month_orders
+         where completed_at >= $1::date and completed_at < ($1::date + interval '1 month')
+         group by customer_id
+       )
+       select
+         count(*)::int as total_customers,
+         count(*) filter (where first_rank = 1)::int as new_count,
+         count(*) filter (where first_rank > 1)::int as repeat_count,
+         coalesce(sum(month_spend), 0) as total_revenue
+       from per_customer`,
+      [start]
+    ),
+    // Preceding calendar month -- what "vs last month" compares against
+    // here, same idea as the cumulative route's trailing-30-days compare,
+    // just calendar-aligned since a specific month is already the frame.
+    pool.query(
+      `with month_orders as (
+         select customer_id, total, completed_at,
+           row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed' and completed_at is not null
+       ),
+       per_customer as (
+         select customer_id, sum(total) as month_spend, min(order_rank) as first_rank
+         from month_orders
+         where completed_at >= ($1::date - interval '1 month') and completed_at < $1::date
+         group by customer_id
+       )
+       select
+         count(*) filter (where first_rank = 1)::int as new_count,
+         coalesce(sum(month_spend), 0) as total_revenue
+       from per_customer`,
+      [start]
+    ),
+    pool.query(
+      `with all_time as (
+         select customer_id, count(*) as order_count, sum(total) as total_spend
+         from "order" where status = 'completed' and completed_at is not null
+         group by customer_id
+       ),
+       repeat_ranked as (
+         select customer_id, percent_rank() over (order by total_spend) as spend_pct_rank
+         from all_time where order_count >= 2
+       ),
+       segment as (
+         select a.customer_id,
+           case when a.order_count = 1 then 'new' when coalesce(r.spend_pct_rank, 0) >= 0.9 then 'vip' else 'repeat' end as name
+         from all_time a left join repeat_ranked r on r.customer_id = a.customer_id
+       ),
+       month_customers as (
+         select distinct customer_id from "order"
+         where status = 'completed' and completed_at >= $1::date and completed_at < ($1::date + interval '1 month')
+       )
+       select seg.name, count(*)::int as n
+       from month_customers mc join segment seg on seg.customer_id = mc.customer_id
+       group by seg.name`,
+      [start]
+    ),
+    pool.query(
+      `select date(completed_at) as day,
+         count(*) filter (where order_rank = 1)::int as new_customers,
+         count(*) filter (where order_rank > 1)::int as repeat_customers
+       from (
+         select customer_id, completed_at, row_number() over (partition by customer_id order by completed_at) as order_rank
+         from "order" where status = 'completed' and completed_at is not null
+       ) o
+       where completed_at >= $1::date and completed_at < ($1::date + interval '1 month')
+       group by date(completed_at)
+       order by day`,
+      [start]
+    ),
+    computeUpsellStats(`and o.completed_at >= $1::date and o.completed_at < ($1::date + interval '1 month')`, [start]),
+  ]);
+
+  const c = current.rows[0];
+  const p = previous.rows[0];
+  const retentionRate = c.total_customers > 0 ? Math.round((c.repeat_count / c.total_customers) * 1000) / 10 : 0;
+  const segMap = Object.fromEntries(segmentsByMonth.rows.map((r) => [r.name, r.n]));
+  const pctChange = (curr, prev) => (prev > 0 ? Math.round(((curr - prev) / prev) * 1000) / 10 : null);
+
+  res.json({
+    totalCustomers: c.total_customers,
+    repeatCustomers: c.repeat_count,
+    retentionRate,
+    totalRevenue: Number(c.total_revenue),
+    segments: { new: segMap.new || 0, repeat: segMap.repeat || 0, vip: segMap.vip || 0 },
+    deltas: {
+      newCustomersPct: pctChange(c.new_count, p.new_count),
+      revenuePct: pctChange(Number(c.total_revenue), Number(p.total_revenue)),
+    },
+    daily: daily.rows.map((r) => ({ day: r.day, newCustomers: r.new_customers, repeatCustomers: r.repeat_customers })),
+    upsellOffered: upsell.upsellOffered,
+    upsellAccepted: upsell.upsellAccepted,
+    upsellSuccessRate: upsell.upsellSuccessRate,
+  });
+});
+
+// Chidera, 2026-09-16: "let crm tab and customer tab seperate cause
+// customer can reach 2000 and make crm tab too long, so let crm only be
+// recent chat" -- CRM's own "Recent" tab (Crm.jsx), same 7-day window and
+// shape as Feedback's own Recent tab, so it stays fast regardless of how
+// large the full customer base (Customers.jsx's own /customers list) gets.
+// "Recent" here means real order activity, not a literal message log --
+// same definition the /customers/stats daily chart already uses.
+router.get('/customers/recent', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select c.id, c.name, c.phone_number, c.birthday,
+       o.order_count, o.total_spend, o.last_order_at,
+       case when o.order_count = 1 then 'new' when coalesce(r.spend_pct_rank, 0) >= 0.9 then 'vip' else 'repeat' end as segment
+     from customers c
+     join (
+       select customer_id, count(*) as order_count, sum(total) as total_spend, max(completed_at) as last_order_at
+       from "order" where status = 'completed'
+       group by customer_id
+       having max(completed_at) > now() - interval '7 days'
+     ) o on o.customer_id = c.id
+     left join (
+       select customer_id, percent_rank() over (order by total_spend) as spend_pct_rank
+       from (
+         select customer_id, sum(total) as total_spend
+         from "order" where status = 'completed'
+         group by customer_id having count(*) >= 2
+       ) repeat_spend
+     ) r on r.customer_id = c.id
+     order by o.last_order_at desc`
+  );
+  res.json(rows);
+});
+
+// CRM's "By month" list -- one row per calendar month. new_customers counts
+// each customer once, on the month of their first-ever completed order;
+// repeat_customers counts a customer at most once per month even if they
+// ordered more than once that month (order_rank > 1 marks every order
+// after their first, ever).
+//
+// completed_at is not null found live, 2026-09-16: a real completed order
+// with no completed_at set (a data gap, not something this route should
+// paper over silently) grouped into a `month: null` row, which crashed the
+// dashboard's own date formatting -- Chidera: "when i click by month on
+// crm it goes blank." Filtered out here rather than letting one bad row
+// take down the whole report; that order still exists and still counts
+// everywhere completed_at isn't the grouping key.
+router.get('/customers/monthly', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select to_char(date_trunc('month', completed_at), 'YYYY-MM') as month,
+       count(*) filter (where order_rank = 1)::int as new_customers,
+       count(distinct customer_id) filter (where order_rank > 1)::int as repeat_customers,
+       coalesce(sum(total), 0) as revenue,
+       count(*)::int as total_orders
+     from (
+       select customer_id, total, completed_at, row_number() over (partition by customer_id order by completed_at) as order_rank
+       from "order" where status = 'completed' and completed_at is not null
+     ) o
+     group by date_trunc('month', completed_at)
+     order by date_trunc('month', completed_at) desc`
+  );
+  res.json(rows);
+});
+
+// Best sellers -- which real menu items actually move, by units and by
+// revenue, so a business can see what to push/restock rather than guess.
+// month optional: omitted means all-time (cumulative), YYYY-MM scopes to
+// one calendar month, same convention as /customers/monthly-stats.
+router.get('/sales/top-products', requireFullAccessApi, async (req, res) => {
+  const month = req.query.month;
+  if (month && !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM.' });
+  const dateFilter = month ? `and o.completed_at >= $1::date and o.completed_at < ($1::date + interval '1 month')` : '';
+  const { rows } = await pool.query(
+    `select p.name, p.category, sum(oi.quantity)::int as units_sold, coalesce(sum(oi.quantity * oi.price), 0) as revenue
+     from order_item oi
+     join product p on p.id = oi.product_id
+     join "order" o on o.id = oi.order_id
+     where o.status = 'completed' ${dateFilter}
+     group by p.id, p.name, p.category
+     order by units_sold desc
+     limit 10`,
+    month ? [`${month}-01`] : []
+  );
+  res.json(rows.map((r) => ({ name: r.name, category: r.category, unitsSold: r.units_sold, revenue: Number(r.revenue) })));
+});
+
+// Best-selling days -- aggregated by day of the WEEK (Monday..Sunday), not
+// by calendar date, since "which specific date sold most" tells a business
+// nothing repeatable to act on, but "Fridays and Saturdays are our busiest"
+// tells them exactly when to staff up or run a promo. dow: Postgres's
+// extract(dow) is 0=Sunday..6=Saturday; remapped below so the response is
+// always Monday-first, the order a business actually thinks in.
+router.get('/sales/by-day-of-week', requireFullAccessApi, async (req, res) => {
+  const month = req.query.month;
+  if (month && !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM.' });
+  const dateFilter = month ? `and completed_at >= $1::date and completed_at < ($1::date + interval '1 month')` : '';
+  const { rows } = await pool.query(
+    `select extract(dow from completed_at)::int as dow, count(*)::int as order_count, coalesce(sum(total), 0) as revenue
+     from "order"
+     where status = 'completed' ${dateFilter}
+     group by dow`,
+    month ? [`${month}-01`] : []
+  );
+  const byDow = new Map(rows.map((r) => [r.dow, r]));
+  const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const ordered = DAY_NAMES.map((name, i) => {
+    const dow = (i + 1) % 7; // Monday=1 ... Saturday=6, Sunday=0
+    const row = byDow.get(dow);
+    return { day: name, orderCount: row?.order_count || 0, revenue: Number(row?.revenue || 0) };
+  });
+  res.json(ordered);
 });
 
 // Deliberately its own narrow route (one field), not folded into a
@@ -1703,6 +2136,81 @@ router.post('/customers/:id/birthday', requireEditorApi, async (req, res) => {
   const { rows } = await pool.query('update customers set birthday = $1 where id = $2 returning *', [birthday || null, req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
   res.json(rows[0]);
+});
+
+// Chidera, 2026-09-16: "delete the chat even in back end" -- a real,
+// permanent delete (not an archive/hide), for a customer who genuinely
+// shouldn't have a record left (a test conversation, a privacy request),
+// as distinct from cancelling one order (routes/api.js's /orders/:id/status
+// already does that -- staff cancel the order first, then delete the
+// customer here if the whole conversation should go too).
+//
+// requireEditorApi (owner/manager only, not PIN-tier) -- this is the one
+// genuinely irreversible write on this whole customers surface, so it gets
+// a narrower gate than birthday/export above.
+//
+// Most customer_id-referencing tables cascade through `order` already
+// (order_item, order_payment_proof, order_topup, generated_document,
+// order_feedback, delivery -- see schema.sql's own "on delete cascade" on
+// each), but four tables reference an order/voice_call/table_session
+// WITHOUT cascade (delivery_offer, delivery_assignment, callback_task,
+// waiter_call) and would otherwise block the delete with a foreign key
+// violation -- cleared explicitly, deepest-dependency-first, before the
+// order/booking/voice_call/table_session rows they point to. This is the
+// first explicit transaction in this codebase (everywhere else is plain
+// sequential pool.query calls) -- deliberate here specifically because a
+// partial delete across this many tables would be a real, hard-to-notice
+// data integrity problem, not just a UX annoyance.
+router.delete('/customers/:id', requireEditorApi, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const id = req.params.id;
+    const { rows: existing } = await client.query('select id from customers where id = $1', [id]);
+    if (!existing[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not found.' });
+    }
+    // Chidera, 2026-09-20: three real FK bugs found from one real customer
+    // ("i tried to delete the conversation... it didn't delete"), one at a
+    // time as each fix exposed the next. Same root cause every time: a
+    // dependent table has to be cleared before the row it points at can go,
+    // and several tables here reference table_session/delivery_assignment/
+    // customers with no cascade at all.
+    //   1) table_session used to be deleted BEFORE "order", but
+    //      order.session_id/table_id reference table_session/
+    //      restaurant_table with no cascade -- any customer with even one
+    //      dine-in order hit this instantly. order now goes first;
+    //      table_session (nothing left pointing at it once order is gone)
+    //      moved after.
+    //   2) rider_payout.assignment_id references delivery_assignment with
+    //      no cascade, and this route never touched rider_payout at all.
+    //   3) the retired `feedback` table (dine-in's pre-2026-09-11 rating
+    //      system, replaced by order_feedback but never dropped since its
+    //      existing rows are real history) references table_session AND
+    //      customers directly, neither with a cascade -- only matters for
+    //      a customer with old dine-in history, exactly this one.
+    await client.query(`delete from feedback where customer_id = $1`, [id]);
+    await client.query(`delete from waiter_call where session_id in (select id from table_session where customer_id = $1)`, [id]);
+    await client.query(`delete from callback_task where customer_id = $1 or call_id in (select id from voice_call where customer_id = $1)`, [id]);
+    await client.query(`delete from call_turn where call_id in (select id from voice_call where customer_id = $1)`, [id]);
+    await client.query(`delete from voice_call where customer_id = $1`, [id]);
+    await client.query(`delete from rider_payout where assignment_id in (select id from delivery_assignment where order_id in (select id from "order" where customer_id = $1))`, [id]);
+    await client.query(`delete from delivery_assignment where order_id in (select id from "order" where customer_id = $1)`, [id]);
+    await client.query(`delete from delivery_offer where order_id in (select id from "order" where customer_id = $1)`, [id]);
+    await client.query(`delete from booking where customer_id = $1`, [id]);
+    await client.query(`delete from "order" where customer_id = $1`, [id]);
+    await client.query(`delete from table_session where customer_id = $1`, [id]);
+    await client.query(`delete from message where customer_id = $1`, [id]);
+    await client.query(`delete from customers where id = $1`, [id]);
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
 });
 
 // "Able to extract their data" -- a real CSV a business owner can open in
@@ -1881,7 +2389,7 @@ router.post('/bot-states/:key/transitions', requireEraAdmin, async (req, res) =>
 
 router.get('/staff', requireFullAccessApi, async (req, res) => {
   const { rows } = await pool.query(
-    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.created_at, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
+    `select s.id, s.name, s.phone_number, s.email, s.role, s.status, s.handover_alerts, s.order_alerts, s.created_at, s.branch_id, s.auth_type, s.work_area, b.name as branch_name
      from staff s left join branch b on b.id = s.branch_id
      where $1::uuid is null or s.branch_id = $1
      order by s.created_at`,
@@ -1974,6 +2482,26 @@ router.post('/staff/:id/handover-alerts', requireEditorApi, async (req, res) => 
   }
   const { rows } = await pool.query('update staff set handover_alerts = $1 where id = $2 returning id, handover_alerts', [
     !!req.body.handover_alerts,
+    req.params.id,
+  ]);
+  res.json(rows[0]);
+});
+
+// Separate from handover-alerts above -- Chidera, 2026-09-16: "a staff
+// number should be able to get a confirmed order after paystack has
+// automatically confirmed payment on their whatsapp." Same phone-number
+// requirement and branch scoping as handover-alerts, for the same reasons.
+router.post('/staff/:id/order-alerts', requireEditorApi, async (req, res) => {
+  const { rows: existing } = await pool.query('select phone_number, branch_id from staff where id = $1', [req.params.id]);
+  if (!existing[0]) return res.status(404).json({ error: 'Staff member not found.' });
+  if (req.branchId && existing[0].branch_id !== req.branchId) {
+    return res.status(403).json({ error: 'You can only manage staff in your own branch.' });
+  }
+  if (req.body.order_alerts && !existing[0].phone_number) {
+    return res.status(400).json({ error: 'Add a phone number for this staff member first.' });
+  }
+  const { rows } = await pool.query('update staff set order_alerts = $1 where id = $2 returning id, order_alerts', [
+    !!req.body.order_alerts,
     req.params.id,
   ]);
   res.json(rows[0]);

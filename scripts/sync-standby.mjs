@@ -12,7 +12,13 @@
 
 import { execFileSync } from 'node:child_process';
 
-const STANDBY_IP = '91.99.139.215';
+// era-relay-standby was rebuilt 2026-09-21 -- the old server at
+// 91.99.139.215 no longer exists on the account (confirmed via the OCI
+// API: zero instances at that IP, and it wasn't reachable either). New
+// standby is era-standby, same free-tier size as era-demo (1 OCPU/6GB),
+// built on capacity freed up by resizing a different platform's instance
+// down to match.
+const STANDBY_IP = '145.241.193.64';
 const SSH_OPTS = ['-o', 'StrictHostKeyChecking=no'];
 
 function run(cmd, args) {

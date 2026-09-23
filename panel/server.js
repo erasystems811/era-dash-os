@@ -11,7 +11,8 @@ import { startJob, getJob, runScript } from './jobs.mjs';
 import { router as workstationRoutes } from './routes/workstation.js';
 import { router as workstationEsfRoutes } from './routes/workstation-esf.js';
 import { main as runBotHealthCheck } from '../scripts/check-bot-health.mjs';
-import { main as runBackupAllClients } from '../scripts/backup-all-clients.mjs';
+import { main as runDeepHealthCheck } from '../scripts/deep-health-check.mjs';
+import { generateSecret as generateTotpSecret, verifyTotp, otpauthUri } from './lib/totp.mjs';
 
 const MIGRATIONS_DIR = path.join(process.cwd(), '..', 'ebos-templates', 'migrations');
 // Read once at boot, not per-request -- this is a static doc, not data.
@@ -282,6 +283,164 @@ if (process.env.PANEL_DISABLE_AUTH !== '1') {
   );
 }
 
+// Second factor, on top of the password above -- Chidera, 2026-09-21:
+// "guarantee uptime" work flagged the panel login as the weakest specific
+// point (password-only, no 2FA). PANEL_2FA_ENABLED starts unset/'0'
+// deliberately: PANEL_TOTP_SECRET is generated the first time /2fa/setup
+// is opened, and enforcement only turns on once that's been added to a
+// real authenticator app and confirmed -- flipping this on blind, before
+// confirming a real code verifies, would be a self-inflicted lockout with
+// no password-reset flow to fall back on.
+//
+// Cookie is signed (HMAC over the expiry, keyed off the TOTP secret
+// itself -- one secret to manage, not two) rather than using a session
+// store, since this is a single-operator panel with no other session
+// state anywhere. Parsed by hand (no cookie-parser dependency) since this
+// is the only cookie this app ever sets or reads.
+// Reads secrets.env fresh every call rather than caching in process.env --
+// found live, 2026-09-22, the same day 2FA shipped: PANEL_USER/PASSWORD
+// and everything else this panel reads live in the systemd unit's own
+// Environment= lines, which is what actually survives a restart; this was
+// the one value set only in the CURRENT process's memory at /2fa/setup
+// time (`process.env.PANEL_TOTP_SECRET = secret`), so every restart since
+// (the loopback fix alone) silently wiped it back to undefined -- every
+// correct code failed with no visible reason, even though patchSecrets
+// had genuinely already written the real value to disk the whole time.
+function getTotpSecret() {
+  try {
+    return loadSecrets().PANEL_TOTP_SECRET || null;
+  } catch {
+    return null;
+  }
+}
+
+function totpSessionSecretKey() {
+  return crypto.createHash('sha256').update(`${getTotpSecret() || ''}:2fa-session`).digest();
+}
+
+function signTwoFaCookie(expiresAt) {
+  const sig = crypto.createHmac('sha256', totpSessionSecretKey()).update(String(expiresAt)).digest('hex');
+  return `${expiresAt}.${sig}`;
+}
+
+function verifyTwoFaCookie(value) {
+  if (!value) return false;
+  const [expiresAtStr, sig] = value.split('.');
+  const expiresAt = Number(expiresAtStr);
+  if (!expiresAt || !sig || Date.now() > expiresAt) return false;
+  const expectedSig = crypto.createHmac('sha256', totpSessionSecretKey()).update(String(expiresAt)).digest('hex');
+  return sig.length === expectedSig.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig));
+}
+
+function readCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const [k, ...rest] = part.trim().split('=');
+    if (k === name) return decodeURIComponent(rest.join('='));
+  }
+  return null;
+}
+
+const TWO_FA_SESSION_MS = 12 * 60 * 60 * 1000; // 12 hours -- re-enter the code once a work session, not every request
+
+function twoFaPage({ error, redirectTo }) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verify -- ERA Dash OS</title>
+<style>body{font-family:sans-serif;max-width:360px;margin:15vh auto;padding:0 1rem;}
+input{padding:10px;width:100%;font-size:20px;letter-spacing:4px;text-align:center;margin:10px 0;}
+button{padding:10px 20px;width:100%;font-size:15px;cursor:pointer;}
+.err{color:#b00;font-size:14px;}</style></head>
+<body><h2>Enter your 6-digit code</h2>
+${error ? `<p class="err">${esc(error)}</p>` : ''}
+<form method="POST" action="/2fa/verify">
+<input type="hidden" name="redirect" value="${esc(redirectTo || '/')}">
+<input type="text" name="code" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" autofocus required maxlength="6">
+<button type="submit">Verify</button>
+</form></body></html>`;
+}
+
+// Loopback-only automation (monitor-ebos.mjs, check-bot-health.mjs, ...)
+// calls this same panel over plain http://localhost:4100 with valid basic
+// auth but obviously no browser session -- 2FA is a second factor for a
+// human logging in, not something a local cron script can ever present.
+// Found live, 2026-09-22: enabling enforcement immediately broke
+// monitor-ebos.mjs's alerting (it got redirected to the /2fa HTML page and
+// choked trying to parse that as JSON) within the hour. Gating on the
+// request's own remote address, not a bypass header/token, since anyone
+// who can already reach loopback on this box has root anyway.
+function isLoopback(req) {
+  const addr = req.socket.remoteAddress || '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+if (process.env.PANEL_DISABLE_AUTH !== '1' && process.env.PANEL_2FA_ENABLED === '1') {
+  app.use((req, res, next) => {
+    if (isLoopback(req)) return next();
+    if (req.path === '/2fa' || req.path === '/2fa/verify' || req.path === '/2fa/setup') return next();
+    if (verifyTwoFaCookie(readCookie(req, 'era_2fa'))) return next();
+    // needs2fa: true is the signal the panel's own client-side fetch
+    // wrapper (see page()'s <script>) watches for -- a button click has
+    // nowhere on screen to type a code the way a full page load does
+    // (that gets a real redirect below), so without this a POST/click
+    // action just dead-ended with a bare, unactionable error. Found live,
+    // 2026-09-22, the day 2FA was turned on: Chidera hit exactly this on
+    // "Push code update" with no way to actually verify.
+    if (req.method !== 'GET') return res.status(403).json({ error: 'Two-factor verification required.', needs2fa: true });
+    res.redirect(`/2fa?redirect=${encodeURIComponent(req.originalUrl)}`);
+  });
+}
+
+app.get('/2fa', (req, res) => {
+  res.send(twoFaPage({ redirectTo: req.query.redirect }));
+});
+
+app.post('/2fa/verify', express.urlencoded({ extended: false }), (req, res) => {
+  const { code, redirect } = req.body;
+  const secret = getTotpSecret();
+  if (!secret || !verifyTotp(secret, code)) {
+    return res.status(401).send(twoFaPage({ error: 'Wrong or expired code -- try again.', redirectTo: redirect }));
+  }
+  const expiresAt = Date.now() + TWO_FA_SESSION_MS;
+  res.setHeader('Set-Cookie', `era_2fa=${signTwoFaCookie(expiresAt)}; HttpOnly; SameSite=Strict; Max-Age=${TWO_FA_SESSION_MS / 1000}; Path=/`);
+  res.redirect(redirect && redirect.startsWith('/') ? redirect : '/');
+});
+
+// Setup/re-view page -- generates PANEL_TOTP_SECRET the first time it's
+// opened (never overwrites an existing one, so re-opening this later
+// doesn't invalidate an authenticator app already set up), shows the
+// manual-entry key and otpauth:// URI (every authenticator app accepts
+// either scanning a QR of that URI or typing it/the key in by hand -- no
+// QR-generation library needed just to show the same string as text).
+// Reachable behind basic auth alone, deliberately, even before
+// PANEL_2FA_ENABLED is turned on -- this is how that first real code gets
+// confirmed before enforcement flips on.
+app.get('/2fa/setup', (req, res) => {
+  let secret = getTotpSecret();
+  if (!secret) {
+    secret = generateTotpSecret();
+    patchSecrets({ PANEL_TOTP_SECRET: secret });
+  }
+  const uri = otpauthUri(secret, process.env.PANEL_USER || 'admin');
+  const enabled = process.env.PANEL_2FA_ENABLED === '1';
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Two-factor setup -- ERA Dash OS</title>
+<style>body{font-family:sans-serif;max-width:520px;margin:2rem auto;padding:0 1rem;}
+code{background:#f0f0f0;padding:8px 10px;display:block;font-size:16px;letter-spacing:2px;word-break:break-all;border-radius:4px;margin:10px 0;}
+.status{padding:8px 12px;border-radius:4px;margin:10px 0;font-size:14px;}
+.on{background:#e6f4ea;color:#1a7a3d;} .off{background:#fff3cd;color:#8a5b0a;}</style></head>
+<body><h2>Two-factor authentication</h2>
+<p class="status ${enabled ? 'on' : 'off'}">${enabled ? 'Enforced -- a code is required on every login.' : 'Not enforced yet -- set up your authenticator app below, then ask to turn enforcement on.'}</p>
+<p>Add this to Google Authenticator, Authy, or any TOTP app. Scan isn't available here (no camera-facing UI), so use "enter a setup key manually":</p>
+<p><b>Account:</b> ERA Dash OS (${esc(process.env.PANEL_USER || 'admin')})</p>
+<p><b>Key:</b></p>
+<code>${esc(secret)}</code>
+<p><b>Full URI</b> (some apps accept pasting this directly):</p>
+<code>${esc(uri)}</code>
+<p>Once it's added, open <a href="/2fa">/2fa</a> in another tab and confirm a code actually verifies before enforcement is turned on.</p>
+</body></html>`);
+});
+
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -530,6 +689,11 @@ async function ebosBusinessStatus(client, hetznerToken) {
     voiceEnabled: Boolean(voiceConfig?.enabled),
     dineinEnabled: Boolean(dineinConfig?.enabled),
     crmEnabled: Boolean(crmConfig?.enabled),
+    // Chidera, 2026-09-17: "not every restaurant needs it, let it be a
+    // toogle on or off capability" -- its own field, not just CRM's.
+    // Defaults true (matches the migration's own default) so a business
+    // that never touches this toggle keeps today's behavior.
+    birthdayPromptEnabled: crmConfig?.birthday_prompt_enabled !== false,
     posSyncEnabled: Boolean(posSyncConfig?.enabled),
     posSyncConnected: Boolean(posSyncConfig?.hasWebhookCredentials),
     // Already on the registry (add-payment.mjs sets it, same field the
@@ -605,8 +769,8 @@ function businessesSection(ebosClients) {
   <div id="ebosTotals" style="margin:10px 0;font-size:14px;">Loading totals...</div>
   <button onclick="pushUpdate(null, true)" title="Rolls out the current template/dashboard code to every EBOS business at once -- secrets are read back from each server and reused, never regenerated.">Push code update to all EBOS businesses</button>
   <table>
-    <tr><th>Name</th><th>Status</th><th>AI cost (this month)</th><th>Server cost (monthly)</th><th title="Real bot errors and AI/API failures in the last hour -- not handovers or normal business activity, just signs the engine itself is broken.">Code errors (1h)</th><th>Chowdeck delivery</th><th>Own-rider delivery</th><th>Voice ordering</th><th>Dine-in</th><th>Customers</th><th>POS</th><th>Payment</th><th>Last code push</th></tr>
-    <tbody id="ebosStatusRows"><tr><td colspan="13">Loading...</td></tr></tbody>
+    <tr><th>Name</th><th>Status</th><th>AI cost (this month)</th><th>Server cost (monthly)</th><th title="Real bot errors and AI/API failures in the last hour -- not handovers or normal business activity, just signs the engine itself is broken.">Code errors (1h)</th><th>Chowdeck delivery</th><th>Own-rider delivery</th><th>Voice ordering</th><th>Dine-in</th><th>Customers</th><th title="Only matters while Customers is on -- the popup on the customer's own web menu page asking for their birthday.">Birthday pop up</th><th>POS</th><th>Payment</th><th>Last code push</th></tr>
+    <tbody id="ebosStatusRows"><tr><td colspan="14">Loading...</td></tr></tbody>
   </table>
 
   <p><a href="/monitoring">Open Bot Monitoring &rarr;</a> &mdash; the full live feed across every business, on its own page so this one stays fast as you add more businesses. "Code errors (1h)" above is still the quick at-a-glance number.</p>
@@ -625,8 +789,20 @@ function businessesSection(ebosClients) {
 
   <fieldset>
     <legend>Database backups</legend>
-    <p class="muted">Every client's database is backed up automatically once a day (pg_dump, pulled down to this server -- see README.md's "Backups" section for the restore command). Run it right now instead of waiting for tonight's automatic pass.</p>
+    <p class="muted">Every client's database is backed up automatically every 6 hours (pg_dump, pulled down to this server -- see README.md's "Backups" section for the restore command). Run it right now instead of waiting for the next automatic pass.</p>
     <button type="button" onclick="runBackupNow()">Run backup now</button>
+    <p class="muted" style="margin-top:14px;">A backup nobody's ever restored isn't verified, it's just a hope. This actually restores each client's latest backup into a disposable test database, confirms real data comes back, then discards it -- runs automatically every Sunday, or right now:</p>
+    <button type="button" onclick="verifyBackupsNow()">Verify backups now</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>Messaging cost exposure (Meta's Oct 1, 2026 per-message pricing)</legend>
+    <p class="muted">From Oct 1, every WhatsApp message a bot sends past the first 1,000/month per number stops being free -- publicly reported at roughly NGN14 each (Meta hasn't confirmed the exact rate; update PER_MESSAGE_NAIRA in routes/api.js the moment they do). This is each business's real outbound-message-per-order average over the last 30 days, and what that volume would have cost at today's rate -- not a guess.</p>
+    <button type="button" onclick="loadMessagingCost()">Check messaging cost exposure</button>
+    <table style="margin-top:10px;">
+      <tr><th>Business</th><th>Orders (30d)</th><th>Outbound WhatsApp msgs</th><th title="Total outbound WhatsApp messages divided by orders in the same window -- the number that actually explains the risk.">Avg msgs / order</th><th>Free allowance</th><th>Billable msgs</th><th>Projected cost</th></tr>
+      <tbody id="messagingCostRows"><tr><td colspan="7">Not checked yet.</td></tr></tbody>
+    </table>
   </fieldset>
 
   <fieldset>
@@ -831,12 +1007,35 @@ function page(clients, ebosClients) {
     </form>
 
     <h4>Add / update payment</h4>
+    <p class="muted">The gateway's own API keys (Flutterwave/Paystack), just credentials -- doesn't decide how THIS client actually gets paid. See "How this client gets paid" below for that.</p>
     <form id="paymentForm">
       <label>Provider</label>
       <select name="provider"><option value="flutterwave">Flutterwave</option><option value="paystack">Paystack</option></select>
       <label>Secret key</label><input name="secretKey" required>
       <label>Public key</label><input name="publicKey" required>
       <button type="submit">Add payment</button>
+    </form>
+
+    <h4>How this client gets paid</h4>
+    <p class="muted">Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE CLIENT DASHBOARD" -- ERA's own call per client, not something the business's own staff can set. POS: customer pays by transfer (a real Moniepoint transaction auto-confirms it, no staff step) or taps a card on the terminal for dine-in. Paystack: a real payment link, using the API keys above. Manual: bank details + a photo of proof. "ISNT THERE ALREADY SPACE IN SETTING TO PUT ACCOUNT NUMBER AND ALL?" -- yes: the transfer account quoted to customers is whatever bank name/account number/account name the business already has saved in their own Settings (the same fields "manual" has always used) -- nothing to duplicate here, just the provider choice. Leave provider blank to keep things exactly as they are today. <button type="button" onclick="loadPaymentConfig()">Load current</button></p>
+    <div id="paymentConfigStatus" style="margin:10px 0;"></div>
+    <form id="paymentConfigForm">
+      <label>Provider</label>
+      <select name="provider">
+        <option value="">Not set (keep current behaviour)</option>
+        <option value="pos">POS</option>
+        <option value="paystack">Paystack</option>
+        <option value="manual">Manual</option>
+      </select>
+      <button type="submit">Save</button>
+    </form>
+
+    <h4>Message wallet</h4>
+    <p class="muted">Chidera, 2026-09-17: "1500 free every month then they cover the rest by putting money in an account". Off by default -- turning it on means this business's bot stops sending any WhatsApp message the moment its balance can't cover the next one, so only flip it on once you've actually agreed this with them. <button type="button" onclick="loadWalletStatus()">Load status</button></p>
+    <div id="walletStatus" style="margin:10px 0;"></div>
+    <form id="walletCreditForm">
+      <label>Credit balance (NGN)</label><input name="naira" type="number" min="1" step="1" required>
+      <button type="submit">Add funds</button>
     </form>
 
     <h4>Environment variables</h4>
@@ -846,6 +1045,29 @@ function page(clients, ebosClients) {
       <label>Add / update (one KEY=value per line)</label>
       <textarea name="vars" rows="5" style="width:100%;font-family:monospace;font-size:13px;" placeholder="OPENAI_API_KEY=sk-...&#10;SOME_OTHER_VAR=value" required></textarea>
       <button type="submit">Set env vars</button>
+    </form>
+
+    <h4>Migrate to another server</h4>
+    <p class="muted">Moves this client's real database and secrets to a different shared server -- no fresh secrets, no empty database, no DNS change (that's the separate "Cutover" step below, only after you've checked the new deployment yourself).</p>
+    <form id="migrateForm2">
+      <label>Provider</label>
+      <select name="provider"><option value="oracle">Oracle</option><option value="hetzner">Hetzner</option></select>
+      <label>Destination</label>
+      <select name="sharedServerMode" id="migrateSharedServerMode">
+        <option value="new">New shared server</option>
+        <option value="join">Join an existing shared server</option>
+      </select>
+      <div id="migrateSharedServerIpWrap" class="hidden">
+        <label>Shared server</label>
+        <select name="sharedServerIp" id="migrateSharedServerIp"></select>
+      </div>
+      <button type="submit">Start migration</button>
+    </form>
+
+    <h4>Cutover (flips DNS + registry to the migrated server)</h4>
+    <p class="muted">Only run this after you've verified the migrated deployment works -- it flips real traffic. The old server keeps running untouched afterward, as a rollback.</p>
+    <form id="cutoverForm2">
+      <button type="submit">Cut over now</button>
     </form>
 
     <h4 class="danger">Tear down (deletes the server + repo, permanent)</h4>
@@ -859,6 +1081,28 @@ function page(clients, ebosClients) {
   <div id="log">(idle)</div>
 
 <script>
+// A page load that lacks a valid 2FA session gets a real redirect to
+// /2fa (server-side, see the app.use gate above) -- but a button click
+// (fetch, no navigation) has nowhere on screen to type a code, so the
+// server signals that case with needs2fa: true instead of just a bare
+// 403 dead end. This wraps every fetch call this whole page ever makes
+// (every button below already goes through window.fetch, none needs its
+// own change) so hitting that signal sends the browser to a real code
+// entry screen and back, instead of a silent failure with no way out.
+const _eraNativeFetch = window.fetch.bind(window);
+window.fetch = async function (...args) {
+  const res = await _eraNativeFetch(...args);
+  if (res.status === 403) {
+    const clone = res.clone();
+    let data = null;
+    try { data = await clone.json(); } catch (e) { data = null; }
+    if (data && data.needs2fa) {
+      window.location.href = "/2fa?redirect=" + encodeURIComponent(window.location.pathname + window.location.search);
+    }
+  }
+  return res;
+};
+
 let currentClient = null;
 let lastEbosStatus = [];
 const OFFBOARDING_SOP_TEXT = ${JSON.stringify(OFFBOARDING_SOP)};
@@ -1039,6 +1283,25 @@ document.getElementById('paymentForm').addEventListener('submit', (e) => {
   submitJson('/api/add-payment', { client: currentClient, provider: f.get('provider'), secretKey: f.get('secretKey'), publicKey: f.get('publicKey') });
 });
 
+async function loadPaymentConfig() {
+  const el = document.getElementById('paymentConfigStatus');
+  el.textContent = 'Loading...';
+  const res = await fetch('/api/ebos/payment-config?client=' + encodeURIComponent(currentClient));
+  const data = await res.json();
+  if (!res.ok) { el.textContent = 'Error: ' + (data.error || 'failed to load'); return; }
+  el.textContent = 'Provider: ' + (data.provider || 'not set') + (data.transfer_account_number ? ' -- transfer account on file: ' + data.transfer_bank_name + ' ' + data.transfer_account_number + ' (' + data.transfer_account_name + ')' : ' -- no transfer account saved in this business\\'s own Settings yet');
+  document.getElementById('paymentConfigForm').provider.value = data.provider || '';
+}
+
+document.getElementById('paymentConfigForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const res = await fetch('/api/ebos/payment-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: currentClient, provider: f.get('provider') }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  loadPaymentConfig();
+});
+
 async function loadEnv() {
   const el = document.getElementById('envList');
   el.textContent = 'Loading...';
@@ -1106,6 +1369,13 @@ async function runBackupNow() {
   pollJob(data.jobId);
 }
 
+async function verifyBackupsNow() {
+  const res = await fetch('/api/verify-backups-now', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  pollJob(data.jobId);
+}
+
 async function confirmDns(name) {
   const res = await fetch('/api/confirm-dns', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name }) });
   if (!res.ok) { alert('Failed to confirm'); return; }
@@ -1118,6 +1388,35 @@ document.getElementById('teardownForm').addEventListener('submit', (e) => {
   submitJson('/api/teardown', { client: currentClient, confirm: true });
 });
 
+document.getElementById('migrateSharedServerMode').addEventListener('change', async (e) => {
+  const wrap = document.getElementById('migrateSharedServerIpWrap');
+  if (e.target.value !== 'join') { wrap.classList.add('hidden'); return; }
+  wrap.classList.remove('hidden');
+  const select = document.getElementById('migrateSharedServerIp');
+  select.innerHTML = '<option>Loading...</option>';
+  const servers = await fetch('/api/workstation/shared-servers').then((r) => r.json());
+  select.innerHTML = servers.map((s) => '<option value="' + s.ip + '">' + s.ip + ' (' + s.provider + ', ' + s.clientCount + ' client(s))</option>').join('') || '<option value="">No shared servers yet</option>';
+});
+
+document.getElementById('migrateForm2').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const sharedServerMode = f.get('sharedServerMode');
+  if (!confirm('Migrate ' + currentClient + ' to a ' + (sharedServerMode === 'join' ? 'shared server (' + f.get('sharedServerIp') + ')' : 'brand new shared server') + '? This deploys a real copy of its live data -- the old server keeps running untouched until you separately cut over.')) return;
+  submitJson('/api/migrate-client', {
+    client: currentClient,
+    provider: f.get('provider'),
+    sharedServerMode,
+    sharedServerIp: f.get('sharedServerIp') || undefined,
+  });
+});
+
+document.getElementById('cutoverForm2').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (!confirm('Cut over ' + currentClient + ' now? This flips real DNS traffic to the migrated server. Only do this after you\\'ve verified it works.')) return;
+  submitJson('/api/cutover-client', { client: currentClient });
+});
+
 function escClient(value) {
   const div = document.createElement('div');
   div.textContent = value ?? '';
@@ -1126,6 +1425,38 @@ function escClient(value) {
 
 function fmtUsd(value) {
   return value == null ? '?' : '$' + Number(value).toFixed(2);
+}
+
+function fmtNaira(value) {
+  return value == null ? '?' : 'NGN' + Number(value).toLocaleString();
+}
+
+async function loadMessagingCost() {
+  const el = document.getElementById('messagingCostRows');
+  if (!el) return;
+  el.innerHTML = '<tr><td colspan="7">Checking every business live, this can take a moment...</td></tr>';
+  try {
+    const res = await fetch('/api/ebos/messaging-cost');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed to load');
+    el.innerHTML = data.length
+      ? data.map((b) =>
+          '<tr>'
+          + '<td>' + escClient(b.displayName) + '</td>'
+          + (b.error
+            ? '<td colspan="6" class="danger">Error: ' + escClient(b.error) + '</td>'
+            : '<td>' + b.orders + '</td>'
+              + '<td>' + b.outboundWhatsapp + '</td>'
+              + '<td>' + (b.avgMessagesPerOrder ?? '?') + '</td>'
+              + '<td>' + b.freeAllowance + '</td>'
+              + '<td>' + b.billableMessages + '</td>'
+              + '<td>' + (b.projectedCostNaira > 0 ? '<strong class="danger">' + fmtNaira(b.projectedCostNaira) + '</strong>' : fmtNaira(b.projectedCostNaira)) + '</td>')
+          + '</tr>'
+        ).join('')
+      : '<tr><td colspan="7">No businesses yet.</td></tr>';
+  } catch (err) {
+    el.innerHTML = '<tr><td colspan="7">Error: ' + escClient(err.message) + '</td></tr>';
+  }
 }
 
 function renderEbosTotals(data) {
@@ -1198,6 +1529,20 @@ async function toggleCrmMode(name, enabled) {
   loadEbosStatus();
 }
 
+// Chidera, 2026-09-17: "that birthday pop up, not every restaurant needs
+// it, let it be a toogle on or off capability" -- separate from CRM's own
+// toggle above, same confirm-then-call shape.
+async function toggleBirthdayPromptMode(name, enabled) {
+  if (!confirm((enabled ? 'Enable' : 'Disable') + ' the birthday pop up for ' + name + '?')) {
+    loadEbosStatus();
+    return;
+  }
+  const res = await fetch('/api/ebos/birthday-prompt-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name, enabled }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); loadEbosStatus(); return; }
+  loadEbosStatus();
+}
+
 async function togglePosSyncMode(name, enabled) {
   if (!confirm((enabled ? 'Enable' : 'Disable') + ' POS sync for ' + name + '?')) {
     loadEbosStatus();
@@ -1232,16 +1577,17 @@ async function loadEbosStatus() {
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.voiceEnabled ? 'checked' : '') + ' onchange="toggleVoiceMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.voiceEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.dineinEnabled ? 'checked' : '') + ' onchange="toggleDineinMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.dineinEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.crmEnabled ? 'checked' : '') + ' onchange="toggleCrmMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.crmEnabled ? 'on' : 'off') + '</label></td>'
+          + '<td><label><input type="checkbox" style="width:auto" ' + (b.birthdayPromptEnabled ? 'checked' : '') + ' onchange="toggleBirthdayPromptMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.birthdayPromptEnabled ? 'on' : 'off') + '</label></td>'
           + '<td><label><input type="checkbox" style="width:auto" ' + (b.posSyncEnabled ? 'checked' : '') + ' onchange="togglePosSyncMode(\\'' + escClient(b.name) + '\\', this.checked)"> ' + (b.posSyncEnabled ? 'on' : 'off') + '</label>' + (b.posSyncEnabled && !b.posSyncConnected ? ' <span class="danger" title="No Moniepoint webhook credentials set yet -- run scripts/add-pos-sync.mjs once the client has real API access.">(not connected)</span>' : '') + '</td>'
           + '<td>' + (b.paymentProvider ? escClient(b.paymentProvider) : 'no') + '</td>'
           + '<td>' + (b.lastPushedAt ? new Date(b.lastPushedAt).toLocaleString() : 'never') + '</td>'
           + '</tr>'
         ).join('')
-      : '<tr><td colspan="13">No businesses yet.</td></tr>';
+      : '<tr><td colspan="14">No businesses yet.</td></tr>';
   } catch (err) {
     const totalsEl = document.getElementById('ebosTotals');
     if (totalsEl) totalsEl.textContent = '';
-    el.innerHTML = '<tr><td colspan="13">Error: ' + escClient(err.message) + '</td></tr>';
+    el.innerHTML = '<tr><td colspan="14">Error: ' + escClient(err.message) + '</td></tr>';
   }
 }
 loadEbosStatus();
@@ -1453,6 +1799,45 @@ if (metaCredsForm) {
   });
 }
 
+async function loadWalletStatus() {
+  const el = document.getElementById('walletStatus');
+  el.textContent = 'Loading...';
+  const res = await fetch('/api/ebos/wallet-status?client=' + encodeURIComponent(currentClient));
+  const data = await res.json();
+  if (!res.ok) { el.textContent = 'Error: ' + (data.error || 'failed'); return; }
+  const enabled = Boolean(data.enabled);
+  const nairaBalance = ((data.balance_kobo || 0) / 100).toLocaleString();
+  el.innerHTML =
+    '<div>Balance: NGN ' + nairaBalance + '</div>'
+    + '<div>Free messages used this month: ' + (data.free_messages_this_month || 0) + ' / ' + (data.free_messages_per_month || 1500) + '</div>'
+    + '<label style="margin-top:6px;display:block;"><input type="checkbox" style="width:auto" ' + (enabled ? 'checked' : '') + ' onchange="toggleWalletMode(this.checked)"> Wallet enforced for this business (' + (enabled ? 'on' : 'off') + ')</label>';
+}
+
+async function toggleWalletMode(enabled) {
+  if (!confirm((enabled ? 'Enable' : 'Disable') + ' the message wallet for ' + currentClient + '? ' + (enabled ? 'Its bot will stop sending WhatsApp messages the moment its balance runs out.' : ''))) {
+    loadWalletStatus();
+    return;
+  }
+  const res = await fetch('/api/ebos/wallet-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: currentClient, enabled }) });
+  const data = await res.json();
+  if (!res.ok) alert(data.error || 'Failed');
+  loadWalletStatus();
+}
+
+document.getElementById('walletCreditForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const res = await fetch('/api/ebos/wallet-credit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client: currentClient, naira: Number(f.get('naira')) }),
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  e.target.reset();
+  loadWalletStatus();
+});
+
 async function generateConnectLink() {
   const el = document.getElementById('connectLinkResult');
   el.textContent = 'Generating...';
@@ -1557,6 +1942,27 @@ function monitoringPage(ebosClients) {
   </table>
 
 <script>
+// Same fix as the main dashboard page (see its own copy of this comment)
+// -- /monitoring is a fully separate page with its own <script>, so the
+// fetch wrapper needs its own copy here too, not just on "/". Found live,
+// 2026-09-22/23: Chidera reported Bot Monitoring "isn't working" here
+// specifically -- the backend and the data were both fine the whole time
+// (confirmed directly), the page had just silently hit the same needs2fa
+// dead end this page never knew how to handle.
+const _eraNativeFetch = window.fetch.bind(window);
+window.fetch = async function (...args) {
+  const res = await _eraNativeFetch(...args);
+  if (res.status === 403) {
+    const clone = res.clone();
+    let data = null;
+    try { data = await clone.json(); } catch (e) { data = null; }
+    if (data && data.needs2fa) {
+      window.location.href = "/2fa?redirect=" + encodeURIComponent(window.location.pathname + window.location.search);
+    }
+  }
+  return res;
+};
+
 function escClient(value) {
   const div = document.createElement('div');
   div.textContent = value ?? '';
@@ -1624,6 +2030,22 @@ app.get('/', (req, res) => {
   res.send(page(registry.clients, getEbosClients(registry)));
 });
 
+// Checks what /api/ebos/status can't: whether the shared infrastructure
+// Meta actually talks to (the control panel's own domain, wa-router) is
+// reachable, and whether each client's WABA is still subscribed to us.
+// Built 2026-09-16 after both of those broke silently -- see
+// deep-health-check.mjs's own comment for the full story. Deliberately its
+// own endpoint, not folded into /api/ebos/status, since it does real
+// SSH+Graph API calls per client and shouldn't slow down the page every
+// human dashboard load already polls that route for.
+app.get('/api/ebos/deep-health', async (req, res) => {
+  try {
+    res.json(await runDeepHealthCheck());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/ebos/status', async (req, res) => {
   const ebosClients = getEbosClients(loadRegistry());
   let hetznerToken = null;
@@ -1635,6 +2057,30 @@ app.get('/api/ebos/status', async (req, res) => {
   }
   const statuses = await Promise.all(ebosClients.map((c) => ebosBusinessStatus(c, hetznerToken)));
   res.json(statuses);
+});
+
+// Chidera, 2026-09-22: "meta will start charging 14 naira per message on
+// october first... my bot can end up texting lots of messages for just
+// one order if customer keeps typing back and forth." Pulls each
+// business's own real answer (ebos-templates/dashboard/routes/api.js's
+// GET /monitor/messaging-cost) over HTTPS, same as every other EBOS panel
+// check -- no SSH, nothing to read locally, works from wherever this
+// panel itself runs. Sorted worst-exposure-first so the businesses that
+// actually need attention aren't buried below ones that don't.
+app.get('/api/ebos/messaging-cost', async (req, res) => {
+  const ebosClients = getEbosClients(loadRegistry());
+  const results = await Promise.all(
+    ebosClients.map(async (c) => {
+      try {
+        const data = await callBusinessApi(c, '/api/monitor/messaging-cost');
+        return { client: c.name, displayName: c.displayName || c.name, ...data };
+      } catch (err) {
+        return { client: c.name, displayName: c.displayName || c.name, error: err.message };
+      }
+    })
+  );
+  results.sort((a, b) => (b.projectedCostNaira || 0) - (a.projectedCostNaira || 0));
+  res.json(results);
 });
 
 // Bot Monitoring's raw-content half -- merges every business's recent
@@ -1768,6 +2214,55 @@ app.post('/api/ebos/crm-mode', async (req, res) => {
   }
 });
 
+// Chidera, 2026-09-17: "i give them 1500 free every month then they cover
+// the rest by putting money in an account... i extract it from there" --
+// ERA's own prepaid message wallet. No self-service client-facing top-up
+// exists (or is planned yet) -- she credits it herself, manually, once
+// she's actually received the money, same reasoning as this whole section
+// being ERA-only (requireEraAdmin on the client-side routes it calls).
+app.get('/api/ebos/wallet-status', async (req, res) => {
+  try {
+    const client = ebosClientOrThrow(req.query.client);
+    res.json(await callBusinessApi(client, '/api/wallet-status', 'GET'));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/ebos/wallet-credit', async (req, res) => {
+  try {
+    const { client: name, naira } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/wallet-credit', 'POST', { naira }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/ebos/wallet-mode', async (req, res) => {
+  try {
+    const { client: name, enabled } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/wallet-mode', 'POST', { enabled: Boolean(enabled) }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-17: "that birthday pop up, not every restaurant needs
+// it, let it be a toogle on or off capability" -- same /api/crm-config
+// route as crm-mode above, just the other field (birthdayPromptEnabled
+// only, so this never touches CRM's own on/off).
+app.post('/api/ebos/birthday-prompt-mode', async (req, res) => {
+  try {
+    const { client: name, enabled } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/crm-config', 'POST', { birthdayPromptEnabled: Boolean(enabled) }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
 // POS sync add-on -- same shape as crm-mode just above. Turning this on
 // before scripts/add-pos-sync.mjs has actually registered real Moniepoint
 // webhook credentials just leaves the tab empty (no transactions synced
@@ -1777,6 +2272,67 @@ app.post('/api/ebos/pos-sync-mode', async (req, res) => {
     const { client: name, enabled } = req.body;
     const client = ebosClientOrThrow(name);
     res.json(await callBusinessApi(client, '/api/pos-sync-config', 'POST', { enabled: Boolean(enabled) }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-20: "how do we integrate the pos now" -- the real
+// connection mechanism turned out to be a webhook subscription created
+// through Moniepoint's own Settings UI (not scripts/add-pos-sync.mjs's
+// API-key system, which never actually worked), authenticated with one
+// HMAC secret instead of Basic auth credentials -- see engine/webhook-
+// moniepoint.js's own comment on era-demo for the full mechanism. This is
+// the one write this session couldn't reach directly (needs the client's
+// own ebosAdminToken, which only lives here), so it's a real, permanent
+// route -- not a one-off -- same shape as pos-sync-mode just above.
+app.post('/api/ebos/pos-sync-webhook-secret', async (req, res) => {
+  try {
+    const { client: name, secret } = req.body;
+    if (!secret) return res.status(400).json({ error: 'secret is required.' });
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/pos-sync-config/webhook-secret', 'POST', { secret }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-21: "LET ME TRY ANOTHER ACCOUNT AND SEE IF IT WORKS" --
+// the real "POS as a Platform" clientId/clientSecret pair, confirmed
+// working live (see pos_sync_config's own schema comment for the root
+// cause of every earlier "Invalid key provided"). Same shape as the
+// webhook-secret route just above.
+app.post('/api/ebos/pos-sync-client-credentials', async (req, res) => {
+  try {
+    const { client: name, clientId, clientSecret, terminalSerial } = req.body;
+    if (!clientId || !clientSecret) return res.status(400).json({ error: 'clientId and clientSecret are required.' });
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/pos-sync-config/client-credentials', 'POST', { clientId, clientSecret, terminalSerial: terminalSerial || undefined }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE
+// CLIENT DASHBOARD" -- how a business gets paid is ERA's own call per
+// client, same shape as pos-sync-mode/webhook-secret above, not a
+// business-owner Settings field. GET reads the current provider/transfer
+// details (client's own /api/payment-config now needs an ERA admin token
+// too), POST sets them.
+app.get('/api/ebos/payment-config', async (req, res) => {
+  try {
+    const client = ebosClientOrThrow(req.query.client);
+    res.json(await callBusinessApi(client, '/api/payment-config', 'GET'));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/ebos/payment-config', async (req, res) => {
+  try {
+    const { client: name, provider } = req.body;
+    const client = ebosClientOrThrow(name);
+    res.json(await callBusinessApi(client, '/api/payment-config', 'POST', { provider: provider || null }));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
@@ -2094,6 +2650,18 @@ app.post('/api/add-whatsapp', (req, res) => {
   res.json({ jobId });
 });
 
+// Self-service fix for "connected WhatsApp but no messages ever arrive" --
+// re-runs just the Meta app subscription (resubscribe-whatsapp.mjs), safe
+// to click any time without touching the client's existing phone
+// number/verify-token config. See that script's own comment for why this
+// exists as its own button instead of re-running add-whatsapp.mjs.
+app.post('/api/resubscribe-whatsapp', (req, res) => {
+  const { client } = req.body;
+  if (!client) return res.status(400).json({ error: 'client is required' });
+  const jobId = startJob('resubscribe-whatsapp.mjs', [`--client=${client}`]);
+  res.json({ jobId });
+});
+
 app.post('/api/add-instagram', (req, res) => {
   const { client, userId, token, verifyToken } = req.body;
   if (!client || !userId || !token || !verifyToken) return res.status(400).json({ error: 'missing fields' });
@@ -2168,12 +2736,22 @@ app.post('/api/sync-code', (req, res) => {
   res.json({ jobId });
 });
 
-// On-demand version of the daily backup run scheduled near the bottom of
-// this file -- same script, same job-runner mechanism as everything else
-// here, so you can actually watch a backup happen instead of waiting for
-// (or just trusting) tonight's automatic run.
+// On-demand version of the every-6-hours backup run -- scheduled on the
+// control server's own crontab now (`crontab -l`), not from inside this
+// process, so a code deploy/restart here never shifts or skips a backup
+// the way the old panel-internal setInterval did. Same script, same
+// job-runner mechanism as everything else here, so you can actually watch
+// a backup happen instead of waiting for (or just trusting) the next pass.
 app.post('/api/backup-now', (req, res) => {
   const jobId = startJob('backup-all-clients.mjs', []);
+  res.json({ jobId });
+});
+
+// Same idea, for the weekly restore-drill (verify-backups.mjs) -- also on
+// the control server's own crontab (Sundays 4am), this just lets you watch
+// one happen on demand instead of waiting for Sunday.
+app.post('/api/verify-backups-now', (req, res) => {
+  const jobId = startJob('verify-backups.mjs', []);
   res.json({ jobId });
 });
 
@@ -2195,6 +2773,29 @@ app.post('/api/teardown', (req, res) => {
   const { client, confirm } = req.body;
   if (!client || confirm !== true) return res.status(400).json({ error: 'confirmation required' });
   const jobId = startJob('teardown-client.mjs', [`--client=${client}`]);
+  res.json({ jobId });
+});
+
+// Moves a live shared-mode client's real data/secrets to a different shared
+// server -- see scripts/migrate-client.mjs's own header for exactly what
+// this does and doesn't touch (never DNS/registry -- that's cutover below,
+// a deliberate separate step after a human verifies the move worked).
+app.post('/api/migrate-client', (req, res) => {
+  const { client, provider, sharedServerMode, sharedServerIp } = req.body;
+  if (!client) return res.status(400).json({ error: 'client is required' });
+  if (sharedServerMode === 'join' && !sharedServerIp) return res.status(400).json({ error: 'Pick which shared server to join.' });
+  const args = [`--client=${client}`];
+  if (provider) args.push(`--provider=${provider}`);
+  if (sharedServerMode === 'join') args.push(`--shared-server=${sharedServerIp}`);
+  else args.push('--new-shared-server');
+  const jobId = startJob('migrate-client.mjs', args);
+  res.json({ jobId });
+});
+
+app.post('/api/cutover-client', (req, res) => {
+  const { client } = req.body;
+  if (!client) return res.status(400).json({ error: 'client is required' });
+  const jobId = startJob('cutover-client.mjs', [`--client=${client}`]);
   res.json({ jobId });
 });
 
@@ -2285,20 +2886,12 @@ if (process.env.FIXBOT_ALERTS_ENABLED === '0') {
   }, BOT_HEALTH_CHECK_INTERVAL_MS);
 }, 60_000);
 
-// Same reasoning as Bot Monitoring above, and same guard (FIXBOT_ALERTS_ENABLED=0
-// opts a panel instance -- the standby copy -- out, so it doesn't independently
-// back up every client and send duplicate failure alerts alongside the
-// primary's own run). Daily, not hourly -- see README.md's "Backups" section
-// for the restore command and what this actually covers. A longer initial
-// delay than the bot-health check (10 minutes, not 1) since this isn't
-// urgent the moment the process boots and there's no reason to compete with
-// whatever else is still starting up.
-const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-if (process.env.FIXBOT_ALERTS_ENABLED !== '0') {
-  setTimeout(() => {
-    runBackupAllClients().catch((err) => console.error('Backup run failed:', err));
-    setInterval(() => {
-      runBackupAllClients().catch((err) => console.error('Backup run failed:', err));
-    }, BACKUP_INTERVAL_MS);
-  }, 10 * 60_000);
-}
+// Chidera, 2026-09-21: "back up should be more often" -- moved OFF this
+// panel-process-internal setInterval and onto a real, fixed-time crontab
+// entry instead (every 6 hours, see the control server's own crontab --
+// `crontab -l`). The old approach's actual cadence depended entirely on
+// how long the panel process had been running without a restart, which on
+// a day with several code deploys meant backups firing 7 times in one day
+// and not at all the next -- found live checking real backup file
+// timestamps. A crontab entry fires on the wall clock regardless of how
+// many times this process itself gets redeployed and restarted.

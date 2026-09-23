@@ -4,6 +4,18 @@
 import { pool } from '../lib/db.js';
 
 const MODEL = 'claude-sonnet-5';
+// Chidera, 2026-09-16: "my ai api cost is scary o, how can i possibly make
+// it less and still be natural" -- everything in this file used Sonnet 5
+// for every call, including simple fixed-label classification (classify.js:
+// is this a greeting/order/complaint? do they want a human?) that never
+// generates a single word the customer actually reads -- only ever feeds a
+// routing decision. Haiku is dramatically cheaper and classifies a short
+// message into one of 3-4 labels just as reliably; the customer's actual
+// reply text (askText, and askJson calls that extract real order details)
+// stays on Sonnet, since that's where "natural" and "accurate" actually
+// matter. Callers opt in with useHaiku, default stays Sonnet everywhere
+// nothing changed.
+const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
 
 // Prompt caching is a pure wire-format change -- same model, same prompt
 // text, same output, just billed differently when the same prefix repeats.
@@ -30,12 +42,12 @@ function systemParam(system) {
 // only way ERA Dash OS's monitoring panel can show this business's real
 // AI cost. Logging failure must never break a customer-facing reply, so
 // this is fire-and-forget with its own try/catch, not awaited-and-thrown.
-async function logUsage(usage) {
+async function logUsage(model, usage) {
   if (!usage) return;
   try {
     await pool.query(
       `insert into ai_usage (model, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens) values ($1, $2, $3, $4, $5)`,
-      [MODEL, usage.input_tokens || 0, usage.output_tokens || 0, usage.cache_creation_input_tokens || 0, usage.cache_read_input_tokens || 0]
+      [model, usage.input_tokens || 0, usage.output_tokens || 0, usage.cache_creation_input_tokens || 0, usage.cache_read_input_tokens || 0]
     );
   } catch (err) {
     console.error('ai_usage log failed:', err.message);
@@ -68,7 +80,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function callClaude(system, userText, maxTokens, images) {
+async function callClaude(system, userText, maxTokens, images, model = MODEL) {
   // images: [{ mediaType: 'image/jpeg'|'image/png'|..., base64: '...' }] --
   // optional, for reading uploaded photo(s) (e.g. a multi-page menu) instead
   // of text. All pages go in the same call, not one call per page, so an
@@ -80,7 +92,7 @@ async function callClaude(system, userText, maxTokens, images) {
       ]
     : userText;
   const body = JSON.stringify({
-    model: MODEL,
+    model,
     max_tokens: maxTokens,
     system: systemParam(system),
     messages: [{ role: 'user', content }],
@@ -110,7 +122,7 @@ async function callClaude(system, userText, maxTokens, images) {
     }
     if (res.ok) {
       const data = await res.json();
-      await logUsage(data.usage);
+      await logUsage(model, data.usage);
       return data.content
         .filter((b) => b.type === 'text')
         .map((b) => b.text)
@@ -128,8 +140,10 @@ async function callClaude(system, userText, maxTokens, images) {
 
 // askJson: (systemPrompt, userText) => Promise<object> -- the shape
 // bot-engine/extract.js's extractField expects as its injected dependency.
-export async function askJson(systemPrompt, userText) {
-  const text = await callClaude(systemPrompt, userText, 256);
+// useHaiku: only for callers whose result never reaches the customer as
+// text (a routing label, not a reply) -- see this file's own top comment.
+export async function askJson(systemPrompt, userText, { useHaiku = false } = {}) {
+  const text = await callClaude(systemPrompt, userText, 256, undefined, useHaiku ? HAIKU_MODEL : MODEL);
   return extractJson(text);
 }
 

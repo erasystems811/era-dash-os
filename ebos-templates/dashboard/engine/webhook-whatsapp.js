@@ -156,6 +156,19 @@ router.post('/', async (req, res) => {
               // same "put the button's own title through the normal text
               // pipeline" reasoning as order_confirm_yes above.
               await handleInboundMessage({ phoneNumber: message.from, text: buttonTitle, channel: 'whatsapp', messageId: message.id, branchId });
+            } else if (buttonId === 'confirm_yes' || buttonId === 'confirm_no') {
+              // flow.js's sendYesNoConfirm (the delivery-ZONE "is that
+              // delivery to X?" confirmation) -- a completely separate
+              // button pair from order_confirm_yes/no above, never wired
+              // in here at all. Found live, 2026-09-17: "i said yes bot
+              // went silent" -- the tap arrived, matched none of the ids
+              // above, and fell straight through to the bare `continue`
+              // below with no reply and nothing logged. handleCollectFulfilment's
+              // own area_confirmed field already does real AI extraction on
+              // whatever text comes in (not a hardcoded match), so the
+              // button's own title works for both Yes and No here, same
+              // "real text pipeline" reasoning as fulfilment_delivery above.
+              await handleInboundMessage({ phoneNumber: message.from, text: buttonTitle, channel: 'whatsapp', messageId: message.id, branchId });
             }
             continue;
           }

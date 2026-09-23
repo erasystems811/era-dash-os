@@ -1,16 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useStaff, canEdit } from '../StaffContext.jsx';
 import Loading from '../components/Loading.jsx';
 
 export default function ConversationDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
+  const { staff } = useStaff();
   const [data, setData] = useState(null);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState(null);
   const [takingOver, setTakingOver] = useState(false);
   const [returningToBot, setReturningToBot] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const bottomRef = useRef(null);
 
   function load() {
@@ -50,6 +54,22 @@ export default function ConversationDetail() {
     }
   }
 
+  // Chidera, 2026-09-16: "delete the chat even in back end" -- a real,
+  // permanent delete (routes/api.js's DELETE /customers/:id), not an
+  // archive. Own-tier-gated confirm here on top of the server's own
+  // requireEditorApi, since this can't be undone once it's gone.
+  async function deleteConversation() {
+    if (!window.confirm('Permanently delete this entire conversation and customer record? This cannot be undone.')) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/customers/${id}`);
+      navigate('/conversations');
+    } catch (err) {
+      setSendError(err.message);
+      setDeleting(false);
+    }
+  }
+
   async function send(e) {
     e.preventDefault();
     if (!draft.trim()) return;
@@ -79,9 +99,16 @@ export default function ConversationDetail() {
             {customer.handover_reason ? ` — ${customer.handover_reason}` : ''}
           </p>
         </div>
-        <Link to="/conversations" className="btn secondary" style={{ padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8 }}>
-          Back
-        </Link>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {canEdit(staff) && (
+            <button className="danger secondary" onClick={deleteConversation} disabled={deleting}>
+              {deleting ? 'Deleting...' : 'Delete conversation'}
+            </button>
+          )}
+          <Link to="/conversations" className="btn secondary" style={{ padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8 }}>
+            Back
+          </Link>
+        </div>
       </div>
 
       {customer.handled_by === 'staff' && (

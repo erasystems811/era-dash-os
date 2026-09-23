@@ -204,12 +204,15 @@ a:hover {
   font-size: 27px;
   font-weight: 700;
   letter-spacing: -0.02em;
-  line-height: 1.1;
+  line-height: 1.15;
   color: #fff;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* A name that doesn't fit wraps to a second line instead of getting cut
+     off with an ellipsis (Chidera's call, 2026-09-16: "if a word cant
+     contain one line make it 2 not adding ..."). overflow-wrap so one
+     genuinely long word can still break mid-word rather than overflowing
+     the sidebar's own width. */
   max-width: 196px;
+  overflow-wrap: break-word;
 }
 /* Not sidebar-scoped -- the same accented-first-letter wordmark is reused
    in the mobile header below, which lives outside .sidebar entirely. */
@@ -338,6 +341,73 @@ a:hover {
   box-shadow: var(--shadow-md);
   padding: 20px;
   margin-bottom: 20px;
+}
+
+/* Chidera, 2026-09-16: "the birthday pop up didnt happen" -- her original
+   ask (2026-09-16, quoted where it's used) was for a real pop up; what
+   shipped was a quiet inline row easy to miss entirely while handling an
+   order. This is the actual modal that request called for. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+.modal-panel {
+  background: var(--surface, #fff);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 24px;
+  max-width: 360px;
+  width: 100%;
+}
+
+/* Shared by CRM's own stat row and Feedback's (StatCard.jsx, extracted
+   2026-09-16 specifically so both stay identical). Base sizing lives here
+   now instead of inline styles so the mobile block below can actually
+   shrink it -- an inline style attribute always wins over a class, so a
+   media query could never have overridden width/height/font-size while
+   they stayed inline. */
+.stat-card {
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.stat-card-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.stat-card-value {
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.crm-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.crm-charts-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 16px;
+  align-items: stretch;
+  margin-bottom: 20px;
+}
+/* Best Sellers / Best-Selling Days -- two same-shaped bar charts, unlike
+   Customer Overview/Segments' deliberate 2:1 split above. */
+.crm-sales-grid {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 
 table {
@@ -814,7 +884,15 @@ label {
   text-decoration: none;
   color: inherit;
   box-shadow: var(--shadow-sm);
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, outline-color 0.3s ease;
+}
+/* Chidera, 2026-09-17: "the link is meant to open the specific kanban
+   inside for that order not the pipeline surface" -- lands on the board
+   scrolled to and briefly outlined around this one card (Orders.jsx's own
+   ?order= handling), not just the board in general. */
+.docket.highlight {
+  outline: 2px solid var(--accent, #b4700f);
+  outline-offset: 2px;
 }
 .docket::before {
   content: '';
@@ -895,6 +973,54 @@ label {
   color: var(--text);
   min-width: 16px;
 }
+/* Chidera, 2026-09-20: "on the staff card let there be a clear
+   demarcation for add on, so they know what has been served and what
+   has just been added on." newBadge marks a whole line just added;
+   newPart calls out the freshly-added portion of a line that's a mix of
+   already-served + new quantity (e.g. 2 already out, 3 more just
+   ordered) -- both read at a glance against the rest of the plain list. */
+.docket ul li .new-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: var(--warn);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 4px;
+}
+.docket ul li .new-part {
+  color: var(--warn);
+  font-weight: 600;
+}
+/* Chidera, 2026-09-20: "that new sign on kanban should keep showing when
+   kanban is tapped open... a sub section of add on" -- the same served-
+   vs-new demarcation, now also on OrderDetail.jsx's own item table (the
+   page a kanban card actually opens into), not scoped to .docket so it
+   works there too. */
+.new-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: var(--warn);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 4px;
+}
+.new-part {
+  color: var(--warn);
+  font-weight: 600;
+}
+.addon-section-head td {
+  padding-top: 14px !important;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--warn);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border) !important;
+}
 .docket .foot {
   display: flex;
   align-items: center;
@@ -974,12 +1100,13 @@ label {
     font-weight: 700;
     font-size: 18px;
     letter-spacing: -0.02em;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    /* flex-shrink alone won't let ellipsis kick in -- a flex item's
-       default min-width is auto (its content's natural width), so it
-       never actually shrinks below that without this. */
+    line-height: 1.15;
+    /* A name that doesn't fit wraps to a second line instead of getting
+       cut off with an ellipsis (Chidera's call, 2026-09-16: "if a word
+       cant contain one line make it 2 not adding ..."). min-width:0 is
+       what actually lets this flex item shrink below its content's
+       natural width at all, wrap or not. */
+    overflow-wrap: break-word;
     flex: 1;
     min-width: 0;
   }
@@ -1125,6 +1252,36 @@ label {
 @keyframes loading-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* CRM's own mobile layout (Chidera, 2026-09-16: "on mobile you can reduce
+   the 4 cards and make customer overview and customer segment sit well
+   and take space since they show something"). The 4 stat cards were each
+   going full-width (auto-fit's 200px minimum doesn't leave room for 2 on
+   a phone), stacking into a tall, mostly-whitespace column before a
+   visitor ever reaches the actual charts -- 2-up plus a more compact card
+   fixes that. The charts, meanwhile, were stuck at a fixed 2fr/1fr split
+   even on a narrow screen, squeezing two real charts into slivers instead
+   of letting each have the full width it actually needs to be readable. */
+@media (max-width: 860px) {
+  .crm-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 14px;
+    gap: 6px;
+  }
+  .stat-card-icon {
+    width: 30px;
+    height: 30px;
+  }
+  .stat-card-value {
+    font-size: 20px;
+  }
+  .crm-charts-grid {
+    grid-template-columns: 1fr;
   }
 }
 

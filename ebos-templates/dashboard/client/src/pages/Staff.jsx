@@ -106,6 +106,16 @@ export default function StaffPage() {
     }
   }
 
+  async function toggleOrderAlerts(person) {
+    setError(null);
+    try {
+      await api.post(`/staff/${person.id}/order-alerts`, { order_alerts: !person.order_alerts });
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function changeBranch(person, branchId) {
     setError(null);
     try {
@@ -125,6 +135,7 @@ export default function StaffPage() {
           <h1>Roles and numbers</h1>
           <p className="subtitle">Who can log in, and what they can edit. Any unrecognised WhatsApp number is a customer.</p>
         <p className="subtitle">Turn on handover alerts for anyone who should get pinged on WhatsApp when the bot hands off a chat. When one of them replies, the others are told they've taken it over.</p>
+        <p className="subtitle">Turn on order alerts for anyone who should get pinged the moment a payment clears -- a WhatsApp message with a link straight to the orders board, no other part of the dashboard.</p>
         {showBranches && (
           <p className="subtitle">A staff member locked to a branch only ever sees that branch's own board -- no switcher, no other branch's data, anywhere in their dashboard.</p>
         )}
@@ -143,6 +154,7 @@ export default function StaffPage() {
               {dineinEnabled && <th>Work area</th>}
               <th>Status</th>
               <th>Handover alerts</th>
+              <th>Order alerts</th>
               {editable && <th></th>}
             </tr>
           </thead>
@@ -189,6 +201,22 @@ export default function StaffPage() {
                     </label>
                   ) : (
                     p.handover_alerts ? 'On' : 'Off'
+                  )}
+                </td>
+                <td>
+                  {editable ? (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400 }}>
+                      <input
+                        type="checkbox"
+                        checked={!!p.order_alerts}
+                        disabled={!p.phone_number}
+                        title={!p.phone_number ? 'Add a phone number first' : ''}
+                        onChange={() => toggleOrderAlerts(p)}
+                      />
+                      {p.order_alerts ? 'On' : 'Off'}
+                    </label>
+                  ) : (
+                    p.order_alerts ? 'On' : 'Off'
                   )}
                 </td>
                 {editable && (

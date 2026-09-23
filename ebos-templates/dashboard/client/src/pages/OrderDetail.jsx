@@ -9,19 +9,11 @@ export default function OrderDetail() {
   const { id } = useParams();
   const { staff } = useStaff();
   const [data, setData] = useState(null);
-  // CRM add-on only -- off by default, same "don't even render it" rule
-  // every other add-on in this dashboard follows.
-  const [crmEnabled, setCrmEnabled] = useState(false);
-  const [birthdayInput, setBirthdayInput] = useState('');
-  const [birthdayBusy, setBirthdayBusy] = useState(false);
 
   function load() {
     api.get(`/orders/${id}`).then(setData);
   }
   useEffect(load, [id]);
-  useEffect(() => {
-    api.get('/crm-config').then((c) => setCrmEnabled(Boolean(c?.enabled)));
-  }, []);
 
   const [overrideReason, setOverrideReason] = useState('');
   const [overrideBusy, setOverrideBusy] = useState(false);
@@ -29,23 +21,6 @@ export default function OrderDetail() {
 
   if (!data) return <Loading />;
   const { order, items, customer, topups = [], paymentProofs = [], delivery, deliveryAssignment } = data;
-
-  // Chidera, 2026-09-16: "can it be a pop up when taking orders...for
-  // customers that dont have" a birthday -- one field, right where staff
-  // are already looking while handling the order, not a separate step to
-  // remember. Skippable (canEdit staff can just ignore it) and never shown
-  // again once the customer has one on file.
-  async function saveBirthday(e) {
-    e.preventDefault();
-    if (!birthdayInput) return;
-    setBirthdayBusy(true);
-    try {
-      await api.post(`/customers/${customer.id}/birthday`, { birthday: birthdayInput });
-      load();
-    } finally {
-      setBirthdayBusy(false);
-    }
-  }
 
   async function releaseDelivery(e) {
     e.preventDefault();
@@ -101,21 +76,10 @@ export default function OrderDetail() {
         <p>
           {customer?.name || customer?.phone_number} &middot; {customer?.phone_number}
         </p>
-        <p style={{ marginBottom: crmEnabled && customer && !customer.birthday ? 12 : 0 }}>
+        <p style={{ marginBottom: 0 }}>
           Fulfilment: <strong>{order.fulfilment_type}</strong>
           {order.fulfilment_type === 'delivery' && customer?.address ? ` — ${customer.address}` : ''}
         </p>
-        {crmEnabled && customer && !customer.birthday && canEdit(staff) && (
-          <form onSubmit={saveBirthday} style={{ display: 'flex', gap: 8, alignItems: 'center', paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-            <label className="hint" style={{ margin: 0 }}>
-              No birthday on file -- ask them?
-            </label>
-            <input type="date" value={birthdayInput} onChange={(e) => setBirthdayInput(e.target.value)} style={{ width: 'auto' }} />
-            <button type="submit" className="secondary" disabled={birthdayBusy || !birthdayInput} style={{ padding: '6px 12px', fontSize: 13 }}>
-              Save
-            </button>
-          </form>
-        )}
       </div>
 
       <div className="card">
@@ -131,7 +95,18 @@ export default function OrderDetail() {
           <tbody>
             {items.map((i) => (
               <tr key={i.id}>
-                <td>{i.name}</td>
+                <td>
+                  {i.name}
+                  {i.answers?.length > 0 && (
+                    <div className="hint" style={{ marginTop: 2 }}>
+                      {i.answers.map((a, idx) => (
+                        <div key={idx}>
+                          {a.question}: <strong>{a.answer}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </td>
                 <td>{i.quantity}</td>
                 <td>{Number(i.price).toFixed(2)}</td>
               </tr>

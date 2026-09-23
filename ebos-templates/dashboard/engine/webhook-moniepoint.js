@@ -12,6 +12,7 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import { pool } from '../lib/db.js';
+import { matchPosTransactionToPayment } from './flow.js';
 
 export const router = express.Router();
 
@@ -74,12 +75,18 @@ router.post('/', async (req, res) => {
       console.error('Moniepoint webhook: could not parse transaction from payload', JSON.stringify(req.body));
       return;
     }
-    await pool.query(
+    const { rows: inserted } = await pool.query(
       `insert into pos_transaction (provider, provider_reference, amount, occurred_at, raw_payload)
        values ('moniepoint', $1, $2, $3, $4)
-       on conflict (provider, provider_reference) do nothing`,
+       on conflict (provider, provider_reference) do nothing
+       returning id`,
       [tx.reference, tx.amount, tx.occurredAt, req.body]
     );
+    // Joint dine-in, Stage 3 -- only on a genuinely NEW transaction, not a
+    // retried webhook delivery for one already logged (on conflict do
+    // nothing above returns no row for those) -- matching/auto-confirming
+    // twice for the same real payment would double-count it.
+    if (inserted.length) await matchPosTransactionToPayment(tx);
   } catch (err) {
     console.error('Moniepoint webhook processing failed:', err);
   }

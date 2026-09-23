@@ -1,6 +1,6 @@
 import express from 'express';
-import { verifyPaystackSignature, findOrderByPaymentReference } from './payment.js';
-import { completePayment } from './flow.js';
+import { verifyPaystackSignature, findOrderByPaymentReference, findTopupByPaymentReference } from './payment.js';
+import { completePayment, completeTopupPayment } from './flow.js';
 
 export const router = express.Router();
 
@@ -16,6 +16,15 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
   try {
     const event = JSON.parse(req.body.toString('utf8'));
     if (event.event !== 'charge.success') return;
+    // A topup's own reference never matches a real order row (it's keyed
+    // off order_topup.id, not order.reference) -- checked first since it's
+    // the narrower, more specific match; falls through to the main order
+    // path for every charge that was never a topup at all.
+    const topup = await findTopupByPaymentReference(event.data.reference);
+    if (topup) {
+      await completeTopupPayment(topup.id);
+      return;
+    }
     const order = await findOrderByPaymentReference(event.data.reference);
     if (order) await completePayment(order.id);
   } catch (err) {

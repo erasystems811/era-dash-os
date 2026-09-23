@@ -81,6 +81,29 @@ export function requireOracleConfig(secrets) {
 
 const CLOUD_INIT = `#!/bin/bash
 set -e
+# Oracle's stock Ubuntu image only puts the injected ssh_authorized_keys
+# on the "ubuntu" user and rejects direct root login -- every other
+# provider (Hetzner/DO) allows root out of the box, and the rest of this
+# codebase (ssh.mjs's default user, create-client.mjs/migrate-client.mjs's
+# remote commands) assumes root uniformly. Copying the key across here
+# once, at boot, keeps that assumption true instead of special-casing
+# Oracle everywhere else. Found live, 2026-09-20: a freshly created
+# instance was reachable as ubuntu but not root, and every runRemote call
+# in the actual migration failed until this was added.
+mkdir -p /root/.ssh
+cp /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys
+chmod 700 /root/.ssh
+chmod 600 /root/.ssh/authorized_keys
+# Same story for ports 80/443: Oracle's stock image ships iptables rules
+# that only ACCEPT port 22 inbound and REJECT everything else, regardless
+# of the OCI-level Security List (a separate, cloud-side firewall) already
+# allowing them. Every other provider's stock image has no such local
+# firewall. Found live, 2026-09-20: the Security List allowed 80/443 the
+# whole time -- Caddy and Let's Encrypt's HTTP-01 challenge still couldn't
+# reach the box until these were added here too.
+iptables -I INPUT -p tcp -m state --state NEW -m tcp --dport 80 -j ACCEPT
+iptables -I INPUT -p tcp -m state --state NEW -m tcp --dport 443 -j ACCEPT
+netfilter-persistent save || (mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules.v4)
 apt-get update
 apt-get install -y ca-certificates curl gnupg
 install -m 0755 -d /etc/apt/keyrings
@@ -98,10 +121,17 @@ function apiBase(region) {
 }
 
 // OCI HTTP Signatures -- builds the `Authorization` header OCI's API
-// requires on every single request. GET/DELETE sign only
-// date/(request-target)/host; a request with a body (POST) also signs
-// content-length/content-type/x-content-sha256, and needs those three
-// headers actually present on the request too, not just in the signature.
+// requires on every single request. GET signs only date/(request-target)/
+// host; anything else (POST/PUT/DELETE) also signs content-length/
+// content-type/x-content-sha256 -- and needs those three headers actually
+// present on the request too, not just in the signature -- EVEN WHEN THERE
+// IS NO REAL BODY (an instance action like ?action=STOP, or a plain
+// DELETE). Found live, 2026-09-21, resizing a real running instance:
+// omitting these for a bodyless POST gets a flat 401 "Failed to verify the
+// HTTP(S) Signature" from OCI, indistinguishable from a genuinely bad key --
+// cost real time misdiagnosing it as a credentials problem before noticing
+// the actual pattern (GET calls worked fine throughout). Signed as an empty
+// string in that case, matching what OCI itself expects to verify against.
 function signRequest(config, { method, path, host, body }) {
   const date = new Date().toUTCString();
   const requestTarget = `${method.toLowerCase()} ${path}`;
@@ -109,8 +139,8 @@ function signRequest(config, { method, path, host, body }) {
   const headerValues = { date, host };
   const extraHeaders = {};
 
-  if (body !== undefined) {
-    const bodyStr = JSON.stringify(body);
+  if (method !== 'GET') {
+    const bodyStr = body !== undefined ? JSON.stringify(body) : '';
     const contentLength = Buffer.byteLength(bodyStr).toString();
     const contentType = 'application/json';
     const sha256 = createHash('sha256').update(bodyStr).digest('base64');
@@ -131,11 +161,18 @@ function signRequest(config, { method, path, host, body }) {
 
 async function ociRequest(config, method, path, body) {
   const host = `iaas.${config.region}.oraclecloud.com`;
-  const { authHeader, date, extraHeaders } = signRequest(config, { method, path, host, body });
+  // The signed (request-target) has to be the REAL request path OCI
+  // receives -- apiBase already bakes /20160918 into the actual URL below,
+  // but this was signing the bare `path` without it, so every ociRequest
+  // call (createServer/getServer/deleteServer) always failed with "Failed
+  // to verify the HTTP(S) Signature", no matter how valid the key was.
+  // identityRequest below already got this right; this just matches it.
+  const fullPath = `/20160918${path}`;
+  const { authHeader, date, extraHeaders } = signRequest(config, { method, path: fullPath, host, body });
   const res = await fetch(`${apiBase(config.region)}${path}`, {
     method,
     headers: { Authorization: authHeader, Date: date, Host: host, ...extraHeaders },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: body !== undefined ? JSON.stringify(body) : method !== 'GET' ? '' : undefined,
   });
   if (!res.ok) throw new Error(`OCI ${method} ${path} failed: ${res.status} ${await res.text()}`);
   if (res.status === 204) return null;
@@ -219,4 +256,51 @@ export async function deleteServer(config, instanceId) {
   } catch (err) {
     if (!err.message.includes(' 404 ')) throw err;
   }
+}
+
+export async function stopServer(config, instanceId) {
+  await ociRequest(config, 'POST', `/instances/${instanceId}?action=STOP`);
+}
+
+export async function startServer(config, instanceId) {
+  await ociRequest(config, 'POST', `/instances/${instanceId}?action=START`);
+}
+
+// Changing ocpus/memoryInGBs requires the instance to be STOPPED first --
+// OCI accepts the PUT while running but the new shape never actually takes
+// effect until the next stop/start cycle, so this does the full sequence
+// itself rather than leaving a caller to discover that the hard way.
+// Found live, 2026-09-21: even after the instance reports STOPPED, a START
+// immediately after the shape PUT can 409 ("currently being modified, try
+// again later") for a few seconds while OCI finishes applying it --
+// startServer here is retried on 409 specifically, not just once.
+export async function resizeServer(config, instanceId, { ocpus, memoryInGBs }, { timeoutMs = 5 * 60 * 1000, intervalMs = 8000 } = {}) {
+  await stopServer(config, instanceId);
+  let start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const instance = await getServer(config, instanceId);
+    if (instance.lifecycleState === 'STOPPED') break;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+
+  await ociRequest(config, 'PUT', `/instances/${instanceId}`, { shapeConfig: { ocpus, memoryInGBs } });
+
+  start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      await startServer(config, instanceId);
+      break;
+    } catch (err) {
+      if (!err.message.includes(' 409 ')) throw err;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
+
+  start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const instance = await getServer(config, instanceId);
+    if (instance.lifecycleState === 'RUNNING') return instance.shapeConfig;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`OCI instance ${instanceId} did not return to RUNNING within ${timeoutMs}ms after resize`);
 }

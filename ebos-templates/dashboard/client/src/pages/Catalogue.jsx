@@ -66,6 +66,12 @@ export default function Catalogue() {
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState(EMPTY);
   const [editError, setEditError] = useState(null);
+  // Chidera, 2026-09-16: "let it never happen again" -- after finding a
+  // menu photo that displayed blurry because the source was only 225x225.
+  // Soft warning, not a block: a small/cropped photo is sometimes the only
+  // one a business has, so this flags it before it goes live rather than
+  // refusing the upload outright.
+  const [photoWarning, setPhotoWarning] = useState(null);
   // Per-item customization questions (water: room temp or cold, rice:
   // peppered or not, ...) -- opt-in per item on purpose, per Chidera
   // 2026-09-10: some restaurants want this, some don't (pre-made meals,
@@ -74,6 +80,12 @@ export default function Catalogue() {
   // context.
   const [questions, setQuestions] = useState([]);
   const [newQuestion, setNewQuestion] = useState('');
+  // Chidera, 2026-09-20: "should not be a text thing they should pick
+  // from dropdown ... so it can be faster" -- optional; typed as plain
+  // comma-separated text here (simplest input for a short list like
+  // "Cold, Room temperature"), split/trimmed before it's sent. Left blank,
+  // the question stays exactly the free-text prompt it always was.
+  const [newQuestionOptions, setNewQuestionOptions] = useState('');
   const [questionError, setQuestionError] = useState(null);
   // A combo/special offer is created here, not "marked" onto an ordinary
   // item -- Chidera 2026-09-10: "a special offer is a combo so it should
@@ -205,6 +217,7 @@ export default function Catalogue() {
       image_data_url: p.image_data_url || '',
     });
     setNewQuestion('');
+    setNewQuestionOptions('');
     api.get(`/catalogue/${p.id}/questions`).then(setQuestions);
   }
 
@@ -212,9 +225,14 @@ export default function Catalogue() {
     if (!newQuestion.trim()) return;
     setQuestionError(null);
     try {
-      const q = await api.post(`/catalogue/${productId}/questions`, { question: newQuestion.trim() });
+      const options = newQuestionOptions
+        .split(',')
+        .map((o) => o.trim())
+        .filter(Boolean);
+      const q = await api.post(`/catalogue/${productId}/questions`, { question: newQuestion.trim(), options });
       setQuestions((qs) => [...qs, q]);
       setNewQuestion('');
+      setNewQuestionOptions('');
     } catch (err) {
       // Found live, 2026-09-10: this used to fail with no feedback at all
       // on error -- looked exactly like the click did nothing, with no way
@@ -237,11 +255,15 @@ export default function Catalogue() {
     const file = e.target.files[0];
     if (!file) return;
     setter((f) => ({ ...f, image_data_url: '' }));
+    setPhotoWarning(null);
     // Compressed client-side (same fix as Settings.jsx's logo/cover photo)
     // -- a raw phone photo here hit the exact same "too large" failure,
     // just for a product photo instead of the business's own branding.
-    const dataUrl = await compressImageToDataUrl(file);
+    const { dataUrl, isLowRes } = await compressImageToDataUrl(file, { squareCrop: true });
     setter((f) => ({ ...f, image_data_url: dataUrl }));
+    if (isLowRes) {
+      setPhotoWarning('This photo is quite small -- it may look blurry on the menu. A closer, higher-resolution photo of the dish will look sharper.');
+    }
   }
 
   function cancelEdit() {
@@ -334,6 +356,7 @@ export default function Catalogue() {
                           <img src={editForm.image_data_url} alt="" style={{ height: 44, borderRadius: 4, display: 'block', marginBottom: 6 }} />
                         )}
                         <input type="file" accept="image/*" onChange={(e) => onItemPhoto(e, setEditForm)} />
+                        {photoWarning && <p className="hint" style={{ color: 'var(--warn, #b4700f)' }}>{photoWarning}</p>}
                       </div>
                     </div>
                     <div className="form-row">
@@ -372,22 +395,23 @@ export default function Catalogue() {
                         {questionError && <div className="error-banner">{questionError}</div>}
                         {questions.map((q) => (
                           <div key={q.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            <span style={{ flex: 1 }}>{q.question}</span>
+                            <span style={{ flex: 1 }}>
+                              {q.question}
+                              {q.options?.length ? (
+                                <span style={{ color: 'var(--text-muted)', fontSize: 13 }}> -- {q.options.join(', ')}</span>
+                              ) : (
+                                <span style={{ color: 'var(--text-muted)', fontSize: 13 }}> -- free text</span>
+                              )}
+                            </span>
                             <button type="button" className="danger" onClick={() => removeQuestion(q.id)}>
                               Remove
                             </button>
                           </div>
                         ))}
-                        <div style={{ display: 'flex', gap: 8 }}>
+                        <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
                           <input
                             value={newQuestion}
                             onChange={(e) => setNewQuestion(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                addQuestion(p.id);
-                              }
-                            }}
                             placeholder="e.g. Room temperature or cold?"
                             style={{ flex: 1 }}
                           />
@@ -395,6 +419,18 @@ export default function Catalogue() {
                             Add question
                           </button>
                         </div>
+                        <input
+                          value={newQuestionOptions}
+                          onChange={(e) => setNewQuestionOptions(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              addQuestion(p.id);
+                            }
+                          }}
+                          placeholder="Options, comma separated (optional) -- e.g. Cold, Room temperature -- leave blank for free text"
+                          style={{ width: '100%' }}
+                        />
                       </div>
                     </div>
                     <button onClick={() => saveEdit(p.id)} style={{ marginRight: 8 }}>
@@ -576,6 +612,7 @@ export default function Catalogue() {
                 <label>Photo</label>
                 {form.image_data_url && <img src={form.image_data_url} alt="" style={{ height: 44, borderRadius: 4, display: 'block', marginBottom: 6 }} />}
                 <input type="file" accept="image/*" onChange={(e) => onItemPhoto(e, setForm)} />
+                {photoWarning && <p className="hint" style={{ color: 'var(--warn, #b4700f)' }}>{photoWarning}</p>}
               </div>
             </div>
             <div className="form-row">

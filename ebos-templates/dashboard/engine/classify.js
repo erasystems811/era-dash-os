@@ -9,6 +9,18 @@ complaint: unhappy about something, a problem with a past order, or asking for a
 wants_human -- true only if they explicitly ask to speak to a person, false otherwise.
 Reply ONLY with JSON: {"intent": "greeting" or "enquiry" or "order" or "complaint", "wants_human": true or false}`;
 
+// Chidera, 2026-09-16/17: "my ai api cost is scary o, how can i possibly
+// make it less and still be natural" tried Haiku here for exactly this
+// reasoning -- these only ever return a routing label, never text the
+// customer sees. Reverted the same day: "i tapped yes confirm how does
+// that imply i asked for a person" -- a real customer's "Yes, confirm"
+// (confirming an order) got misread by Haiku as wanting a human and
+// handed over to staff. Tested directly against both models with the
+// exact text: Sonnet correctly says wants_human: false for "Yes, confirm"
+// and bare "Yes"; Haiku said true for both. Back on Sonnet for all three
+// -- a routing mistake this consequential (a customer silently pulled out
+// of automated handling) isn't worth the savings until Haiku's reliability
+// on this specific task can be proven, not assumed.
 export async function classifyIntent(message) {
   const result = await askJson(SYSTEM, message);
   const intent = ['greeting', 'enquiry', 'order', 'complaint'].includes(result?.intent) ? result.intent : 'enquiry';

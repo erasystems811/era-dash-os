@@ -15,6 +15,7 @@
 // order. No AI call needed to know what a tap meant, unlike a typed order.
 import { pool } from '../lib/db.js';
 import { resolveMenu } from './fields.js';
+import { getWhatsAppCredentials } from './branch-channel.js';
 
 const GRAPH_VERSION = 'v20.0';
 // WhatsApp's own hard limit for a list message: 10 rows TOTAL across every
@@ -27,15 +28,24 @@ const CATEGORY_PAGE_PREFIX = 'catpage::'; // show another page of the top-level 
 const ITEM_PAGE_PREFIX = 'itempage::'; // show another page of one category's items
 const UNCATEGORIZED = 'Menu';
 
-function creds() {
-  const phoneNumberId = process.env.META_PHONE_NUMBER_ID;
-  const accessToken = process.env.META_ACCESS_TOKEN;
+// Chidera, 2026-09-20: real bug -- every other send in this codebase
+// (whatsapp-send.js's sendWhatsApp/sendWhatsAppButtons/sendWhatsAppCtaUrl)
+// resolves credentials as `credentials?.phoneNumberId || process.env...`,
+// a specific branch's own number falling back to the single shared env-var
+// pair. This module never took a credentials param at all -- always the
+// raw env var, regardless of which branch actually owns the conversation.
+// Never actually broke anything for a single-branch business (env vars ARE
+// the right, only answer there), but a real branch_channel-connected
+// business would have silently used the wrong (or no) number.
+function creds(credentials) {
+  const phoneNumberId = credentials?.phoneNumberId || process.env.META_PHONE_NUMBER_ID;
+  const accessToken = credentials?.accessToken || process.env.META_ACCESS_TOKEN;
   if (!phoneNumberId || !accessToken) throw new Error('META_PHONE_NUMBER_ID / META_ACCESS_TOKEN not set -- WhatsApp is not connected yet.');
   return { phoneNumberId, accessToken };
 }
 
-export async function sendListMessage(to, { bodyText, buttonText, sectionTitle, rows }) {
-  const { phoneNumberId, accessToken } = creds();
+export async function sendListMessage(to, { bodyText, buttonText, sectionTitle, rows }, credentials) {
+  const { phoneNumberId, accessToken } = creds(credentials);
   const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
@@ -113,12 +123,13 @@ async function sendCategoryPage(to, page, branchId) {
     }),
     (nextPage) => ({ id: `${CATEGORY_PAGE_PREFIX}${nextPage}`, title: 'More categories', description: 'See more of the menu' })
   );
+  const credentials = await getWhatsAppCredentials(branchId);
   await sendListMessage(to, {
     bodyText: 'Here is our menu. Please choose a category to see what is available.',
     buttonText: 'View menu',
     sectionTitle: 'Categories',
     rows,
-  });
+  }, credentials);
 }
 
 async function sendCategoryItemsPage(to, category, page, branchId) {
@@ -129,12 +140,13 @@ async function sendCategoryItemsPage(to, category, page, branchId) {
     title: 'More items',
     description: `See more of ${category}`,
   }));
+  const credentials = await getWhatsAppCredentials(branchId);
   await sendListMessage(to, {
     bodyText: `${category}. Please tell me what you would like once you have had a look.`,
     buttonText: 'View items',
     sectionTitle: category,
     rows,
-  });
+  }, credentials);
   return true;
 }
 
@@ -151,7 +163,8 @@ export async function sendMenuList(to, bodyText, branchId) {
 
   if (products.length <= PAGE_SIZE) {
     const rows = products.map(toProductRow);
-    await sendListMessage(to, { bodyText, buttonText: 'View menu', sectionTitle: UNCATEGORIZED, rows });
+    const credentials = await getWhatsAppCredentials(branchId);
+    await sendListMessage(to, { bodyText, buttonText: 'View menu', sectionTitle: UNCATEGORIZED, rows }, credentials);
     return true;
   }
 

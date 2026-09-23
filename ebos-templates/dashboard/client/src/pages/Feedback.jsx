@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useScope, scopeQuery } from '../ScopeContext.jsx';
 import Loading from '../components/Loading.jsx';
+import StatCard from '../components/StatCard.jsx';
 
 // Owner/manager only (see routes/api.js's requireEditorApi on every
 // /feedback/* route -- never in PIN_NAV/IN_HOUSE_NAV, same tier as Roles
@@ -96,23 +97,53 @@ export default function Feedback() {
         </select>
       </div>
 
-      <div className="stat-row">
-        <div className="stat-card">
-          <div className="value">{avg(summary.experience)}</div>
-          <div className="label">Experience (avg)</div>
-        </div>
-        <div className="stat-card">
-          <div className="value">{avg(summary.food)}</div>
-          <div className="label">Food (avg)</div>
-        </div>
-        <div className="stat-card">
-          <div className="value">{avg(summary.service)}</div>
-          <div className="label">Service (avg)</div>
-        </div>
-        <div className="stat-card">
-          <div className="value">{summary.total}</div>
-          <div className="label">Cumulative responses</div>
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 20 }}>
+        <StatCard
+          iconBg="var(--accent-soft)"
+          iconColor="var(--accent)"
+          icon={
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 2l2.9 6.6L22 9.3l-5 4.9 1.2 6.9L12 17.8l-6.2 3.3L7 14.2 2 9.3l7.1-.7z" />
+            </svg>
+          }
+          label="Experience (avg)"
+          value={avg(summary.experience)}
+        />
+        <StatCard
+          iconBg="rgba(184, 150, 79, 0.16)"
+          iconColor="var(--gold)"
+          icon={
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 2l2.9 6.6L22 9.3l-5 4.9 1.2 6.9L12 17.8l-6.2 3.3L7 14.2 2 9.3l7.1-.7z" />
+            </svg>
+          }
+          label="Food (avg)"
+          value={avg(summary.food)}
+        />
+        <StatCard
+          iconBg="var(--success-soft)"
+          iconColor="var(--success)"
+          icon={
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 2l2.9 6.6L22 9.3l-5 4.9 1.2 6.9L12 17.8l-6.2 3.3L7 14.2 2 9.3l7.1-.7z" />
+            </svg>
+          }
+          label="Service (avg)"
+          value={avg(summary.service)}
+        />
+        <StatCard
+          iconBg="var(--success-soft)"
+          iconColor="var(--success)"
+          icon={
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+          }
+          label="Cumulative responses"
+          value={summary.total}
+        />
       </div>
 
       <div className="tab-row" style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
