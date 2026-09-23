@@ -127,6 +127,50 @@ async function main() {
   const { rows: fbMsg2 } = await pool.query(`select channel from message where customer_id = $1 and trigger = 'feedback_form_sent' order by created_at desc limit 1`, [feedbackStale.id]);
   assert(fbMsg2[0]?.channel === 'whatsapp', 'a customer who never touched web-chat still gets the real WhatsApp feedback request, unchanged');
 
+  // === Chidera, 2026-09-23: "after they name payment let feedback pop so
+  // they remain on page" -- completePayment itself now also fires
+  // sendFeedbackRequest, right alongside the payment-confirmed message,
+  // catching it while the customer is still genuinely on the page (by the
+  // time delivery/pickup actually completes, they've almost always left).
+  // The order_feedback on-conflict-do-nothing guard must make a LATER
+  // fulfilment-completion call a no-op, never a duplicate. ===
+  const feedbackAtPayment = await flow.findOrCreateCustomer({ phoneNumber: '2348012344008', channel: 'whatsapp' });
+  await pool.query('update customers set web_chat_active_at = now() where id = $1', [feedbackAtPayment.id]);
+  const { rows: fbPayOrderRows } = await pool.query(
+    `insert into "order" (customer_id, reference, fulfilment_type, total, status, payment_status, engine_state, channel)
+     values ($1, 'REF-FB-PAYMENT', 'pickup', $2, 'new', 'pending', 'confirm_payment', 'whatsapp') returning *`,
+    [feedbackAtPayment.id, total]
+  );
+  const fbPayOrder = fbPayOrderRows[0];
+  await pool.query(`insert into order_item (order_id, product_id, quantity, price) values ($1, $2, 1, $3)`, [fbPayOrder.id, product.id, product.price]);
+  await flow.completePayment(fbPayOrder.id);
+  // sendFeedbackRequest is fired fire-and-forget from inside completePayment
+  // (deliberately, same shape as delivery.js's own release-site call --
+  // never blocks the real thing completePayment is doing), so it can still
+  // be mid-flight the instant completePayment itself returns.
+  await new Promise((r) => setTimeout(r, 300));
+
+  const { rows: fbAtPaymentMsgs } = await pool.query(
+    `select channel, trigger, interactive from message where customer_id = $1 and direction = 'outbound' order by created_at`,
+    [feedbackAtPayment.id]
+  );
+  const feedbackBubble = fbAtPaymentMsgs.find((m) => m.trigger === 'feedback_form_sent');
+  assert(Boolean(feedbackBubble), 'the feedback request fires right at payment confirmation, not just at fulfilment completion');
+  assert(feedbackBubble?.channel === 'website', 'and lands as a free bubble since the customer is still genuinely on the page right now');
+  assert(feedbackBubble?.interactive?.type === 'cta_url', 'rendered as a real tappable button, same as the other feedback bubble path');
+
+  const { rows: feedbackRowCountBefore } = await pool.query(`select count(*)::int as n from order_feedback where order_id = $1`, [fbPayOrder.id]);
+  assert(feedbackRowCountBefore[0].n === 1, 'exactly one order_feedback row exists after payment');
+
+  // Simulate the order later actually completing (pickup/delivery release) --
+  // the SAME real call site (delivery.js/rider.js) that used to be the only
+  // trigger. Must be a silent no-op now, not a second real send.
+  await pool.query(`update "order" set status = 'completed', completed_at = now(), engine_state = 'completed' where id = $1`, [fbPayOrder.id]);
+  const countBeforeSecondCall = (await pool.query(`select count(*)::int as n from message where customer_id = $1 and direction = 'outbound'`, [feedbackAtPayment.id])).rows[0].n;
+  await flow.sendFeedbackRequest(fbPayOrder.id);
+  const countAfterSecondCall = (await pool.query(`select count(*)::int as n from message where customer_id = $1 and direction = 'outbound'`, [feedbackAtPayment.id])).rows[0].n;
+  assert(countAfterSecondCall === countBeforeSecondCall, 'fulfilment completion later never double-sends the feedback request that already went out at payment');
+
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);
 }

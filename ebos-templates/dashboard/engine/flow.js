@@ -3310,6 +3310,20 @@ export async function completePayment(orderId) {
   // Staff marking it completed on the dashboard (routes/api.js) is what
   // actually closes it.
 
+  // Chidera, 2026-09-23: "after they name payment let feedback pop so they
+  // remain on page" -- sendFeedbackRequest's own 3 completion sites
+  // (dine-in payment, delivery release, pickup release) all fire well
+  // after this moment, by which point an online customer has near-always
+  // left the chat page (web_chat_active_at gone stale) and it goes out as
+  // a real WhatsApp/Instagram send instead of a free bubble. Firing it
+  // here too, right alongside the payment-confirmed message itself while
+  // they're still looking at the page, catches it while free. Safe to
+  // just add, not move -- sendFeedbackRequest's own order_feedback
+  // (order_id) on-conflict-do-nothing guard means whichever call reaches
+  // it first wins and every later one is a silent no-op, so this can
+  // never double-send once fulfilment actually completes too.
+  sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
+
   // Chidera, 2026-09-16: "a staff number should be able to get a confirmed
   // order after paystack has automatically confirmed payment on their
   // whatsapp without accessing the back end... the open link will just
