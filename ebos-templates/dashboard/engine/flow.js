@@ -1667,7 +1667,7 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
 
   await transitionOrder(order, 'check_availability');
   await transitionOrder(order, 'calculate_price');
-  const { itemLines, total } = await summariseOrder(order);
+  const { itemLines, total, deliveryFee } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
   await transitionOrder(order, 'confirm_order');
 
@@ -1685,9 +1685,19 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
     return;
   }
 
+  // Chidera, 2026-09-23, live report on era-demo: "it gave me a bill of
+  // food with total of 4700 my food way 1700 but it didnt state the
+  // delivery there, one could easily misunderstand" -- deltaLines is a
+  // repeat add-on round (wasAlreadyConfirmed), reached only after the
+  // order's very first confirm -- by then fulfilment/delivery fee is
+  // usually already known, so `total` here could silently include a real
+  // delivery fee never shown. The non-deltaLines branch is the genuinely
+  // first-ever confirm, before fulfilment's even asked -- deliveryFee is
+  // always 0 there, so this line is a no-op for it, not a behavior change.
+  const deliveryFeeLine = deliveryFee > 0 ? [`Delivery fee: NGN ${deliveryFee}`] : [];
   const summary = deltaLines
-    ? [...deltaLines, `Table's total is now: NGN ${total}`].join('\n')
-    : [...itemLines, `Total: NGN ${total}`].join('\n');
+    ? [...deltaLines, ...deliveryFeeLine, `Table's total is now: NGN ${total}`].join('\n')
+    : [...itemLines, ...deliveryFeeLine, `Total: NGN ${total}`].join('\n');
   const heading = deltaLines ? 'Add on:' : 'To confirm:';
   await sendConfirmButtons(customer, `${prefix}${heading}\n${summary}`.trim(), 'order_confirm_asked');
 }
@@ -2751,7 +2761,7 @@ export async function applyOrderModifications(order, mods, { allowRemovals }, cu
     }
   }
 
-  const { itemLines, total } = await summariseOrder(order);
+  const { itemLines, total, deliveryFee } = await summariseOrder(order);
   await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
   // Chidera, 2026-09-20, real report: "after requesting payment and its
   // pending i added another water... it kept showing me old stale
@@ -2776,7 +2786,7 @@ export async function applyOrderModifications(order, mods, { allowRemovals }, cu
   // the guest had actually decided to go through with it. handleConfirmOrder
   // now calls resetServedForAddOn itself, on the real yes tap, same two-
   // step "shown, then confirmed" shape the very first round already has.
-  return { itemLines, total, addedValue };
+  return { itemLines, total, deliveryFee, addedValue };
 }
 
 // Adding items to an already-paid order gets its own, smaller invoice --
@@ -2889,8 +2899,14 @@ async function handleOrderModification(customer, order, mods) {
     if (!mods.adds.length) return;
   }
 
-  const { itemLines, total, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid }, customer);
-  const summary = itemLines.join('\n');
+  const { itemLines, total, deliveryFee, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid }, customer);
+  // Chidera, 2026-09-23, live report on era-demo: "it gave me a bill of
+  // food with total of 4700 my food way 1700 but it didnt state the
+  // delivery there, one could easily misunderstand" -- summariseOrder's
+  // own `total` has always silently included delivery_fee, this message
+  // only ever listed the items. Same fix as handleWebMenuOrder's own
+  // confirm message.
+  const summary = deliveryFee > 0 ? `${itemLines.join('\n')}\nDelivery fee: NGN ${deliveryFee}` : itemLines.join('\n');
 
   if (paid) {
     await sendTopupInvoice(customer, order, mods.adds, addedValue);
@@ -4896,7 +4912,7 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
       }
     }
 
-    const { itemLines, total } = await summariseOrder(order);
+    const { itemLines, total, deliveryFee } = await summariseOrder(order);
     await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
     // Chidera, 2026-09-20: "when an item is added, why is stale amount on
     // ready to pay still there" -- same fix as applyOrderModifications'
@@ -4913,7 +4929,19 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
     }
     await pool.query(`update "order" set confirmed_at = null where id = $1`, [order.id]);
     order.confirmed_at = null;
-    await sendConfirmButtons(customer, `Got it, your order:\n${itemLines.join('\n')}\nNew total: NGN ${total}.`, 'order_confirm_asked');
+    // Chidera, 2026-09-23, live report on era-demo: "it gave me a bill of
+    // food with total of 4700 my food way 1700 but it didnt state the
+    // delivery there, one could easily misunderstand" -- summariseOrder's
+    // own `total` has always silently included delivery_fee (itemsTotal +
+    // deliveryFee), but this message only ever listed the items, never the
+    // fee itself, so a real delivery order's total looked unexplained --
+    // items summed to less than what's actually being charged. Same
+    // structured-line convention this file already uses everywhere else
+    // (documents.js's own invoice deliveryFeeRow, completePayment's staff
+    // alert) -- only added when there actually is one, a pickup order's
+    // message is completely unaffected.
+    const deliveryFeeLine = deliveryFee > 0 ? `\nDelivery fee: NGN ${deliveryFee}` : '';
+    await sendConfirmButtons(customer, `Got it, your order:\n${itemLines.join('\n')}${deliveryFeeLine}\nNew total: NGN ${total}.`, 'order_confirm_asked');
     return;
   }
 
