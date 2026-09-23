@@ -2283,10 +2283,18 @@ export async function sendPaymentInstructions(customer, order) {
         await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
         await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
       } else if (customer.channel === 'website') {
-        // website: a document-link bubble, not a real WhatsApp document
-        // send -- the page renders a tappable "View invoice" link from
-        // interactive.url.
-        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf', interactive: { type: 'document', filename: `invoice-${order.reference}.pdf`, url: invoicePdfUrl } });
+        // website: link to the plain HTML invoice page (routes/documents.js's
+        // GET /invoice/:orderId), not the /pdf route -- the customer's
+        // already in a browser, so there's no reason to round-trip through
+        // Gotenberg (an internal docker-only service, unreachable outside
+        // the compose network) just to hand them back a page they could've
+        // viewed directly. Found live, 2026-09-23: linking to /pdf here
+        // marked invoiceSent=true unconditionally, without this try/catch
+        // ever actually rendering anything -- the button looked fine but
+        // failed the moment a customer tapped it ("the invoice link keeps
+        // not opening, an invalid link").
+        const invoiceHtmlUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
+        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice] ${invoiceHtmlUrl}`, trigger: 'invoice_pdf', interactive: { type: 'document', filename: `invoice-${order.reference}`, url: invoiceHtmlUrl } });
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `invoice-${order.reference}.pdf`, `Invoice for order ${order.reference}`);
         await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
@@ -2663,7 +2671,12 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
         await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
         await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
       } else if (customer.channel === 'website') {
-        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf', interactive: { type: 'document', filename: `topup-${order.reference}.pdf`, url: invoicePdfUrl } });
+        // Same fix as sendPaymentInstructions' website branch above -- link
+        // to the plain HTML topup invoice page, not /pdf (Gotenberg-backed,
+        // internal-only, and never actually rendered before this bubble was
+        // marked "sent").
+        const invoiceHtmlUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
+        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice] ${invoiceHtmlUrl}`, trigger: 'topup_invoice_pdf', interactive: { type: 'document', filename: `topup-${order.reference}`, url: invoiceHtmlUrl } });
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `topup-${order.reference}.pdf`, `Top-up invoice for order ${order.reference}`);
         await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });

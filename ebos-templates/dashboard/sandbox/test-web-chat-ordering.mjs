@@ -135,7 +135,17 @@ async function main() {
     `select body, trigger, interactive from message where customer_id = $1 and direction = 'outbound' and channel = 'website' order by created_at desc limit 2`,
     [customer.id]
   );
-  assert(paymentMsgs.some((m) => m.trigger === 'invoice_pdf' && m.interactive?.type === 'document'), 'the invoice is a document-link bubble, not a real WhatsApp document send');
+  const invoiceMsg = paymentMsgs.find((m) => m.trigger === 'invoice_pdf' && m.interactive?.type === 'document');
+  assert(invoiceMsg, 'the invoice is a document-link bubble, not a real WhatsApp document send');
+  // Found live, 2026-09-23: this bubble's url used to point at the /pdf
+  // route (Gotenberg-backed, internal-docker-only, never reachable from a
+  // customer's own browser) while marking itself "sent" without ever
+  // actually rendering anything -- the button looked right and failed the
+  // moment a customer tapped it. A shape-only assertion above wouldn't have
+  // caught that; this fetches the real link the button points to.
+  const invoiceLinkRes = await fetch(invoiceMsg.interactive.url);
+  assert(invoiceLinkRes.status === 200, `the invoice link the customer would actually tap must resolve (got ${invoiceLinkRes.status} for ${invoiceMsg.interactive.url})`);
+  assert(!/\/pdf$/.test(invoiceMsg.interactive.url), 'website invoice bubble must link to the plain HTML invoice page, not the Gotenberg-only /pdf route');
   assert(paymentMsgs.some((m) => /GTBank/i.test(m.body)), 'payment instructions (bank details -- this sandbox has no Paystack/POS configured) land as a website bubble');
   assert(await countOutbound(pool, customer.id, 'whatsapp') === 1, 'still exactly one real WhatsApp message all the way through payment instructions');
 
