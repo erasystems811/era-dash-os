@@ -980,6 +980,23 @@ function page(clients, ebosClients) {
       <button type="submit">Add OPay</button>
     </form>
 
+    <h4>Moniepoint POS sync -- webhook secret</h4>
+    <p class="muted">Chidera, 2026-09-24: "monify?" -- this is the real, confirmed-working mechanism (era-demo already runs on it), not scripts/add-pos-sync.mjs (its own API-key system never worked -- always "Invalid key provided"). The business owner creates a webhook subscription in their OWN Moniepoint account at atm.moniepoint.com -> Settings, pointed at <code>https://&lt;this client's subdomain&gt;/webhook/moniepoint</code>, then clicks "Re-Generate API Secret" on that subscription's own page and gives you that secret. Auto-confirms a customer's real Moniepoint transfer the instant it lands -- no staff step. <button type="button" onclick="loadPosSyncWebhookStatus()">Load current</button></p>
+    <div id="posSyncWebhookStatus" style="margin:10px 0;"></div>
+    <form id="posSyncWebhookForm">
+      <label>Webhook secret</label><input name="secret" type="password" required>
+      <button type="submit">Save</button>
+    </form>
+
+    <h4>Moniepoint POS sync -- client credentials</h4>
+    <p class="muted">Separate from the webhook secret above -- this is Moniepoint's own "POS as a Platform" clientId/clientSecret pair, needed for the dynamic account number shown on a real online order's pay page (engine/moniepoint-api.js exchanges it for a token via channel.moniepoint.com/v1/auth). Terminal serial is optional -- it's on the physical terminal's own sticker, only needed once you have it.</p>
+    <form id="posSyncCredsForm">
+      <label>Client ID</label><input name="clientId" required>
+      <label>Client secret</label><input name="clientSecret" type="password" required>
+      <label>Terminal serial (optional)</label><input name="terminalSerial">
+      <button type="submit">Save</button>
+    </form>
+
     <h4>How this client gets paid</h4>
     <p class="muted">Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE CLIENT DASHBOARD" -- ERA's own call per client, not something the business's own staff can set. POS: customer pays by transfer (a real Moniepoint transaction auto-confirms it, no staff step) or taps a card on the terminal for dine-in. Paystack: a real payment link, using the API keys above. Monnify / OPay: a dynamic bank-transfer account, auto-confirmed the same way, using each one's own credentials above -- no BVN/NIN needed. Manual: bank details + a photo of proof. "ISNT THERE ALREADY SPACE IN SETTING TO PUT ACCOUNT NUMBER AND ALL?" -- yes: the transfer account quoted to customers is whatever bank name/account number/account name the business already has saved in their own Settings (the same fields "manual" has always used) -- nothing to duplicate here, just the provider choice. Leave provider blank to keep things exactly as they are today. <button type="button" onclick="loadPaymentConfig()">Load current</button></p>
     <div id="paymentConfigStatus" style="margin:10px 0;"></div>
@@ -1265,6 +1282,52 @@ document.getElementById('opayForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
   submitJson('/api/add-payment-opay', { client: currentClient, merchantId: f.get('merchantId'), secretKey: f.get('secretKey') });
+});
+
+async function loadPosSyncWebhookStatus() {
+  const el = document.getElementById('posSyncWebhookStatus');
+  if (!el) return;
+  el.textContent = 'Loading...';
+  try {
+    const res = await fetch('/api/ebos/pos-sync-status?client=' + encodeURIComponent(currentClient));
+    const data = await res.json();
+    el.textContent = data.hasWebhookCredentials
+      ? 'connected'
+      : data.hasClientCredentials
+        ? 'client credentials set, webhook secret not set yet'
+        : 'not set yet';
+  } catch (err) {
+    el.textContent = 'error checking';
+  }
+}
+
+document.getElementById('posSyncWebhookForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const res = await fetch('/api/ebos/pos-sync-webhook-secret', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: currentClient, secret: f.get('secret') }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  e.target.reset();
+  loadPosSyncWebhookStatus();
+});
+
+document.getElementById('posSyncCredsForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const res = await fetch('/api/ebos/pos-sync-client-credentials', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client: currentClient,
+      clientId: f.get('clientId'),
+      clientSecret: f.get('clientSecret'),
+      terminalSerial: f.get('terminalSerial') || undefined,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || 'Failed'); return; }
+  e.target.reset();
+  loadPosSyncWebhookStatus();
 });
 
 async function loadPaymentConfig() {
@@ -2132,6 +2195,19 @@ app.post('/api/ebos/birthday-prompt-mode', async (req, res) => {
     const { client: name, enabled } = req.body;
     const client = ebosClientOrThrow(name);
     res.json(await callBusinessApi(client, '/api/crm-config', 'POST', { birthdayPromptEnabled: Boolean(enabled) }));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+// Chidera, 2026-09-24: "monify?" -- read side for the two forms below
+// (webhook secret / client credentials), same shape as payment-config's
+// own GET. hasWebhookCredentials/hasClientCredentials only (never the
+// actual secrets back to the browser).
+app.get('/api/ebos/pos-sync-status', async (req, res) => {
+  try {
+    const client = ebosClientOrThrow(req.query.client);
+    res.json(await callBusinessApi(client, '/api/pos-sync-config', 'GET'));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }

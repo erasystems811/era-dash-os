@@ -576,11 +576,20 @@ router.get('/pos-sync-config', async (req, res) => {
   const isEraAdmin = process.env.EBOS_ADMIN_TOKEN && req.header('x-era-admin-token') === process.env.EBOS_ADMIN_TOKEN;
   if (!isEraAdmin && !req.staff) return res.status(401).json({ error: 'Not logged in.' });
   if (!isEraAdmin && isPinTier(req.staff)) return res.status(403).json({ error: 'Not available to this account.' });
+  // Chidera, 2026-09-24: "monify?" -- was checking webhook_username, the
+  // OLD dead API-key system's own column (see the comment on the
+  // /webhook-secret route below for why that system never worked). The
+  // real, confirmed-working mechanism sets webhook_secret and/or
+  // client_id/client_secret instead -- checking those is what actually
+  // reflects whether either piece is connected.
   const { rows } = await pool.query(
-    `select business_id, enabled, provider, webhook_username is not null as "hasWebhookCredentials", connected_at
+    `select business_id, enabled, provider,
+            webhook_secret is not null as "hasWebhookCredentials",
+            client_id is not null and client_secret is not null as "hasClientCredentials",
+            terminal_serial, connected_at
      from pos_sync_config limit 1`
   );
-  res.json(rows[0] || { enabled: false, provider: 'moniepoint', hasWebhookCredentials: false, connected_at: null });
+  res.json(rows[0] || { enabled: false, provider: 'moniepoint', hasWebhookCredentials: false, hasClientCredentials: false, terminal_serial: null, connected_at: null });
 });
 
 router.post('/pos-sync-config', requireEraAdmin, async (req, res) => {
