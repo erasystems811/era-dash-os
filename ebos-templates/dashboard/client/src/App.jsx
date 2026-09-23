@@ -16,26 +16,65 @@ import PinLogin from './pages/PinLogin.jsx';
 // login wall loads on demand, one small chunk per page, shown behind the
 // same Loading spinner every page already uses for its own data fetch --
 // so a slow network now shows the same honest "loading", never blank white.
-const Orders = lazy(() => import('./pages/Orders.jsx'));
-const OrderDetail = lazy(() => import('./pages/OrderDetail.jsx'));
-const Bookings = lazy(() => import('./pages/Bookings.jsx'));
-const Catalogue = lazy(() => import('./pages/Catalogue.jsx'));
-const Branches = lazy(() => import('./pages/Branches.jsx'));
-const Conversations = lazy(() => import('./pages/Conversations.jsx'));
-const ConversationDetail = lazy(() => import('./pages/ConversationDetail.jsx'));
-const KnowledgeBase = lazy(() => import('./pages/KnowledgeBase.jsx'));
-const Documents = lazy(() => import('./pages/Documents.jsx'));
-const Staff = lazy(() => import('./pages/Staff.jsx'));
-const ActivityLog = lazy(() => import('./pages/ActivityLog.jsx'));
-const Settings = lazy(() => import('./pages/Settings.jsx'));
-const Delivery = lazy(() => import('./pages/Delivery.jsx'));
-const Voice = lazy(() => import('./pages/Voice.jsx'));
-const DineIn = lazy(() => import('./pages/DineIn.jsx'));
-const InHouse = lazy(() => import('./pages/InHouse.jsx'));
-const Feedback = lazy(() => import('./pages/Feedback.jsx'));
-const Customers = lazy(() => import('./pages/Customers.jsx'));
-const Crm = lazy(() => import('./pages/Crm.jsx'));
-const Pos = lazy(() => import('./pages/Pos.jsx'));
+//
+// Chidera, 2026-09-23: "make it work i have clients" -- a lazy-loaded
+// page's chunk occasionally failed to fetch (flaky network to the server,
+// confirmed live: the exact same file returned 500/503 intermittently
+// through a real browser while curl never once failed the same request),
+// leaving the whole dashboard blank with no obvious way back. Retries a
+// couple of times first (most blips clear within a second or two); if it's
+// still failing, one full page reload picks up a fresh index.html and
+// fresh chunk references instead of staying stuck. sessionStorage caps
+// this at one auto-reload per tab -- a chunk that's genuinely, permanently
+// gone (a stale tab left open across a real deploy) fails loudly after
+// that instead of reload-looping forever.
+function lazyWithRetry(importFn) {
+  return lazy(async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const mod = await importFn();
+        // A real success means the network's fine right now -- clear the
+        // one-reload cap so a LATER, separate chunk failure later in this
+        // same tab session still gets its own reload-recovery, instead of
+        // being permanently used up by one earlier blip.
+        sessionStorage.removeItem('era-chunk-reload-attempted');
+        return mod;
+      } catch (err) {
+        if (attempt === 3) {
+          const reloadKey = 'era-chunk-reload-attempted';
+          if (!sessionStorage.getItem(reloadKey)) {
+            sessionStorage.setItem(reloadKey, '1');
+            window.location.reload();
+            return new Promise(() => {}); // page is reloading, never resolve
+          }
+          throw err;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+      }
+    }
+  });
+}
+
+const Orders = lazyWithRetry(() => import('./pages/Orders.jsx'));
+const OrderDetail = lazyWithRetry(() => import('./pages/OrderDetail.jsx'));
+const Bookings = lazyWithRetry(() => import('./pages/Bookings.jsx'));
+const Catalogue = lazyWithRetry(() => import('./pages/Catalogue.jsx'));
+const Branches = lazyWithRetry(() => import('./pages/Branches.jsx'));
+const Conversations = lazyWithRetry(() => import('./pages/Conversations.jsx'));
+const ConversationDetail = lazyWithRetry(() => import('./pages/ConversationDetail.jsx'));
+const KnowledgeBase = lazyWithRetry(() => import('./pages/KnowledgeBase.jsx'));
+const Documents = lazyWithRetry(() => import('./pages/Documents.jsx'));
+const Staff = lazyWithRetry(() => import('./pages/Staff.jsx'));
+const ActivityLog = lazyWithRetry(() => import('./pages/ActivityLog.jsx'));
+const Settings = lazyWithRetry(() => import('./pages/Settings.jsx'));
+const Delivery = lazyWithRetry(() => import('./pages/Delivery.jsx'));
+const Voice = lazyWithRetry(() => import('./pages/Voice.jsx'));
+const DineIn = lazyWithRetry(() => import('./pages/DineIn.jsx'));
+const InHouse = lazyWithRetry(() => import('./pages/InHouse.jsx'));
+const Feedback = lazyWithRetry(() => import('./pages/Feedback.jsx'));
+const Customers = lazyWithRetry(() => import('./pages/Customers.jsx'));
+const Crm = lazyWithRetry(() => import('./pages/Crm.jsx'));
+const Pos = lazyWithRetry(() => import('./pages/Pos.jsx'));
 
 // Every path a PIN-tier (Tier 3) session is allowed to land on -- matches
 // Layout.jsx's PIN_NAV exactly. Not just a nav-hiding trick: this actually
