@@ -25,7 +25,7 @@ import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
 import { router as moniepointWebhook } from './engine/webhook-moniepoint.js';
-import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications } from './engine/flow.js';
+import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications, sweepAbandonedWebChatOrders } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -203,4 +203,13 @@ app.listen(port, () => {
   setInterval(() => {
     sweepOpeningNotifications().catch((err) => console.error('sweepOpeningNotifications failed:', err));
   }, 60_000);
+  // Web-chat abandonment nudge (Phase 2, engine/flow.js's own comment on
+  // sweepAbandonedWebChatOrders) -- checked every 5 minutes, tight enough
+  // that PAYMENT_NUDGE_MINUTES (20) actually means 20-25 minutes in
+  // practice, not "sometime in the next hour" the way closeStaleOrders'
+  // own interval would make it. Same inert-until-needed shape as every
+  // other sweep here -- a single cheap read, a no-op most ticks.
+  setInterval(() => {
+    sweepAbandonedWebChatOrders().catch((err) => console.error('sweepAbandonedWebChatOrders failed:', err));
+  }, 5 * 60_000);
 });

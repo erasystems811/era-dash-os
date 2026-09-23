@@ -2538,6 +2538,18 @@ async function handleWaitingOnPayment(customer, order, text) {
     await reply(customer, `Still waiting on your payment, I'll confirm as soon as it comes through.`, 'payment_wait_ack');
     return;
   }
+  await sendPaymentReminder(customer, order);
+}
+
+// Extracted from handleWaitingOnPayment above -- the actual "here's how to
+// pay, again" send, shared with sweepAbandonedWebChatOrders below (the
+// abandonment nudge, Phase 2 of the web-chat feature). Caller's job to
+// check order.payment_reminder_sent_at first: handleWaitingOnPayment only
+// gets here once, right after its own check; the sweep's own SQL query
+// already filters to payment_reminder_sent_at is null, so it's never
+// re-checked here -- one source of truth for "has this order's ONE
+// reminder already gone out," never two competing guards.
+async function sendPaymentReminder(customer, order) {
   await pool.query(`update "order" set payment_reminder_sent_at = now() where id = $1`, [order.id]);
 
   // Same buildPayLine as sendPaymentInstructions -- this is the same
@@ -2551,6 +2563,53 @@ async function handleWaitingOnPayment(customer, order, text) {
     await reply(customer, payLine, 'payment_reminder');
   }
   if (needsHandover) await handover(customer, 'Customer waiting on payment but no payment link/bank details are available', null, false);
+}
+
+// Phase 2 of the web-chat feature: on plain WhatsApp, a customer left
+// sitting at confirm_payment naturally re-engages by texting something
+// (even just "okay"), which is what actually triggers handleWaitingOnPayment
+// above -- pure silence gets pure silence forever, nobody's ever proactively
+// re-pinged. That's the one real gap the web-chat page makes worse, not
+// better: a customer who taps "Ready to pay?", opens the pay page, then
+// just closes the tab without ever typing anything back has no way to
+// trigger a reminder at all. This is the proactive counterpart --
+// PAYMENT_NUDGE_MINUTES of real silence (order.updated_at, same staleness
+// signal closeStaleOrders already uses) triggers exactly ONE real WhatsApp/
+// Instagram nudge, reusing sendPaymentReminder's own payment_reminder_sent_at
+// guard so this and a customer's own later message can never double-send.
+// Skips anyone whose web_chat_active_at is still fresh -- they're looking
+// at the "Ready to pay?" bubble right now, a real WhatsApp ping on top of
+// that would be the exact unwanted extra message this whole feature exists
+// to avoid, not a safety net. dinein is deliberately excluded (order.channel
+// in ('whatsapp','instagram') only) -- a table still physically at the
+// restaurant isn't "abandoned" the same way, and dine-in's own payment flow
+// is staff-mediated, not this reminder's concern.
+const PAYMENT_NUDGE_MINUTES = 20;
+const WEB_CHAT_ACTIVE_WINDOW_MINUTES = 30;
+
+export async function sweepAbandonedWebChatOrders() {
+  const { rows: candidates } = await pool.query(
+    `select o.* from "order" o
+     join customers c on c.id = o.customer_id
+     where o.engine_state = 'confirm_payment'
+       and o.payment_status = 'pending'
+       and o.payment_reminder_sent_at is null
+       and o.channel in ('whatsapp', 'instagram')
+       and o.updated_at < now() - make_interval(mins => $1)
+       and (c.web_chat_active_at is null or c.web_chat_active_at < now() - make_interval(mins => $2))`,
+    [PAYMENT_NUDGE_MINUTES, WEB_CHAT_ACTIVE_WINDOW_MINUTES]
+  );
+  for (const order of candidates) {
+    const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+    const customer = customerRows[0];
+    if (!customer) continue;
+    try {
+      await sendPaymentReminder(customer, order);
+    } catch (err) {
+      console.error(`Abandonment nudge failed for order ${order.id}:`, err);
+    }
+  }
+  if (candidates.length) console.log(`Sent ${candidates.length} abandonment nudge(s).`);
 }
 
 // Reviewing an order isn't a one-shot thing -- "add a chapman" or "remove
@@ -4118,12 +4177,25 @@ export async function sendFeedbackRequest(orderId) {
   if (!order) return;
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
   const customer = customerRows[0];
+  // Same no-live-request gap as completePayment above -- this fires from
+  // dine-in's own payment completion, a rider's delivery release, or a
+  // pickup release, none of which have a live customer object to flip.
+  // web_chat_active_at fresh (customer was on the chat page recently, e.g.
+  // dine-in feedback fires the instant payment confirms, or an online
+  // customer still tracking delivery) means the request becomes a bubble
+  // instead of a real send; stale or never-set falls through to the real
+  // WhatsApp/Instagram channel below exactly as before -- a customer whose
+  // order was delivered hours ago has long since left the page, and real
+  // WhatsApp is the right way to reach them for this, not a dead tab.
+  if (customer && customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(Date.now() - 30 * 60 * 1000)) {
+    customer.channel = 'website';
+  }
   // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
   // catch up to our current state" -- this used to flatly skip Instagram
   // (no feedback request ever sent), the one deliberate WhatsApp-only
   // gate left after fixing the actual ordering-flow gaps (menu link,
   // POS payment) -- same plain-text-link fallback as everywhere else now.
-  if (!customer || (customer.channel !== 'whatsapp' && customer.channel !== 'instagram')) return;
+  if (!customer || !['whatsapp', 'instagram', 'website'].includes(customer.channel)) return;
   const { rows: inserted } = await pool.query(
     `insert into order_feedback (order_id, branch_id, customer_id, channel)
      values ($1, $2, $3, $4) on conflict (order_id) do nothing returning id`,
@@ -4131,6 +4203,10 @@ export async function sendFeedbackRequest(orderId) {
   );
   if (!inserted.length) return; // already sent for this order
   const url = `${process.env.PUBLIC_URL}/f/${inserted[0].id}`;
+  if (customer.channel === 'website') {
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `How was your order? Tap below to rate it, takes 10 seconds.\n[feedback form sent: ${url}]`, trigger: 'feedback_form_sent', interactive: { type: 'cta_url', buttonText: 'Rate your order', url } });
+    return;
+  }
   if (customer.channel === 'instagram') {
     await reply(customer, `How was your order? Tap below to rate it, takes 10 seconds.\n\n${url}`, 'feedback_form_sent');
     return;
