@@ -12,7 +12,7 @@ import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCt
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice } from './documents.js';
-import { initializePaystackTransaction, initializePaystackTopupTransaction, initializeMonnifyTransaction, getPaymentConfig } from './payment.js';
+import { initializePaystackTransaction, initializePaystackTopupTransaction, initializeMonnifyTransaction, initializeOpayTransaction, getPaymentConfig } from './payment.js';
 import { pushPaymentRequest, lookupTransactionByReference } from './moniepoint-api.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
@@ -2132,6 +2132,26 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       }
     } catch (err) {
       console.error(`Monnify dynamic account failed for order ${order.id}, falling back to bank details: ${err.message}`);
+    }
+  }
+  // Chidera, 2026-09-23: "so what of opay?" -- same shape as Monnify above,
+  // OPay's own dynamic bank-transfer account. No "Account name" line --
+  // OPay's own response never returns one (see opay-api.js's own comment).
+  if (paymentConfig?.provider === 'opay') {
+    try {
+      const result = await initializeOpayTransaction({ order, customer, amount });
+      if (result) {
+        const validityLine = result.expiresAt
+          ? ` (valid for the next ${Math.max(1, Math.round((new Date(result.expiresAt).getTime() - Date.now()) / 60000))} minutes)`
+          : '';
+        return {
+          payLine: `Please pay NGN ${amountLabel} using the account below${validityLine}.\n\nBank: ${result.bankName}\nAccount number: ${result.accountNumber}\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
+          needsHandover: false,
+          paymentUrl: null,
+        };
+      }
+    } catch (err) {
+      console.error(`OPay dynamic account failed for order ${order.id}, falling back to bank details: ${err.message}`);
     }
   }
   const useProviderPaystack = paymentConfig?.provider ? paymentConfig.provider === 'paystack' : process.env.PAYMENT_PROVIDER === 'paystack';

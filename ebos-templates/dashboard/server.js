@@ -25,6 +25,7 @@ import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
 import { router as moniepointWebhook } from './engine/webhook-moniepoint.js';
 import { router as monnifyWebhook } from './engine/webhook-monnify.js';
+import { router as opayWebhook } from './engine/webhook-opay.js';
 import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
@@ -65,6 +66,10 @@ app.use(express.urlencoded({ extended: false, limit: '20mb' }));
 // Public webhooks -- Meta and Paystack call these directly, no session.
 app.use('/webhook/whatsapp', whatsappWebhook);
 app.use('/webhook/instagram', instagramWebhook);
+// OPay's own callback signature lives INSIDE the parsed JSON body (see
+// webhook-opay.js's own comment), not a header over the raw body like the
+// others above -- this one genuinely belongs below express.json().
+app.use('/webhook/opay', opayWebhook);
 // Public documents -- the invoice/receipt link sent to a customer over
 // WhatsApp has to open without a dashboard login.
 app.use('/documents', documentRoutes);

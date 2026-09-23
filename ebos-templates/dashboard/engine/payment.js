@@ -4,6 +4,7 @@
 import crypto from 'node:crypto';
 import { pool } from '../lib/db.js';
 import { callMonnifyDynamicAccount } from './monnify-api.js';
+import { callOpayBankTransfer } from './opay-api.js';
 
 // Chidera, 2026-09-16: "no paystack link for payment??" -- root cause,
 // confirmed by testing directly against Paystack's own live API: the
@@ -111,6 +112,20 @@ export async function initializeMonnifyTransaction({ order, customer, amount }) 
   await pool.query(
     `update "order" set payment_reference = $1, monnify_account_number = $2, monnify_account_name = $3, monnify_bank_name = $4, monnify_account_expires_at = $5 where id = $6`,
     [result.paymentReference, result.accountNumber, result.accountName, result.bankName, result.expiresAt, order.id]
+  );
+  return result;
+}
+
+// Chidera, 2026-09-23: "so what of opay?" -- same shape as
+// initializeMonnifyTransaction above, OPay's own dynamic bank-transfer
+// account. No account NAME here -- OPay's own response never returns one
+// (see opay-api.js's own comment), unlike Monnify's.
+export async function initializeOpayTransaction({ order, customer, amount }) {
+  const result = await callOpayBankTransfer({ customer, amount, referencePrefix: order.reference });
+  if (!result) return null;
+  await pool.query(
+    `update "order" set payment_reference = $1, opay_account_number = $2, opay_bank_name = $3, opay_account_expires_at = $4 where id = $5`,
+    [result.reference, result.accountNumber, result.bankName, result.expiresAt, order.id]
   );
   return result;
 }
