@@ -127,10 +127,25 @@ router.get('/:token/messages', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).json({ error: 'Link not found.' });
   const since = req.query.since;
+  // Chidera, 2026-09-23, live report + screenshot: the same bubble (an
+  // upsell offer, in her case) repeating forever, ~every 3s -- matches
+  // this page's own poll() interval exactly. Root cause: Postgres stores
+  // created_at at microsecond precision, but the client's own cursor
+  // (lastCursor, built from JSON.stringify-ing a JS Date it got back from
+  // a previous poll) can only round-trip millisecond precision -- JS Date
+  // has no microseconds. So the real stored value (...522672) is ALWAYS
+  // strictly greater than the truncated cursor sent back (...522000),
+  // and the exact same last row matches `created_at > $2` on every single
+  // poll, forever, well past the first time it was genuinely new. Both
+  // sides truncated to millisecond precision before comparing so a
+  // message whose timestamp only differs in microseconds from the cursor
+  // is correctly treated as already-seen.
   const { rows } = await pool.query(
     since
       ? `select id, direction, sender, body, interactive, created_at from message
-         where customer_id = $1 and channel = 'website' and created_at > $2 order by created_at asc`
+         where customer_id = $1 and channel = 'website'
+           and date_trunc('milliseconds', created_at) > date_trunc('milliseconds', $2::timestamptz)
+         order by created_at asc`
       : `select id, direction, sender, body, interactive, created_at from message
          where customer_id = $1 and channel = 'website' order by created_at asc`,
     since ? [customer.id, since] : [customer.id]
