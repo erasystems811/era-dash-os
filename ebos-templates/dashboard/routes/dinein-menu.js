@@ -70,6 +70,29 @@ export async function resolveWaNumber(branchId) {
   return getWaDisplayNumber(credentials);
 }
 
+// Chidera, 2026-09-21, real live report: "after i closed web from
+// instagram it took me on whatsapp not back to ig where i placed the
+// order" -- ig.me/m/<handle> is Instagram's own equivalent of wa.me,
+// needs the business's own @handle (branch.instagram_handle, a plain
+// Settings field -- no Meta credential resolution needed the way WA's
+// number does, this one's never wrong the way business.phone_number was).
+// Falls back to any branch's handle when this one hasn't set its own,
+// same "one shared value covers every branch until a real one exists"
+// pattern the WhatsApp number lookup already follows via getWhatsAppCredentials.
+// Added to this branch 2026-09-23 -- this branch was cut before it landed
+// on main, and routes/menu-page.js's own web-chat work already imports it;
+// missing here meant a real crash-loop on deploy (era-demo, live).
+export async function resolveInstagramHandle(branchId) {
+  const { rows } = await pool.query(
+    `select instagram_handle from branch
+     where instagram_handle is not null and instagram_handle != ''
+     order by (id = $1) desc
+     limit 1`,
+    [branchId]
+  );
+  return rows[0]?.instagram_handle || null;
+}
+
 async function openSessionFor(table) {
   const { rows } = await pool.query(`select * from table_session where table_id = $1 and closed_at is null`, [table.id]);
   return rows[0] || null;
