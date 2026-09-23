@@ -113,11 +113,31 @@ export async function main(argv = []) {
     console.log(await run('git', ['pull', '--ff-only', 'origin', 'main']));
   } catch (err) {
     const conflicting = discardConflicts ? parseConflictingFiles(err.message) : null;
-    if (!conflicting) throw err;
-    console.log(`Discarding uncommitted local changes to ${conflicting.length} file(s) that were blocking the pull:`);
-    console.log(conflicting.map((f) => `  ${f}`).join('\n'));
-    await run('git', ['checkout', '--', ...conflicting]);
-    console.log(await run('git', ['pull', '--ff-only', 'origin', 'main']));
+    if (conflicting) {
+      console.log(`Discarding uncommitted local changes to ${conflicting.length} file(s) that were blocking the pull:`);
+      console.log(conflicting.map((f) => `  ${f}`).join('\n'));
+      await run('git', ['checkout', '--', ...conflicting]);
+      console.log(await run('git', ['pull', '--ff-only', 'origin', 'main']));
+    } else if (/diverging branches|not possible to fast-forward/i.test(err.message)) {
+      // A real local commit exists here that origin/main doesn't have --
+      // --ff-only correctly refuses rather than merge/rebase automatically
+      // (either could silently reorder or drop something). This is
+      // read-only diagnosis, not a fix: show exactly what that commit is
+      // so a real decision (push it, or confirm it's safe to discard) can
+      // be made from the log alone, without SSH.
+      await run('git', ['fetch', 'origin', 'main']);
+      const localOnly = await run('git', ['log', '--oneline', 'origin/main..HEAD']);
+      const remoteOnly = await run('git', ['log', '--oneline', 'HEAD..origin/main']);
+      throw new Error(
+        `Can't fast-forward -- this checkout has at least one commit origin/main doesn't have:\n\n` +
+        `Local-only commit(s) (not on GitHub):\n${localOnly.trim() || '  (none? unexpected)'}\n\n` +
+        `origin/main commit(s) this checkout doesn't have yet:\n${remoteOnly.trim() || '  (none)'}\n\n` +
+        `Resolve by hand: if the local commit(s) are real, wanted work, push them to origin/main first, then sync again. ` +
+        `If they're stray/unwanted, that's a deliberate git reset, not something this script does automatically.`
+      );
+    } else {
+      throw err;
+    }
   }
 
   const after = (await run('git', ['rev-parse', 'HEAD'])).trim();
