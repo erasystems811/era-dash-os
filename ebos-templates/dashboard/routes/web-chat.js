@@ -19,6 +19,7 @@ import {
   buildGreetingContent,
   ensureMenuToken,
   handleWebChatMessage,
+  handleWebChatMedia,
   handleUpsellListTap,
   handleOrderConfirmNoTap,
   logWebsiteBubble,
@@ -40,6 +41,29 @@ async function touchWebChatActive(customerId) {
   await pool.query('update customers set web_chat_active_at = now() where id = $1', [customerId]);
 }
 
+// flow.js's logMessage calls append a raw "[payment link sent: url]" or
+// "[invoice] url" style suffix onto body -- meant for the staff dashboard's
+// own plain-text conversation view, which has no button UI. Redundant on
+// THIS page, since the same url already drives the real tappable button
+// rendered from `interactive` -- Chidera, 2026-09-23: "why is the chat
+// restating the full url of https... the tap button already open the
+// url." Two body shapes exist and both need handling: "label: url" wrapped
+// entirely inside the brackets (payment/feedback links), and "[label] url"
+// where the url trails outside the brackets (invoice/topup documents).
+function displayBody(m) {
+  if (!m.interactive || (m.interactive.type !== 'cta_url' && m.interactive.type !== 'document')) return m.body;
+  const stripped = String(m.body || '')
+    .replace(/\s*\[[^\]]*:\s*https?:\/\/[^\]]*\]\s*$/, '')
+    .replace(/\s+https?:\/\/\S+$/, '')
+    .replace(/\s*\[[^\]]*\]\s*$/, '')
+    .trim();
+  return stripped || (m.interactive.type === 'document' ? 'Here you go.' : 'Tap below.');
+}
+
+function withDisplayBody(rows) {
+  return rows.map((r) => ({ ...r, body: displayBody(r) }));
+}
+
 async function messageHistory(customerId) {
   const { rows } = await pool.query(
     `select id, direction, sender, body, interactive, created_at from message
@@ -47,7 +71,7 @@ async function messageHistory(customerId) {
      order by created_at asc`,
     [customerId]
   );
-  return rows;
+  return withDisplayBody(rows);
 }
 
 router.get('/:token', async (req, res) => {
@@ -117,6 +141,7 @@ router.get('/:token', async (req, res) => {
       coverPhotoVersion: branding.cover_photo_version,
       history,
       messagePath: `/wa/${req.params.token}/message`,
+      mediaPath: `/wa/${req.params.token}/media`,
       tapPath: `/wa/${req.params.token}/tap`,
       pollPath: `/wa/${req.params.token}/messages`,
     })
@@ -150,7 +175,7 @@ router.get('/:token/messages', async (req, res) => {
          where customer_id = $1 and channel = 'website' order by created_at asc`,
     since ? [customer.id, since] : [customer.id]
   );
-  res.json(rows);
+  res.json(withDisplayBody(rows));
 });
 
 router.post('/:token/message', async (req, res) => {
@@ -161,6 +186,22 @@ router.post('/:token/message', async (req, res) => {
   customer.channel = 'website';
   await touchWebChatActive(customer.id);
   await handleWebChatMessage({ customer, text });
+  res.json({ ok: true });
+});
+
+// The "+" icon's own upload -- Chidera, 2026-09-23: "actually enable them
+// to upload photo of file." The browser reads the file itself (FileReader,
+// see web-chat-page-template.js) and posts it straight here as a data URL
+// -- no separate storage step, same data_url column handleInboundMedia
+// already writes proof images into for real WhatsApp.
+router.post('/:token/media', async (req, res) => {
+  const customer = await resolveCustomer(req.params.token);
+  if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  const dataUrl = String(req.body?.dataUrl || '');
+  if (!/^data:(image\/|application\/pdf)/.test(dataUrl)) return res.status(400).json({ error: 'Only a photo or PDF can be sent here.' });
+  customer.channel = 'website';
+  await touchWebChatActive(customer.id);
+  await handleWebChatMedia(customer, dataUrl, dataUrl.startsWith('data:application/pdf') ? 'file' : 'photo');
   res.json({ ok: true });
 });
 

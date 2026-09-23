@@ -5378,6 +5378,61 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
   }
 }
 
+// Chidera, 2026-09-23: "actually enable them to upload photo of file or
+// camera." The chat page's own equivalent of handleInboundMedia, for a
+// customer who uploads a payment-proof photo straight from the browser
+// instead of real WhatsApp -- dataUrl arrives already resolved (the
+// browser reads the file itself, no WhatsApp/Instagram media-ID lookup
+// step exists here), and customer.channel is already 'website' by the
+// time routes/web-chat.js calls this, same override pattern as
+// handleWebChatMessage. Kept as its own function rather than sharing logic
+// with handleInboundMedia so a future change to the real WhatsApp media
+// pipeline (customer resolution, staff-handover idle check, channel
+// download) can never accidentally touch this one.
+export async function handleWebChatMedia(customer, dataUrl, kind = 'photo') {
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: `[${kind}]`, processed: true });
+
+  const order = await resolveCustomerOrder(customer);
+  const awaitingPayment = order && order.engine_state === 'confirm_payment' && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted';
+  const { rows: pendingTopupRows } = order
+    ? await pool.query(`select id, amount from order_topup where order_id = $1 and payment_status = 'pending' order by created_at desc limit 1`, [order.id])
+    : { rows: [] };
+  const pendingTopup = pendingTopupRows[0];
+
+  if (!awaitingPayment && !pendingTopup) {
+    await reply(customer, `Got your ${kind}, let me get someone to take a look.`, 'media_received');
+    await handover(customer, `Customer sent a ${kind} with no order currently awaiting payment`, null, false);
+    return;
+  }
+
+  try {
+    // Same "every proof kept, not overwritten" reasoning as
+    // handleInboundMedia -- a top-up needs its own proof without losing
+    // the original.
+    await pool.query(`insert into order_payment_proof (order_id, data_url) values ($1, $2)`, [order.id, dataUrl]);
+
+    if (pendingTopup) {
+      await pool.query(`update order_topup set payment_status = 'proof_submitted' where id = $1`, [pendingTopup.id]);
+      await reply(customer, `Noted, I will confirm the top-up payment and get back to you shortly.`, 'payment_proof_received');
+      return;
+    }
+
+    await pool.query(`update "order" set payment_status = 'proof_submitted', status = 'confirmation' where id = $1`, [order.id]);
+    await reply(customer, `Noted, I will confirm the payment and get back to you shortly.`, 'payment_proof_received');
+    await handover(
+      customer,
+      `Customer submitted payment proof, needs manual confirmation`,
+      null,
+      false, // already sent its own ack above
+      { path: `/orders/${order.id}`, title: 'Confirm payment' }
+    );
+  } catch (err) {
+    console.error(`Failed to save web-chat payment proof ${kind}:`, err);
+    await reply(customer, `Got your ${kind} but had trouble saving it. Let me get someone to help confirm your payment.`, 'payment_proof_received');
+    await handover(customer, `Customer submitted payment proof but the ${kind} failed to save`, null, false);
+  }
+}
+
 // Chidera, 2026-09-21: "THE IDEA IS FOR IT TO APROVE AUTO CONFIRME HOW
 // PAYSTACK DOES" -- checks Moniepoint directly, right now, using this
 // exact payment's own reference (the same one pushPaymentRequest

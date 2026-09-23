@@ -20,7 +20,7 @@
 // each shape carries).
 import { escapeHtml } from './menu-page-template.js';
 
-export function renderWebChatPage({ businessName, coverPhotoVersion, history, messagePath, tapPath, pollPath }) {
+export function renderWebChatPage({ businessName, coverPhotoVersion, history, messagePath, mediaPath, tapPath, pollPath }) {
   const avatarStyle = coverPhotoVersion
     ? `background-image:url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : '';
@@ -107,10 +107,10 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   </header>
   <div id="scroll"></div>
   <div id="composer">
-    <button type="button" class="composer-icon" id="attachBtn" aria-label="Attach">&#43;</button>
+    <button type="button" class="composer-icon" id="attachBtn" aria-label="Attach a photo or file">&#43;</button>
+    <input type="file" id="fileInput" accept="image/*,application/pdf" style="display:none">
     <div id="inputWrap">
       <textarea id="textInput" rows="1" placeholder="Message"></textarea>
-      <button type="button" class="composer-icon" id="cameraBtn" aria-label="Camera">&#128247;</button>
     </div>
     <button id="sendBtn" type="button">&#10148;</button>
   </div>
@@ -125,6 +125,7 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
 </div>
 <script>
 const MESSAGE_PATH = ${JSON.stringify(messagePath)};
+const MEDIA_PATH = ${JSON.stringify(mediaPath)};
 const TAP_PATH = ${JSON.stringify(tapPath)};
 const POLL_PATH = ${JSON.stringify(pollPath)};
 let HISTORY = ${JSON.stringify(history)};
@@ -272,6 +273,31 @@ async function sendText() {
 document.getElementById('sendBtn').addEventListener('click', sendText);
 document.getElementById('textInput').addEventListener('keydown', function (e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+});
+
+// "+" -- Chidera, 2026-09-23: "actually enable them to upload photo of
+// file." Reads the file straight into a data URL in the browser and posts
+// it as-is (routes/web-chat.js's own /:token/media, same data_url shape
+// handleInboundMedia already stores real WhatsApp photos as) -- no
+// separate upload/storage step.
+document.getElementById('attachBtn').addEventListener('click', function () {
+  document.getElementById('fileInput').click();
+});
+document.getElementById('fileInput').addEventListener('change', function (e) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const isImage = file.type.indexOf('image/') === 0;
+  const reader = new FileReader();
+  reader.onload = async function () {
+    HISTORY.push({ id: 'local-' + Date.now(), direction: 'inbound', sender: 'customer', body: isImage ? '[photo]' : '[file]', interactive: null, created_at: new Date().toISOString() });
+    renderAll();
+    try {
+      await fetch(MEDIA_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataUrl: reader.result }) });
+    } catch (err) {}
+    poll();
+  };
+  reader.readAsDataURL(file);
 });
 
 // Picks up anything NOT triggered by this tab's own action -- a payment
