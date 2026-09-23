@@ -35,13 +35,6 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%;overflow:hidden;font-family:Inter,-apple-system,sans-serif;color:var(--text);background:#000}
   #app{display:flex;flex-direction:column;height:100%}
-  /* Fake iOS status bar -- Chidera, 2026-09-23: "it doesnt feel real" --
-     a big part of what makes a screen recording read as "a real phone"
-     is this bar, which a plain webpage never has on its own. Static
-     (real time, decorative icons) -- nobody needs a working signal meter,
-     just the silhouette of one. */
-  #statusbar{flex:none;background:#000;color:#fff;display:flex;align-items:center;justify-content:space-between;padding:6px 22px 4px;font-size:15px;font-weight:600}
-  #statusbar svg{display:block}
   header{flex:none;background:var(--header);color:var(--text);padding:10px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(255,255,255,.05)}
   header .back{flex:none;color:var(--accent);font-size:26px;line-height:1;padding:0 2px}
   .avatar{width:36px;height:36px;border-radius:50%;background:var(--accent);flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:#fff;${avatarStyle}}
@@ -107,14 +100,6 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
 </style></head>
 <body>
 <div id="app">
-  <div id="statusbar">
-    <span id="clock"></span>
-    <svg width="60" height="12" viewBox="0 0 60 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="0" y="6" width="3" height="6" rx="0.5" fill="#fff"/><rect x="5" y="4" width="3" height="8" rx="0.5" fill="#fff"/><rect x="10" y="2" width="3" height="10" rx="0.5" fill="#fff"/><rect x="15" y="0" width="3" height="12" rx="0.5" fill="#fff"/>
-      <path d="M27 9.5a6 6 0 0 1 8 0" stroke="#fff" stroke-width="1.3" stroke-linecap="round" fill="none"/><path d="M29 11.2a3 3 0 0 1 4 0" stroke="#fff" stroke-width="1.3" stroke-linecap="round" fill="none"/><circle cx="31" cy="12" r="0.9" fill="#fff"/>
-      <rect x="41" y="1.5" width="16" height="9" rx="2" stroke="#fff" stroke-width="1" fill="none"/><rect x="58" y="4" width="1.5" height="4" rx="0.7" fill="#fff"/><rect x="42.5" y="3" width="13" height="6" rx="1" fill="#fff"/>
-    </svg>
-  </div>
   <header>
     <div class="back">&#8249;</div>
     <div class="avatar">${escapeHtml((businessName || '?').slice(0, 1).toUpperCase())}</div>
@@ -204,16 +189,6 @@ function renderAll() {
   scroll.scrollTop = scroll.scrollHeight;
 }
 renderAll();
-
-// Real clock in the fake status bar, ticking with the actual time -- a
-// static "9:41" (Apple's own screenshot convention) would be the one
-// detail most likely to give away that this is a mockup on a second look.
-function tickClock() {
-  const el = document.getElementById('clock');
-  if (el) el.textContent = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: false });
-}
-tickClock();
-setInterval(tickClock, 15000);
 
 // The list-message bottom sheet -- WhatsApp's real "Choose" flow opens a
 // sheet with every real option, a single selection (defaults to the
