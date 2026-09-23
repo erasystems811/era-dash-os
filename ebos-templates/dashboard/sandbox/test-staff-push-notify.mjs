@@ -73,6 +73,34 @@ async function main() {
   const realAlertWentOut = logs.some((l) => l.includes(staff.phone_number) && l.includes('Real body text'));
   assert(realAlertWentOut, 'notifyStaff still reaches staff over real WhatsApp with the real alert text -- push being unavailable never silently drops it');
 
+  // === Chidera, 2026-09-23 (same day): "merge handover message to be 1
+  // the full message and the dashboard button on the same message" -- a
+  // link used to mean a SECOND separate real WhatsApp send (the button,
+  // with a generic "Tap below to open this." line); now it's one combined
+  // CTA-URL message whose own body IS the full alert. ===
+  const staff2Rows = await pool.query(
+    `insert into staff (name, phone_number, handover_alerts, order_alerts, role, branch_id)
+     values ('Manager', '2348099992222', true, true, 'manager', null) returning *`
+  );
+  const staff2 = staff2Rows.rows[0];
+  const logs2 = [];
+  const originalLog2 = console.log;
+  console.log = (...args) => { logs2.push(args.join(' ')); originalLog2(...args); };
+  await flow.notifyStaff({
+    staffId: staff2.id,
+    phoneNumber: staff2.phone_number,
+    title: 'Handover',
+    body: 'A real handover alert with real details',
+    linkUrl: 'http://localhost:9999/conversations/abc',
+    linkButtonText: 'Open Conversation',
+  });
+  console.log = originalLog2;
+
+  const relevantLogs = logs2.filter((l) => l.includes(staff2.phone_number));
+  assert(relevantLogs.length === 1, `exactly ONE real WhatsApp send for an alert with a link, not two (got ${relevantLogs.length})`);
+  assert(relevantLogs[0]?.includes('A real handover alert with real details'), 'that one message carries the FULL real alert text');
+  assert(relevantLogs[0]?.includes('Open Conversation') && relevantLogs[0]?.includes('conversations/abc'), 'and the same message also carries the real tappable button, not a second one');
+
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);
 }

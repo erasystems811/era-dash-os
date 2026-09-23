@@ -2543,17 +2543,35 @@ router.post('/staff/:id/branch', requireEditorApi, async (req, res) => {
 // nothing, so that's rejected here rather than failing quietly later.
 // Same branch scoping as /staff/:id/status above -- a branch manager can
 // only toggle this for staff in their own branch.
+// Chidera, 2026-09-23: "im thinking handover be limited to 2 numbers max
+// so no business can set more than 2 handover number" -- handoverRecipients
+// (flow.js) has no branch scoping at all (every staff with handover_alerts
+// = true, business-wide, gets every handover alert), so this cap is
+// business-wide too, not per-branch -- a branch manager toggling a 3rd
+// person on in their own branch would still be adding a 3rd business-wide
+// recipient. Only checked when actually turning it ON for someone who
+// doesn't already have it -- redundant re-saves and turning it off are
+// always allowed regardless of the current count.
+const MAX_HANDOVER_ALERT_STAFF = 2;
+
 router.post('/staff/:id/handover-alerts', requireEditorApi, async (req, res) => {
-  const { rows: existing } = await pool.query('select phone_number, branch_id from staff where id = $1', [req.params.id]);
+  const { rows: existing } = await pool.query('select phone_number, branch_id, handover_alerts from staff where id = $1', [req.params.id]);
   if (!existing[0]) return res.status(404).json({ error: 'Staff member not found.' });
   if (req.branchId && existing[0].branch_id !== req.branchId) {
     return res.status(403).json({ error: 'You can only manage staff in your own branch.' });
   }
-  if (req.body.handover_alerts && !existing[0].phone_number) {
+  const turningOn = Boolean(req.body.handover_alerts);
+  if (turningOn && !existing[0].phone_number) {
     return res.status(400).json({ error: 'Add a phone number for this staff member first.' });
   }
+  if (turningOn && !existing[0].handover_alerts) {
+    const { rows: countRows } = await pool.query(`select count(*)::int as n from staff where handover_alerts = true`);
+    if (countRows[0].n >= MAX_HANDOVER_ALERT_STAFF) {
+      return res.status(400).json({ error: `Only ${MAX_HANDOVER_ALERT_STAFF} staff can receive handover alerts at once. Turn it off for someone else first.` });
+    }
+  }
   const { rows } = await pool.query('update staff set handover_alerts = $1 where id = $2 returning id, handover_alerts', [
-    !!req.body.handover_alerts,
+    turningOn,
     req.params.id,
   ]);
   res.json(rows[0]);

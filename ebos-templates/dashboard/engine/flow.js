@@ -621,26 +621,29 @@ export async function sendStaffAlert(to, text) {
 // to highest 1-5." Tries a free push first (engine/push-notify.js's
 // pushToStaff) -- the SAME content a real WhatsApp alert would carry,
 // plus an optional deep link (linkUrl) the dashboard's own service worker
-// opens directly when tapped. That link used to need a SEPARATE real
-// WhatsApp CTA-URL message at almost every call site below (handover()'s
-// "Open Conversation" button, completePayment's "Open Orders" button,
-// notifyCustomerClaimedPosPayment's "Confirm payment" button) -- one push
-// notification now replaces what used to be up to TWO real WhatsApp
-// sends. Falls back to the exact original WhatsApp behavior (alert text,
-// then the separate CTA link if one was requested) for any staff member
-// who hasn't set up push yet, so nobody silently stops getting told --
-// same "additive, never a regression for someone not yet on the new
-// thing" shape as every website-channel branch built earlier this
-// feature.
-export async function notifyStaff({ staffId, phoneNumber, title, body, linkUrl, linkButtonText, linkBodyText, credentials }) {
+// opens directly when tapped.
+//
+// Chidera, 2026-09-23 (same day, second pass): "merge handover message to
+// be 1 the full message and the dashboard button on the same message" --
+// the WhatsApp fallback below used to be TWO separate real sends when a
+// link was involved (a plain-text alert, then a second message carrying
+// just the button) -- exactly the same redundant-2-messages-for-one-link
+// shape already fixed for delivery tracking. sendWhatsAppCtaUrl's own
+// body text IS the alert -- there was never a reason this needed two
+// sends. Falls back to the plain alert alone (sendStaffAlert, which has
+// its own 24h-window template retry) if the combined send fails for any
+// reason -- the alert text must never be lost, even without its button.
+export async function notifyStaff({ staffId, phoneNumber, title, body, linkUrl, linkButtonText, credentials }) {
   if (await pushToStaff(staffId, { title, body, url: linkUrl })) return;
-  await sendStaffAlert(phoneNumber, body);
-  if (!linkUrl) return;
-  try {
-    await sendWhatsAppCtaUrl(phoneNumber, linkBodyText || 'Tap below to open this.', linkButtonText || 'Open', linkUrl, credentials);
-  } catch (err) {
-    console.error(`Failed to send staff link to ${phoneNumber}:`, err.message);
+  if (linkUrl) {
+    try {
+      await sendWhatsAppCtaUrl(phoneNumber, body, linkButtonText || 'Open', linkUrl, credentials);
+      return;
+    } catch (err) {
+      console.error(`Failed to send merged staff alert+link to ${phoneNumber}, falling back to plain text:`, err.message);
+    }
   }
+  await sendStaffAlert(phoneNumber, body);
 }
 
 // A second, WhatsApp-native way into the same dashboard the browser already
@@ -818,7 +821,7 @@ export async function handover(customer, reason, extra, ackText, primaryLink) {
       : staffId
         ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
         : `${process.env.PUBLIC_URL}${path}`;
-    await notifyStaff({ staffId, phoneNumber: to, title: 'Handover', body: alert, linkUrl: link, linkButtonText: title, linkBodyText: 'Tap below to open this conversation.', credentials });
+    await notifyStaff({ staffId, phoneNumber: to, title: 'Handover', body: alert, linkUrl: link, linkButtonText: title, credentials });
   }
 }
 
@@ -3393,7 +3396,7 @@ export async function completePayment(orderId) {
       // THIS order's card instead of the customer having to hunt for it
       // among everything else in the pipeline. Orders.jsx reads ?order=.
       const link = process.env.PUBLIC_URL && staffId ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/?order=${order.id}`)}` : null;
-      await notifyStaff({ staffId, phoneNumber: to, title: 'Order ready to prepare', body: alertText, linkUrl: link, linkButtonText: 'Open Orders', linkBodyText: 'Tap below to open the board.', credentials });
+      await notifyStaff({ staffId, phoneNumber: to, title: 'Order ready to prepare', body: alertText, linkUrl: link, linkButtonText: 'Open Orders', credentials });
     }
   }
 }
@@ -5455,6 +5458,6 @@ export async function notifyCustomerClaimedPosPayment(payment, order, customer) 
       : staffId
         ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
         : `${process.env.PUBLIC_URL}${path}`;
-    await notifyStaff({ staffId, phoneNumber: to, title: 'POS transfer claimed', body: alert, linkUrl: link, linkButtonText: 'Confirm payment', linkBodyText: 'Tap below to confirm this payment.', credentials });
+    await notifyStaff({ staffId, phoneNumber: to, title: 'POS transfer claimed', body: alert, linkUrl: link, linkButtonText: 'Confirm payment', credentials });
   }
 }
