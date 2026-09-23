@@ -3,6 +3,13 @@
 // the surface not when kanban is opened") and OrderDetail.jsx, so the two
 // screens can never disagree about which action a given stage offers.
 //
+// Chidera, 2026-09-23: this file's own content-hashed chunk (unchanged
+// across several deploys) got a real 500/503 permanently cached as
+// "immutable" by already-affected browsers before Caddyfile.template's own
+// fix landed -- deliberately touched here so it gets a genuinely new hash
+// on the next build, giving those browsers a fresh, never-poisoned URL to
+// fetch instead of replaying the old cached failure forever.
+//
 // Full pipeline: new -> confirmation -> preparation -> ready ->
 // [pickup: completed] -> [delivery: in_transit -> completed].
 //
@@ -93,5 +100,6 @@ export const ORDER_COLUMNS = [
 // only lasts a day").
 const COMPLETED_VISIBLE_MS = 24 * 60 * 60 * 1000;
 export function isRecentlyCompleted(order) {
+  if (!order) return false;
   return Date.now() - new Date(order.updated_at).getTime() < COMPLETED_VISIBLE_MS;
 }
