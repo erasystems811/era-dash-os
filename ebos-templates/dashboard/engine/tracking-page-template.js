@@ -7,7 +7,7 @@
 // endpoint in place instead of the old <meta http-equiv="refresh"> full
 // page reload every 20s -- a hard reload flashing the browser chrome back
 // in is exactly what reads as "a website", not an app.
-export function renderTrackingPage({ reference, businessName, zoneName, stages, stageIndex, rider, expired, failed, statusPath }) {
+export function renderTrackingPage({ reference, businessName, zoneName, stages, stageIndex, rider, deliveryCode, expired, failed, statusPath }) {
   return `<!doctype html>
 <html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Tracking ${escapeHtml(reference)}</title>
@@ -34,12 +34,15 @@ export function renderTrackingPage({ reference, businessName, zoneName, stages, 
   .rider{display:flex;align-items:center;gap:12px;padding:16px 14px;margin-top:16px;background:#fff;border-radius:12px;border:1px solid var(--line)}
   .rider .avatar{width:44px;height:44px;border-radius:50%;background:var(--ink);color:var(--paper);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;font-family:"Fraunces",serif;flex-shrink:0}
   .rider a{color:inherit}
+  .code{padding:14px;margin-top:10px;background:#fff;border-radius:12px;border:1px solid var(--line);text-align:center}
+  .code .lbl{font-size:11.5px;color:var(--mid);text-transform:uppercase;letter-spacing:.04em}
+  .code .num{font-family:"Fraunces",serif;font-size:26px;font-weight:700;letter-spacing:.06em;margin-top:4px}
   .empty{text-align:center;color:var(--mid);font-size:13.5px;margin-top:60px;padding:0 20px}
   .updated{text-align:center;color:var(--mid);font-size:11.5px;margin-top:22px}
 </style></head>
 <body>
 <div class="mtop"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">Order ${escapeHtml(reference)}${zoneName ? ` &middot; ${escapeHtml(zoneName)}` : ''}</div></div>
-<div class="scroll" id="scroll">${trackingBody({ stages, stageIndex, rider, expired, failed })}</div>
+<div class="scroll" id="scroll">${trackingBody({ stages, stageIndex, rider, deliveryCode, expired, failed })}</div>
 <script>
 const STATUS_PATH = ${JSON.stringify(statusPath)};
 const STAGES = ${JSON.stringify(stages)};
@@ -54,7 +57,13 @@ function renderBody(d) {
   var riderHtml = d.rider
     ? '<div class="rider"><div class="avatar">' + esc(d.rider.name[0]) + '</div><div><div><strong>' + esc(d.rider.name.split(' ')[0]) + '</strong></div><div><a href="tel:' + esc(d.rider.phone) + '">' + esc(d.rider.phone) + '</a></div></div></div>'
     : '';
-  return '<ul class="stages">' + stagesHtml + '</ul>' + riderHtml + '<div class="updated">Updates automatically</div>';
+  // Chidera, 2026-09-23: "the code should be in the link" -- no separate
+  // WhatsApp message reveals this any more, it just appears here the
+  // moment a rider's assigned, live, same as the rider card above.
+  var codeHtml = d.deliveryCode
+    ? '<div class="code"><div class="lbl">Give this code to your rider</div><div class="num">' + esc(d.deliveryCode) + '</div></div>'
+    : '';
+  return '<ul class="stages">' + stagesHtml + '</ul>' + riderHtml + codeHtml + '<div class="updated">Updates automatically</div>';
 }
 async function poll() {
   try {
@@ -70,7 +79,7 @@ const timer = setInterval(poll, 12000);
 </body></html>`;
 }
 
-function trackingBody({ stages, stageIndex, rider, expired, failed }) {
+function trackingBody({ stages, stageIndex, rider, deliveryCode, expired, failed }) {
   if (expired) return '<div class="empty">This tracking link has expired.</div>';
   if (failed) return '<div class="empty">This delivery could not be completed. Please contact us.</div>';
   const stagesHtml = stages
@@ -82,7 +91,10 @@ function trackingBody({ stages, stageIndex, rider, expired, failed }) {
   const riderHtml = rider
     ? `<div class="rider"><div class="avatar">${escapeHtml(rider.name[0])}</div><div><div><strong>${escapeHtml(rider.name.split(' ')[0])}</strong></div><div><a href="tel:${escapeHtml(rider.phone)}">${escapeHtml(rider.phone)}</a></div></div></div>`
     : '';
-  return `<ul class="stages">${stagesHtml}</ul>${riderHtml}<div class="updated">Updates automatically</div>`;
+  const codeHtml = deliveryCode
+    ? `<div class="code"><div class="lbl">Give this code to your rider</div><div class="num">${escapeHtml(deliveryCode)}</div></div>`
+    : '';
+  return `<ul class="stages">${stagesHtml}</ul>${riderHtml}${codeHtml}<div class="updated">Updates automatically</div>`;
 }
 
 export function escapeHtml(s) {

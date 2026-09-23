@@ -56,7 +56,7 @@ const EXPIRY_HOURS = 2;
 
 async function loadTrackingStatus(token) {
   const { rows } = await pool.query(
-    `select o.status as offer_status, a.status as assignment_status, a.delivered_at,
+    `select o.status as offer_status, a.status as assignment_status, a.delivered_at, a.delivery_code,
             r.name as rider_name, r.phone as rider_phone,
             ord.reference, z.name as zone_name, biz.name as business_name
      from delivery_offer o
@@ -79,6 +79,15 @@ async function loadTrackingStatus(token) {
     zoneName: row.zone_name,
     stageIndex: currentStageIndex(row),
     rider: row.rider_name ? { name: row.rider_name, phone: row.rider_phone } : null,
+    // Chidera, 2026-09-23: "usually they send 2, one with normal link and
+    // one to track ride... so now i need it to be 1, the code should be in
+    // the link" -- notifyDeliveryAssigned (flow.js) used to be a SECOND
+    // real WhatsApp message, sent purely to hand over this same code, the
+    // instant a rider accepted. The tracking link already went out once,
+    // at dispatch (notifyDeliverySearching), and this page already
+    // live-polls its own status -- the code just needed to actually be on
+    // the page once a rider's assigned, not a second message to reveal it.
+    deliveryCode: row.delivery_code || null,
     expired: Boolean(expired),
     failed,
   };
@@ -101,6 +110,7 @@ router.get('/:token', async (req, res) => {
       stages: STAGES,
       stageIndex: status.stageIndex,
       rider: status.rider,
+      deliveryCode: status.deliveryCode,
       expired: status.expired,
       failed: status.failed,
       statusPath: `/track/${req.params.token}/status`,

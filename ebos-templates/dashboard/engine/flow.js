@@ -3227,38 +3227,20 @@ export async function notifyReadyForPickup(orderId) {
   await reply(customer, `Your order is ready for pickup!`, 'ready_for_pickup');
 }
 
-// Own-riders delivery only -- called from routes/rider.js's own
-// /offers/:id/accept, right after a rider wins the atomic claim (spec B6:
-// "customer receives tracking link and a 4 digit delivery code" happens at
-// that moment, not later). Same exported-notification shape as
-// notifyReadyForPickup above, called from outside this file's own
-// request/reply loop for the same reason: the event that triggers it
-// (a rider accepting) doesn't originate from the customer's next message.
-export async function notifyDeliveryAssigned(orderId, { riderName, trackingPath, deliveryCode }) {
-  const { rows } = await pool.query('select * from "order" where id = $1', [orderId]);
-  const order = rows[0];
-  if (!order) throw new Error('Order not found.');
-  const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
-  const customer = custRows[0];
-  if (!customer) throw new Error('Customer not found.');
-  // Never a bare relative path in a WhatsApp message -- there's no "current
-  // page" for a chat to resolve it against, so this only goes out at all
-  // once PUBLIC_URL is actually configured (same gating every other
-  // outbound link in this codebase, e.g. the invoice link, already uses).
-  const trackingLine = trackingPath && process.env.PUBLIC_URL ? ` Track your order here: ${process.env.PUBLIC_URL}${trackingPath}.` : '';
-  await reply(
-    customer,
-    `Your order is on its way with ${riderName}.${trackingLine} Give them this code when they arrive: ${deliveryCode}`,
-    'delivery_assigned'
-  );
-}
-
 // Own_riders delivery only. Called the instant a delivery order's offer
 // broadcasts (engine/delivery-dispatch.js) -- a customer whose order is
 // out for delivery gets a real, working tracking link from THIS moment,
 // not only once a rider happens to accept (Chidera's own Chowdeck-style
 // stage tracker: "waiting for rider to accept order" is itself a real,
 // trackable stage, not a gap before tracking starts).
+// Chidera, 2026-09-23: "usually they send 2, one with normal link and one
+// to track ride... so now i need it to be 1, the code should be in the
+// link" -- this is now the ONLY real WhatsApp message an own_riders
+// delivery ever gets for tracking, start to finish. It used to be followed
+// by a second one (notifyDeliveryAssigned, since removed) once a rider
+// accepted, purely to hand over the delivery code -- that's gone now, the
+// SAME link (routes/tracking.js, which already live-polls its own status)
+// just shows the code itself the moment a rider's assigned.
 export async function notifyDeliverySearching(orderId, trackingPath) {
   const { rows } = await pool.query('select * from "order" where id = $1', [orderId]);
   const order = rows[0];
@@ -3266,7 +3248,7 @@ export async function notifyDeliverySearching(orderId, trackingPath) {
   const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
   const customer = custRows[0];
   if (!customer) throw new Error('Customer not found.');
-  if (!process.env.PUBLIC_URL) return; // same gating as notifyDeliveryAssigned -- no link worth sending without it
+  if (!process.env.PUBLIC_URL) return; // no link worth sending without it
   await reply(
     customer,
     `Your order is ready and we're finding you a rider. Track it here: ${process.env.PUBLIC_URL}${trackingPath}`,

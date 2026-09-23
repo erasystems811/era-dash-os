@@ -9,7 +9,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { verifyRiderPin } from '../engine/rider-auth.js';
 import { offerBus } from '../engine/offer-bus.js';
-import { notifyDeliveryAssigned, sendFeedbackRequest } from '../engine/flow.js';
+import { sendFeedbackRequest } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { sendPayout } from '../engine/payout-providers.js';
 import { resolveSource } from '../engine/delivery.js';
@@ -295,20 +295,15 @@ router.post('/offers/:id/accept', requireRider, async (req, res) => {
       customerPhone: custRows[0]?.phone_number || null,
     });
 
-    // Fire-and-forget, after the response -- the assignment is already
-    // committed, so a WhatsApp hiccup here must never surface as a failed
-    // accept (the rider already has the job either way).
-    //
-    // trackingPath now goes out for real (Chidera's call, 2026-09-02) --
-    // the page behind it (routes/tracking.js) shows a stage tracker
-    // (waiting for rider -> accepted -> picked up -> here -> delivered),
-    // not a live location, so there's no real-coordinate gap left to
-    // oversell the way there was when this was paused on 2026-09-01.
-    notifyDeliveryAssigned(offer.order_id, {
-      riderName,
-      trackingPath,
-      deliveryCode,
-    }).catch((err) => console.error(`Failed to notify customer of delivery assignment for order ${offer.order_id}:`, err));
+    // Chidera, 2026-09-23: "usually they send 2, one with normal link and
+    // one to track ride... so now i need it to be 1, the code should be in
+    // the link" -- this used to fire a SECOND real WhatsApp message here
+    // (notifyDeliveryAssigned) purely to hand the delivery code over. The
+    // tracking link already went out once, at dispatch
+    // (delivery-dispatch.js's notifyDeliverySearching), and routes/
+    // tracking.js's own page already live-polls its status -- the code
+    // now just shows up there the moment a rider's assigned
+    // (tracking-page-template.js), no second message needed.
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -442,9 +437,10 @@ router.post('/assignments/:id/deliver', requireRider, async (req, res) => {
   // needs nothing further here -- the PENDING row already sits on the
   // Payouts tab for a human to press. Automatic is an optimisation of that
   // same working process, never a prerequisite for it (see engine/payout-
-  // providers.js's own header). Runs after the response, same reasoning as
-  // notifyDeliveryAssigned above -- a provider outage must never turn a
-  // real, completed delivery into a failed HTTP response to the rider.
+  // providers.js's own header). Runs after the response, fire-and-forget,
+  // same reasoning as every other post-commit background task in this
+  // file -- a provider outage must never turn a real, completed delivery
+  // into a failed HTTP response to the rider.
   attemptAutomaticPayout(existing.id).catch((err) => console.error(`Automatic payout attempt failed for assignment ${existing.id}:`, err));
 });
 
