@@ -2,6 +2,7 @@ import express from 'express';
 import basicAuth from 'express-basic-auth';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadRegistry, saveRegistry, findClient, upsertClient } from '../scripts/lib/registry.mjs';
@@ -782,6 +783,13 @@ function businessesSection(ebosClients) {
   </fieldset>
 
   <fieldset>
+    <legend>Panel restart</legend>
+    <p class="muted">"Sync latest code" pulls new files onto this server, but this panel's own code only takes effect once its process restarts -- click this after a sync if what you're looking for (a new button, a new field) still isn't showing up. Takes a few seconds; this page reloads itself once the panel answers again.</p>
+    <button type="button" id="panelRestartBtn" onclick="restartPanel()">Restart panel</button>
+    <span id="panelRestartStatus" class="muted"></span>
+  </fieldset>
+
+  <fieldset>
     <legend>Control server code</legend>
     <p class="muted">Pulls the latest era-dash-os code onto this server -- no SSH needed. New scripts (like the backup button below) or route fixes take effect the moment this finishes; the panel's own code needs an actual restart to pick up changes to itself.</p>
     <button type="button" onclick="syncCode()">Sync latest code</button>
@@ -1357,6 +1365,32 @@ async function restartFixbot() {
   const data = await res.json();
   if (!res.ok) { alert(data.error || 'Failed'); return; }
   pollJob(data.jobId);
+}
+
+// Deliberately not pollJob -- see /api/panel/restart's own comment. This
+// process is about to die, so nothing about job status survives; instead,
+// wait a moment for the restart to actually happen, then poll plain GET /
+// directly until a NEW process answers, then reload so the page itself
+// picks up whatever changed too.
+async function restartPanel() {
+  if (!confirm('Restart the panel itself? It will be unreachable for a few seconds.')) return;
+  const btn = document.getElementById('panelRestartBtn');
+  const status = document.getElementById('panelRestartStatus');
+  btn.disabled = true;
+  status.textContent = ' restarting...';
+  try {
+    await fetch('/api/panel/restart', { method: 'POST' });
+  } catch (err) {}
+  await new Promise((r) => setTimeout(r, 3000));
+  for (let i = 0; i < 30; i++) {
+    try {
+      const res = await fetch('/', { cache: 'no-store' });
+      if (res.ok) { status.textContent = ' back up, reloading...'; location.reload(); return; }
+    } catch (err) {}
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  status.textContent = ' still not responding -- check on it directly.';
+  btn.disabled = false;
 }
 
 async function syncCode(discardConflicts) {
@@ -2728,6 +2762,29 @@ app.post('/api/confirm-dns', (req, res) => {
 app.post('/api/fixbot/restart', (req, res) => {
   const jobId = startJob('restart-fixbot.mjs', []);
   res.json({ jobId });
+});
+
+// Chidera, 2026-09-23: real gap hit live -- sync-code.mjs pulls a new
+// panel/server.js onto disk, but the CURRENTLY RUNNING panel process
+// (this one) keeps serving its old code until restarted, and there was no
+// self-service way to do that (only SSH, which is ruled out entirely).
+// Deliberately NOT the normal startJob/pollJob pattern: that job's status
+// lives in an in-memory Map inside THIS process, which the restart itself
+// kills -- any poll afterward would be asking a brand new process about a
+// job it never knew about. Instead: respond to the browser FIRST (so the
+// fetch() call the button made completes normally before the connection
+// dies), then fire the actual restart via a detached child a moment later
+// so it survives this process exiting. The client-side JS below polls a
+// plain GET / directly, not pollJob, until the new process answers.
+app.post('/api/panel/restart', (req, res) => {
+  res.json({ ok: true });
+  setTimeout(() => {
+    const child = spawn(process.execPath, [path.join(process.cwd(), '..', 'scripts', 'restart-panel.mjs')], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+  }, 200);
 });
 
 // Pulls the latest era-dash-os code onto THIS server -- the answer to "how
