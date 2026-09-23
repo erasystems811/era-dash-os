@@ -17,7 +17,6 @@ import { router as documentRoutes } from './routes/documents.js';
 import { router as trackingRoutes } from './routes/tracking.js';
 import { router as dineinMenuRoutes } from './routes/dinein-menu.js';
 import { router as menuPageRoutes } from './routes/menu-page.js';
-import { router as webChatRoutes } from './routes/web-chat.js';
 import { router as feedbackFormRoutes } from './routes/feedback-form.js';
 import { router as productPhotoRoutes } from './routes/product-photo.js';
 import { router as riderApiRoutes } from './routes/rider.js';
@@ -74,11 +73,6 @@ app.use('/t', dineinMenuRoutes);
 // Public web menu page for regular (non-dine-in) ordering -- same page,
 // resolved by a per-customer token instead of a table.
 app.use('/m', menuPageRoutes);
-// The WhatsApp-look chat transcript (routes/web-chat.js) -- one real
-// WhatsApp message (flow.js's sendStartOrderLink) sends a customer here;
-// everything else happens as bubbles on this page instead of billed
-// messages. Same public, token-authenticated trust boundary as /m.
-app.use('/wa', webChatRoutes);
 // The rating form sent by engine/flow.js's sendFeedbackRequest -- public,
 // no login, order_feedback.id itself is the link's token.
 app.use('/f', feedbackFormRoutes);
