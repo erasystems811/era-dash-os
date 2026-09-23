@@ -3,7 +3,8 @@
 //   node create-client.mjs --name="Client Name" [--subdomain=custom-slug] [--whatsapp] [--payment=flutterwave|paystack] [--pdf]
 //   node create-client.mjs --name="Client Name" --custom-domain=goldshop.com [--whatsapp] ...
 //
-// Creates a new client app end to end: Hetzner server, GitHub repo,
+// Creates a new client app end to end onto an ALREADY-CREATED server
+// (--ip=, made by hand -- see scripts/lib/manual-server.mjs): GitHub repo,
 // DNS record, the standard docker-compose stack deployed and running.
 // WhatsApp/payment env slots are left blank even when toggled on — actually
 // filling them in (and the manual Meta/provider verification that requires)
@@ -40,20 +41,17 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { loadSecrets, requireSecrets } from './lib/secrets.mjs';
-import { loadRegistry, saveRegistry, upsertClient, findClient, findServer, upsertServer, removeServer } from './lib/registry.mjs';
+import { loadRegistry, saveRegistry, upsertClient, findClient, findServer, upsertServer } from './lib/registry.mjs';
 import { randomSecret, randomPassword, randomEncryptionKey, slugify } from './lib/random.mjs';
 import { buildEbosSeedSql } from './lib/ebos-seed.mjs';
 import { buildEsfSeedSql } from './lib/esf-seed.mjs';
 import { provisionSheet } from './lib/esf-sheet.mjs';
 import { render } from './lib/render-template.mjs';
 import { templatesDirFor } from './lib/templates-dir.mjs';
-import * as hetzner from './lib/hetzner.mjs';
-import * as oracle from './lib/oracle.mjs';
-import * as ovh from './lib/ovh.mjs';
-import * as digitalocean from './lib/digitalocean.mjs';
+import { provisionExistingServer } from './lib/manual-server.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
-import { waitForSsh, waitForCloudInit, runRemote, copyToRemote } from './lib/ssh.mjs';
+import { runRemote, copyToRemote } from './lib/ssh.mjs';
 import { runScaffoldBot } from './lib/scaffold-runner.mjs';
 import { bootstrapSharedHost, allocatePorts, renderSiteBlock, addSite } from './lib/shared-host.mjs';
 
@@ -61,12 +59,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DOMAIN = process.env.ERA_ROOT_DOMAIN || 'erasystems.com.ng';
 
 function parseArgs(argv) {
-  // Default provider is 'oracle' now, not 'hetzner' -- Chidera's call,
-  // 2026-09-10: "i stopped using hetzner na". Still selectable
-  // (--provider=hetzner) for a business that's staying on an existing
-  // Hetzner setup, but a plain run of this script no longer touches
-  // Hetzner by accident.
-  const args = { whatsapp: false, payment: null, pdf: false, skipGithub: false, size: 'small', template: 'default', provider: 'oracle', sandbox: false };
+  // Chidera, 2026-09-23: "you can remove oracle i said i dint need it
+  // there" / "same with hetzner and ovh" (DigitalOcean's own credential
+  // also failed a live test the same day) -- every automated
+  // cloud-provider integration is gone. A server is now always created by
+  // hand first (any provider she actually wants that day -- nothing here
+  // cares which), and handed to this script as a plain --ip=.
+  const args = { whatsapp: false, payment: null, template: 'default', pdf: false, skipGithub: false, sandbox: false };
   for (const arg of argv) {
     if (arg === '--whatsapp') args.whatsapp = true;
     // Marks this client sandbox:true in the registry -- push-update.mjs and
@@ -82,22 +81,18 @@ function parseArgs(argv) {
     else if (arg.startsWith('--name=')) args.name = arg.slice('--name='.length);
     else if (arg.startsWith('--subdomain=')) args.subdomain = arg.slice('--subdomain='.length);
     else if (arg.startsWith('--custom-domain=')) args.customDomain = arg.slice('--custom-domain='.length).toLowerCase();
-    else if (arg.startsWith('--size=')) args.size = arg.slice('--size='.length);
     else if (arg.startsWith('--template=')) args.template = arg.slice('--template='.length);
-    else if (arg.startsWith('--provider=')) args.provider = arg.slice('--provider='.length);
+    else if (arg.startsWith('--ip=')) args.ip = arg.slice('--ip='.length);
     else if (arg.startsWith('--ebos-seed=')) args.ebosSeed = arg.slice('--ebos-seed='.length);
     else if (arg.startsWith('--esf-seed=')) args.esfSeed = arg.slice('--esf-seed='.length);
     else if (arg.startsWith('--shared-server=')) args.sharedServer = arg.slice('--shared-server='.length);
     else if (arg === '--new-shared-server') args.newSharedServer = true;
   }
-  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--size=small|medium|large] [--provider=oracle|hetzner|ovh|digitalocean] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server] [--sandbox]');
-  if (!['oracle', 'hetzner', 'ovh', 'digitalocean'].includes(args.provider)) throw new Error(`Unknown --provider="${args.provider}" -- only "oracle", "hetzner", "ovh" and "digitalocean" are wired up (see scripts/lib/oracle.mjs / hetzner.mjs / ovh.mjs / digitalocean.mjs).`);
-  // A shared server's IP is provider-agnostic once it exists (join mode
-  // never calls a provider API at all -- see the sharedMode==='join'
-  // branch below), so --provider only matters for --new-shared-server or
-  // the plain dedicated path.
+  if (!args.name) throw new Error('Usage: create-client.mjs --name="Client Name" [--subdomain=slug | --custom-domain=example.com] --ip=<already-created-server-ip> [--whatsapp] [--payment=flutterwave|paystack] [--pdf] [--template=default|ebos|esf] [--ebos-seed=path/to/config.json] [--esf-seed=path/to/config.json] [--shared-server=ip | --new-shared-server --ip=...] [--sandbox]');
   if (args.subdomain && args.customDomain) throw new Error('Pass either --subdomain or --custom-domain, not both.');
   if (args.sharedServer && args.newSharedServer) throw new Error('Pass either --shared-server=ip (join an existing shared server) or --new-shared-server (create one), not both.');
+  if (args.sharedServer && args.ip) throw new Error('--ip is meaningless with --shared-server -- that server already exists, its IP is --shared-server itself.');
+  if (!args.sharedServer && !args.ip) throw new Error('Missing --ip -- create the server by hand first (any provider), then pass its address here. --shared-server=ip is the only case that needs no --ip.');
   // Shared hosting only exists for docker-compose.shared.yml.template,
   // which only ebos-templates/ has (ESF is deliberately isolated per
   // business -- see the isEsf comment further down -- and the generic
@@ -154,32 +149,16 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const TEMPLATES_DIR = templatesDirFor(args.template);
   const subdomain = args.customDomain || `${args.slug}.${ROOT_DOMAIN}`;
-  const dropletName = `era-${args.slug}`;
 
   console.log(`Setting up "${args.name}" -> https://${subdomain}`);
 
   const secrets = loadSecrets();
   const requiredSecrets = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY'];
-  // --shared-server=ip (joining an existing shared server) never calls a
-  // provider API at all -- no server gets created, so no provider secret
-  // is needed for it. Every other path (dedicated, --new-shared-server)
-  // does create one, so it needs its provider's config; oracle.mjs's own
-  // requireOracleConfig gives a much more specific error below than
-  // requireSecrets could (which key, and what it's for), so Oracle's
-  // check happens there instead of being folded into this list.
-  if (!args.sharedServer) {
-    if (args.provider === 'hetzner') requiredSecrets.push('HETZNER_TOKEN');
-    if (args.provider === 'digitalocean') requiredSecrets.push('DIGITALOCEAN_TOKEN');
-  }
   // DirectAdmin secrets only matter for the erasystems.com.ng subdomain
   // path — a custom domain never touches that account.
   if (!args.customDomain) requiredSecrets.push('DA_USERNAME', 'DA_LOGIN_KEY', 'DA_HOST');
   if (!args.skipGithub) requiredSecrets.push('GITHUB_TOKEN');
   requireSecrets(secrets, requiredSecrets);
-  // See the comment above -- Oracle's/OVH's own config checks (which name
-  // each specific missing key) rather than a generic requireSecrets entry.
-  const oracleConfig = !args.sharedServer && args.provider === 'oracle' ? oracle.requireOracleConfig(secrets) : null;
-  const ovhConfig = !args.sharedServer && args.provider === 'ovh' ? ovh.requireOvhConfig(secrets) : null;
 
   const registry = loadRegistry();
   if (findClient(registry, args.slug)) {
@@ -276,9 +255,7 @@ async function main() {
   // gets deleted again before the error propagates, so a failed attempt
   // costs nothing and leaves nothing to hand-clean before retrying.
   let repo = null;
-  let serverId, ip;
-  let actualProvider = args.provider;
-  let createdServerThisRun = false;
+  let ip;
   let dnsOk = true;
   let dnsInstructions = null;
   let ownerPassword;
@@ -306,55 +283,26 @@ async function main() {
     console.log('Skipping GitHub repo creation (--skip-github).');
   }
 
-  // 2. Server
+  // 2. Server -- Chidera, 2026-09-23: every automated provider integration
+  // is gone, so this is always either an existing shared server (--shared-
+  // server=ip, unchanged) or an already-manually-created box (--ip=,
+  // whatever provider/method actually made it -- this script neither knows
+  // nor cares). provisionExistingServer makes Docker exist on it regardless
+  // of whether any cloud-init ever ran there.
   if (sharedMode === 'join') {
     // Already exists and is already running Docker + the shared Caddy --
     // that's what makes it "a registered shared server" (validated above).
     ip = args.sharedServer;
-    serverId = findServer(registry, ip).serverId;
     console.log(`Joining existing shared server ${ip}...`);
+    await provisionExistingServer(ip);
   } else {
-    console.log(`Creating ${args.provider} server (this takes a few minutes)...`);
-    if (args.provider === 'oracle') {
-      try {
-        serverId = await oracle.createServer(oracleConfig, { name: dropletName, size: args.size });
-        ip = await oracle.waitForServerActive(oracleConfig, serverId);
-      } catch (err) {
-        // Automatic Oracle -> Hetzner fallback -- Chidera's call, 2026-09-16:
-        // Oracle's own account is right at its Always Free capacity ceiling
-        // (real risk of a create failing on quota/capacity), and Hetzner's
-        // provider code is proven, tested, and ready. Only fires for the
-        // 'oracle' provider specifically (not ovh/digitalocean) and only
-        // when a Hetzner token is actually configured -- otherwise the
-        // real Oracle error surfaces as before, rather than a confusing
-        // "HETZNER_TOKEN missing" error masking what actually failed.
-        if (!secrets.HETZNER_TOKEN) throw err;
-        console.log(`Oracle server creation failed (${err.message}) -- falling back to Hetzner...`);
-        actualProvider = 'hetzner';
-        serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
-        ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
-      }
-    } else if (args.provider === 'ovh') {
-      serverId = await ovh.createServer(ovhConfig, { name: dropletName, size: args.size });
-      ip = await ovh.waitForServerActive(ovhConfig, serverId);
-    } else if (args.provider === 'digitalocean') {
-      const sizeSlug = { small: 's-2vcpu-4gb', medium: 's-4vcpu-8gb', large: 's-8vcpu-16gb' }[args.size] || 's-2vcpu-4gb';
-      serverId = await digitalocean.createDroplet(secrets.DIGITALOCEAN_TOKEN, { name: dropletName, size: sizeSlug });
-      ip = await digitalocean.waitForDropletActive(secrets.DIGITALOCEAN_TOKEN, serverId);
-    } else {
-      serverId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: dropletName, size: args.size });
-      ip = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, serverId);
-    }
-    // From here on a real, billable server exists -- the rollback below
-    // knows to delete it on any later failure in this same run.
-    createdServerThisRun = true;
-    console.log(`  Server IP: ${ip}, waiting for it to finish booting + installing Docker...`);
-    await waitForSsh(ip);
-    await waitForCloudInit(ip);
+    ip = args.ip;
+    console.log(`Setting up ${ip} (installing Docker if it isn't already there)...`);
+    await provisionExistingServer(ip);
     if (sharedMode === 'new') {
       console.log('Setting up the shared Caddy for this server...');
       await bootstrapSharedHost(ip);
-      upsertServer(registry, { ip, provider: actualProvider, serverId, mode: 'shared', createdAt: new Date().toISOString() });
+      upsertServer(registry, { ip, mode: 'shared', createdAt: new Date().toISOString() });
       // Saved immediately, not deferred to the final saveRegistry below --
       // if anything after this point fails, the rollback (or a future
       // manual cleanup) needs this server to actually be findable in
@@ -481,24 +429,12 @@ async function main() {
         console.log(`  NOTE: couldn't delete the repo (${cleanupErr.message}) -- delete "${repo.htmlUrl}" by hand.`);
       }
     }
-    // sharedMode === 'join' never created a server -- it's an existing one
-    // other clients may still depend on, so it's never touched here.
-    if (createdServerThisRun && sharedMode !== 'join') {
-      try {
-        console.log(`  Deleting ${actualProvider} server ${serverId} (${ip})...`);
-        if (actualProvider === 'hetzner') await hetzner.deleteServer(secrets.HETZNER_TOKEN, serverId);
-        else if (actualProvider === 'oracle') await oracle.deleteServer(oracleConfig, serverId);
-        else if (actualProvider === 'ovh') await ovh.deleteServer(ovhConfig, serverId);
-        else await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, serverId);
-        if (sharedMode === 'new') {
-          const freshRegistry = loadRegistry();
-          removeServer(freshRegistry, ip);
-          saveRegistry(freshRegistry);
-        }
-      } catch (cleanupErr) {
-        console.log(`  NOTE: couldn't delete the server (${cleanupErr.message}) -- delete ${ip} by hand (${actualProvider} console, or that provider's deleteServer with server id ${serverId}).`);
-      }
-    }
+    // Chidera, 2026-09-23: this script no longer creates servers itself --
+    // every one is manually made first (--ip=), so there's nothing of the
+    // server itself to roll back or delete here on failure, unlike the
+    // GitHub repo above. Re-running with the same --ip= after fixing
+    // whatever failed just re-provisions the same box (provisionExistingServer
+    // is idempotent).
     throw err;
   }
 
@@ -515,14 +451,6 @@ async function main() {
     isCustomDomain: Boolean(args.customDomain),
     dnsPending: !dnsOk,
     dnsPendingInstructions: dnsInstructions,
-    // For a joined shared server, the real provider is whatever that
-    // server was actually created as (recorded on it, not on args.provider
-    // -- --shared-server mode doesn't require --provider to be meaningful
-    // at all, since it never calls a provider API). Otherwise actualProvider,
-    // not args.provider -- differs from it exactly when the Oracle->Hetzner
-    // fallback above fired.
-    provider: sharedMode === 'join' ? findServer(registry, ip).provider : actualProvider,
-    serverId,
     ip,
     repo: repo ? repo.htmlUrl : null,
     needsWhatsapp: args.whatsapp,
@@ -563,8 +491,7 @@ async function main() {
   console.log(`  Repo:     ${repo ? repo.htmlUrl : '(skipped, --skip-github)'}`);
   const serverModeNote =
     sharedMode === 'none' ? '(dedicated)' : sharedMode === 'new' ? `(shared, just set up -- pass --shared-server=${ip} to add more clients to it)` : '(shared)';
-  const fallbackNote = actualProvider !== args.provider ? ` -- FELL BACK from ${args.provider} to ${actualProvider}, see the log above for why` : '';
-  console.log(`  Server:   ${ip} ${serverModeNote} [${actualProvider}]${fallbackNote}`);
+  console.log(`  Server:   ${ip} ${serverModeNote}`);
   if (args.ebosSeed || args.esfSeed) {
     // The generic DASHBOARD_USER/DASHBOARD_PASSWORD Basic Auth login this
     // template set doesn't use -- both EBOS and ESF have real per-owner

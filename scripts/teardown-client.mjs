@@ -7,10 +7,6 @@
 
 import { loadRegistry, saveRegistry, findClient, removeClient, clientsOnServer, findServer, removeServer } from './lib/registry.mjs';
 import { loadSecrets } from './lib/secrets.mjs';
-import * as digitalocean from './lib/digitalocean.mjs';
-import * as hetzner from './lib/hetzner.mjs';
-import * as oracle from './lib/oracle.mjs';
-import * as ovh from './lib/ovh.mjs';
 import * as github from './lib/github.mjs';
 import * as dns from './lib/dns.mjs';
 import { runRemote } from './lib/ssh.mjs';
@@ -60,36 +56,16 @@ async function main() {
       // situation, so this now actually deletes it instead of printing a
       // note asking for a manual follow-up step that's easy to forget.
       const server = findServer(registry, client.ip);
-      if (server) {
-        console.log(`  ${client.ip} now has no other clients on it -- deleting the server too...`);
-        if (server.provider === 'hetzner') {
-          await hetzner.deleteServer(secrets.HETZNER_TOKEN, server.serverId);
-        } else if (server.provider === 'oracle') {
-          await oracle.deleteServer(oracle.requireOracleConfig(secrets), server.serverId);
-        } else if (server.provider === 'ovh') {
-          await ovh.deleteServer(ovh.requireOvhConfig(secrets), server.serverId);
-        } else {
-          await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, server.serverId);
-        }
-        removeServer(registry, client.ip);
-        console.log('  Server deleted.');
-      } else {
-        console.log(`  NOTE: ${client.ip} has no other clients on it, but no matching entry was found in registry.servers to delete it by -- check the ${client.provider || 'oracle'} console by hand.`);
-      }
+      // Chidera, 2026-09-23: every automated cloud-provider integration is
+      // gone -- deleting the actual box is now a manual step (whatever
+      // console it was created in), same as creating one now is.
+      console.log(`  ${client.ip} now has no other clients on it -- delete that server by hand (its console), it's no longer billing anything useful.`);
+      if (server) removeServer(registry, client.ip);
     }
   } else {
-    const provider = client.provider || 'digitalocean'; // older registry entries predate the provider field
-    const serverId = client.serverId ?? client.dropletId;
-    console.log(`Deleting ${provider} server ${serverId} (${client.ip})...`);
-    if (provider === 'hetzner') {
-      await hetzner.deleteServer(secrets.HETZNER_TOKEN, serverId);
-    } else if (provider === 'oracle') {
-      await oracle.deleteServer(oracle.requireOracleConfig(secrets), serverId);
-    } else if (provider === 'ovh') {
-      await ovh.deleteServer(ovh.requireOvhConfig(secrets), serverId);
-    } else {
-      await digitalocean.deleteDroplet(secrets.DIGITALOCEAN_TOKEN, serverId);
-    }
+    // Chidera, 2026-09-23: same as the shared-server case above -- no
+    // provider integration left to delete this with, it's a manual step.
+    console.log(`Server ${client.ip} still exists -- delete it by hand (its console) once you've confirmed this teardown is really what you wanted.`);
   }
 
   const repoMatch = client.repo ? client.repo.match(/github\.com\/([^/]+)\/([^/]+)/) : null;

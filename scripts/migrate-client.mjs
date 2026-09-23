@@ -20,11 +20,10 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { loadSecrets, requireSecrets } from './lib/secrets.mjs';
+import { loadSecrets } from './lib/secrets.mjs';
 import { loadRegistry, saveRegistry, findClient, findServer, upsertServer } from './lib/registry.mjs';
-import * as oracle from './lib/oracle.mjs';
-import * as hetzner from './lib/hetzner.mjs';
-import { waitForSsh, waitForCloudInit, runRemote, copyToRemote, readRemote } from './lib/ssh.mjs';
+import { provisionExistingServer } from './lib/manual-server.mjs';
+import { runRemote, copyToRemote, readRemote } from './lib/ssh.mjs';
 import { bootstrapSharedHost, allocatePorts, renderSiteBlock, addSite } from './lib/shared-host.mjs';
 import { backupClient } from './lib/backup.mjs';
 import { templatesDirFor } from './lib/templates-dir.mjs';
@@ -46,21 +45,23 @@ function savePending(pending) {
 }
 
 function parseArgs(argv) {
-  const args = { provider: 'oracle', size: 'small' };
+  const args = {};
   for (const arg of argv) {
     if (arg.startsWith('--client=')) args.client = arg.slice('--client='.length);
-    else if (arg.startsWith('--provider=')) args.provider = arg.slice('--provider='.length);
-    else if (arg.startsWith('--size=')) args.size = arg.slice('--size='.length);
+    else if (arg.startsWith('--ip=')) args.ip = arg.slice('--ip='.length);
     else if (arg.startsWith('--shared-server=')) args.sharedServer = arg.slice('--shared-server='.length);
     else if (arg === '--new-shared-server') args.newSharedServer = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.client) throw new Error('--client=<slug> is required.');
   if (!args.sharedServer && !args.newSharedServer) {
-    throw new Error('Pass either --shared-server=ip (an existing shared server this client should join) or --new-shared-server.');
+    throw new Error('Pass either --shared-server=ip (an existing shared server this client should join) or --new-shared-server --ip=<already-created-server-ip>.');
   }
   if (args.sharedServer && args.newSharedServer) {
     throw new Error('Pass either --shared-server=ip or --new-shared-server, not both.');
+  }
+  if (args.newSharedServer && !args.ip) {
+    throw new Error('--new-shared-server needs --ip= -- create the server by hand first, then pass its address here. See scripts/lib/manual-server.mjs.');
   }
   return args;
 }
@@ -96,29 +97,18 @@ async function main() {
   const envReal = await readRemote(sourceIp, `/opt/${slug}/.env`);
   let composeReal = await readRemote(sourceIp, `/opt/${slug}/docker-compose.yml`);
 
-  // 3. Destination server.
-  let destIp, destServerId, destProvider;
+  // 3. Destination server. Chidera, 2026-09-23: every automated
+  // cloud-provider integration is gone -- --new-shared-server's box has to
+  // already exist (--ip=, created by hand), this just makes Docker exist
+  // on it and sets up the shared Caddy.
+  let destIp;
   if (args.newSharedServer) {
-    console.log(`Creating a new ${args.provider} server for this migration...`);
-    if (args.provider === 'oracle') {
-      const oracleConfig = oracle.requireOracleConfig(secrets);
-      destServerId = await oracle.createServer(oracleConfig, { name: `era-shared-${slug}`, size: args.size });
-      destIp = await oracle.waitForServerActive(oracleConfig, destServerId);
-      destProvider = 'oracle';
-    } else if (args.provider === 'hetzner') {
-      requireSecrets(secrets, ['HETZNER_TOKEN']);
-      destServerId = await hetzner.createServer(secrets.HETZNER_TOKEN, { name: `era-shared-${slug}`, size: args.size });
-      destIp = await hetzner.waitForServerActive(secrets.HETZNER_TOKEN, destServerId);
-      destProvider = 'hetzner';
-    } else {
-      throw new Error(`--provider=${args.provider} isn't wired up for --new-shared-server in this script yet.`);
-    }
-    console.log(`  Server IP: ${destIp}, waiting for it to finish booting...`);
-    await waitForSsh(destIp);
-    await waitForCloudInit(destIp);
+    destIp = args.ip;
+    console.log(`Setting up ${destIp} for this migration (installing Docker if it isn't already there)...`);
+    await provisionExistingServer(destIp);
     console.log('  Setting up the shared Caddy...');
     await bootstrapSharedHost(destIp);
-    upsertServer(registry, { ip: destIp, provider: destProvider, serverId: destServerId, mode: 'shared', createdAt: new Date().toISOString() });
+    upsertServer(registry, { ip: destIp, mode: 'shared', createdAt: new Date().toISOString() });
     saveRegistry(registry);
   } else {
     const server = findServer(registry, args.sharedServer);
@@ -126,8 +116,6 @@ async function main() {
       throw new Error(`"${args.sharedServer}" isn't a registered shared server.`);
     }
     destIp = args.sharedServer;
-    destServerId = server.serverId;
-    destProvider = server.provider;
   }
 
   if (destIp === sourceIp) throw new Error('Destination is the same as the source server -- nothing to migrate.');
@@ -219,7 +207,7 @@ async function main() {
   await addSite(destIp, slug, siteBlock);
 
   const pending = loadPending();
-  pending[slug] = { ip: destIp, provider: destProvider, serverId: destServerId, sharedPorts: destPorts, migratedAt: new Date().toISOString() };
+  pending[slug] = { ip: destIp, sharedPorts: destPorts, migratedAt: new Date().toISOString() };
   savePending(pending);
 
   console.log('');

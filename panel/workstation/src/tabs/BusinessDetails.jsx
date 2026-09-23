@@ -14,10 +14,8 @@ function isUntouchedDefault(fields) {
 export default function BusinessDetails({
   subdomain,
   setSubdomain,
-  size,
-  setSize,
-  provider,
-  setProvider,
+  ip,
+  setIp,
   sharedServerMode,
   setSharedServerMode,
   sharedServerIp,
@@ -188,25 +186,6 @@ export default function BusinessDetails({
             <label>Subdomain (optional, auto-generated from the business name if blank)</label>
             <input value={subdomain} onChange={(e) => setSubdomain(e.target.value)} placeholder="e.g. sunset-grill" />
           </div>
-          <div className="field">
-            <label>Server size</label>
-            <select value={size} onChange={(e) => setSize(e.target.value)}>
-              <option value="small">Small</option>
-              <option value="medium">Medium</option>
-              <option value="large">Large</option>
-            </select>
-          </div>
-        </div>
-        <div className="form-row">
-          <div className="field">
-            <label>Server provider</label>
-            <select value={provider} onChange={(e) => setProvider(e.target.value)}>
-              <option value="oracle">Oracle Cloud</option>
-              <option value="ovh">OVHcloud</option>
-              <option value="digitalocean">DigitalOcean</option>
-              <option value="hetzner">Hetzner</option>
-            </select>
-          </div>
         </div>
         <div className="form-row">
           <div className="field">
@@ -217,7 +196,7 @@ export default function BusinessDetails({
               <option value="join">Join an existing shared server</option>
             </select>
           </div>
-          {sharedServerMode === 'join' && (
+          {sharedServerMode === 'join' ? (
             <div className="field">
               <label>Which shared server?</label>
               {sharedServers.length ? (
@@ -225,13 +204,18 @@ export default function BusinessDetails({
                   <option value="">Choose one...</option>
                   {sharedServers.map((s) => (
                     <option key={s.ip} value={s.ip}>
-                      {s.ip} ({s.provider}, {s.clientCount} client{s.clientCount === 1 ? '' : 's'} on it)
+                      {s.ip} ({s.clientCount} client{s.clientCount === 1 ? '' : 's'} on it)
                     </option>
                   ))}
                 </select>
               ) : (
                 <p className="hint">No shared servers exist yet -- pick "Start a new shared server" instead.</p>
               )}
+            </div>
+          ) : (
+            <div className="field">
+              <label>Server IP (create it by hand first -- any provider -- then paste its address here)</label>
+              <input value={ip} onChange={(e) => setIp(e.target.value)} placeholder="e.g. 203.0.113.5" />
             </div>
           )}
         </div>

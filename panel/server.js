@@ -7,7 +7,6 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadRegistry, saveRegistry, findClient, upsertClient } from '../scripts/lib/registry.mjs';
 import { loadSecrets, patchSecrets } from '../scripts/lib/secrets.mjs';
-import { getServer, monthlyPriceForServer } from '../scripts/lib/hetzner.mjs';
 import { startJob, getJob, runScript } from './jobs.mjs';
 import { router as workstationRoutes } from './routes/workstation.js';
 import { router as workstationEsfRoutes } from './routes/workstation-esf.js';
@@ -591,15 +590,14 @@ function getEbosClients(registry) {
 }
 
 // One business's live status: is its site actually reachable right now,
-// what has it spent on real Claude calls this month (self-reported by its
-// own dashboard, via engine/claude.js's ai_usage log -- Anthropic's own
-// billing can't split this out since every business shares one API key),
-// and what does its Hetzner server itself cost per month. Errors on any one
-// piece never take down the whole row -- a business that's actually down is
-// exactly the thing this is supposed to surface, not something to hide
-// behind a failed Promise.all.
-async function ebosBusinessStatus(client, hetznerToken) {
-  const [up, usage, serverCost, monitor, deliveryConfig, voiceConfig, dineinConfig, crmConfig, posSyncConfig] = await Promise.all([
+// and what has it spent on real Claude calls this month (self-reported by
+// its own dashboard, via engine/claude.js's ai_usage log -- Anthropic's own
+// billing can't split this out since every business shares one API key).
+// Errors on any one piece never take down the whole row -- a business
+// that's actually down is exactly the thing this is supposed to surface,
+// not something to hide behind a failed Promise.all.
+async function ebosBusinessStatus(client) {
+  const [up, usage, monitor, deliveryConfig, voiceConfig, dineinConfig, crmConfig, posSyncConfig] = await Promise.all([
     fetch(`https://${client.subdomain}/healthz`, { signal: AbortSignal.timeout(6000) })
       .then((res) => res.ok)
       .catch(() => false),
@@ -609,11 +607,6 @@ async function ebosBusinessStatus(client, hetznerToken) {
     })
       .then((res) => (res.ok ? res.json() : null))
       .catch(() => null),
-    client.serverId && hetznerToken
-      ? getServer(hetznerToken, client.serverId)
-          .then((server) => monthlyPriceForServer(server))
-          .catch(() => null)
-      : Promise.resolve(null),
     // Bot Monitoring's counts half -- see ebos-templates/dashboard/routes/
     // api.js's /monitor/summary. Same trust/fetch pattern as usage-summary
     // above, just a different endpoint on the same business.
@@ -683,7 +676,13 @@ async function ebosBusinessStatus(client, hetznerToken) {
     aiCallsThisMonth: usage?.totalCalls ?? null,
     recentErrorCount: usage?.recentErrorCount ?? null,
     lastErrorMessage: usage?.lastErrorMessage ?? null,
-    serverCostMonthlyUsd: serverCost,
+    // No provider integration left to look this up with (Chidera,
+    // 2026-09-23: "you can remove oracle... same with hetzner and ovh") --
+    // was already null for every current business even before that (none
+    // of them had a live Hetzner token/serverId pair), so this is a
+    // no-op in practice, not a behavior change. The UI below already
+    // treats a missing cost as "unknown" rather than $0.
+    serverCostMonthlyUsd: null,
     lastPushedAt: client.lastPushedAt || null,
     chowdeckEnabled: Boolean(client.chowdeckEnabled),
     deliveryMode: deliveryConfig?.mode || 'none',
@@ -910,69 +909,9 @@ function page(clients, ebosClients) {
         <option value="flutterwave">Flutterwave</option>
         <option value="paystack">Paystack</option>
       </select>
-      <label>Size</label>
-      <select name="size">
-        <option value="small">Small</option>
-        <option value="medium">Medium</option>
-        <option value="large">Large</option>
-      </select>
-      <label>Server provider</label>
-      <select name="provider">
-        <option value="oracle">Oracle Cloud</option>
-        <option value="ovh">OVHcloud</option>
-        <option value="digitalocean">DigitalOcean</option>
-        <option value="hetzner">Hetzner</option>
-      </select>
+      <label>Server IP (create the server by hand first -- any provider -- then paste its address here)</label>
+      <input name="ip" required placeholder="e.g. 203.0.113.5">
       <button type="submit">Create client</button>
-    </form>
-  </fieldset>
-
-  <fieldset>
-    <legend>OVHcloud credentials</legend>
-    <p class="muted">Needed once before creating any client with OVHcloud as the provider. Application Key/Secret come from <a href="https://eu.api.ovh.com/createApp" target="_blank" rel="noopener">eu.api.ovh.com/createApp</a>; Consumer Key comes from running <code>node scripts/ovh-get-consumer-key.mjs</code> once (a one-time interactive step -- it can't be generated purely by form); Project ID is your Public Cloud project's "serviceName" (OVH console -&gt; Public Cloud -&gt; Project Settings -&gt; General information). Status: <span id="ovhCredsStatus">checking...</span></p>
-    <form id="ovhCredsForm">
-      <label>Application Key</label><input name="applicationKey" required>
-      <label>Application Secret</label><input name="applicationSecret" type="password" required>
-      <label>Consumer Key</label><input name="consumerKey" type="password" required>
-      <label>Project ID (serviceName)</label><input name="projectId" required>
-      <label>SSH public key (same one used for Hetzner/Oracle)</label><input name="sshPublicKey" required>
-      <button type="submit">Save</button>
-    </form>
-  </fieldset>
-
-  <fieldset>
-    <legend>Oracle Cloud credentials (client-hosting account)</legend>
-    <p class="muted">For a SEPARATE Oracle account used only for client hosting -- not the internal-ops one era-demo runs on. From that account's OCI console: Tenancy/User OCID and Fingerprint are under Identity -&gt; Users -&gt; your user -&gt; API Keys -&gt; Add API Key (paste the raw .pem private key file's contents below, exactly as downloaded -- this form base64-encodes it for you, no separate command needed). Compartment OCID -&gt; the tenancy OCID itself if you haven't created a sub-compartment. Subnet OCID -&gt; Networking -&gt; Virtual Cloud Networks -&gt; create one with the "VCN wizard" (creates a public subnet automatically) -&gt; that subnet's OCID. Image OCID -&gt; Compute -&gt; Images -&gt; filter by your region, pick an Ubuntu 24.04 image, copy its OCID. Status: <span id="oracleCredsStatus">checking...</span></p>
-    <form id="oracleCredsForm">
-      <label>Tenancy OCID</label><input name="tenancyOcid" required>
-      <label>User OCID</label><input name="userOcid" required>
-      <label>Fingerprint</label><input name="fingerprint" required>
-      <label>Private key (paste the raw .pem file contents)</label>
-      <textarea name="privateKey" rows="6" required placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
-      <label>Region (e.g. uk-london-1)</label><input name="region" required>
-      <label>Compartment OCID</label><input name="compartmentOcid" required>
-      <label>Subnet OCID</label><input name="subnetOcid" required>
-      <label>Image OCID (Ubuntu 24.04, for this region)</label><input name="imageOcid" required>
-      <label>SSH public key</label><input name="sshPublicKey" required>
-      <button type="submit">Save</button>
-    </form>
-  </fieldset>
-
-  <fieldset>
-    <legend>DigitalOcean credentials</legend>
-    <p class="muted">Needed once before creating any client with DigitalOcean as the provider. Token comes from DigitalOcean's control panel -&gt; API -&gt; Tokens/Keys -&gt; Generate New Token (give it Write scope). Also add your SSH public key at Settings -&gt; Security -&gt; SSH Keys in the DO console first -- unlike OVH, this isn't set via a form field here, every droplet just picks up whatever SSH keys already exist on the account (same as Hetzner). Status: <span id="doCredsStatus">checking...</span></p>
-    <form id="doCredsForm">
-      <label>API Token</label><input name="token" type="password" required>
-      <button type="submit">Save</button>
-    </form>
-  </fieldset>
-
-  <fieldset>
-    <legend>Hetzner credentials</legend>
-    <p class="muted">Needed once before creating any client with Hetzner as the provider. Token comes from the Hetzner Cloud console -&gt; Security -&gt; API Tokens -&gt; Generate API Token (Read &amp; Write). Also add your SSH public key at Security -&gt; SSH Keys in the Hetzner console first -- every server just picks up whatever SSH keys already exist on the account, same as DigitalOcean. Status: <span id="hetznerCredsStatus">checking...</span></p>
-    <form id="hetznerCredsForm">
-      <label>API Token</label><input name="token" type="password" required>
-      <button type="submit">Save</button>
     </form>
   </fieldset>
 
@@ -1077,13 +1016,15 @@ function page(clients, ebosClients) {
     <h4>Migrate to another server</h4>
     <p class="muted">Moves this client's real database and secrets to a different shared server -- no fresh secrets, no empty database, no DNS change (that's the separate "Cutover" step below, only after you've checked the new deployment yourself).</p>
     <form id="migrateForm2">
-      <label>Provider</label>
-      <select name="provider"><option value="oracle">Oracle</option><option value="hetzner">Hetzner</option></select>
       <label>Destination</label>
       <select name="sharedServerMode" id="migrateSharedServerMode">
         <option value="new">New shared server</option>
         <option value="join">Join an existing shared server</option>
       </select>
+      <div id="migrateNewServerIpWrap">
+        <label>Server IP (create it by hand first -- any provider -- then paste its address here)</label>
+        <input name="newServerIp" placeholder="e.g. 203.0.113.5">
+      </div>
       <div id="migrateSharedServerIpWrap" class="hidden">
         <label>Shared server</label>
         <select name="sharedServerIp" id="migrateSharedServerIp"></select>
@@ -1292,8 +1233,7 @@ document.getElementById('createForm').addEventListener('submit', (e) => {
     whatsapp: f.get('whatsapp') === 'on',
     pdf: f.get('pdf') === 'on',
     payment: f.get('payment') || undefined,
-    size: f.get('size'),
-    provider: f.get('provider') || undefined,
+    ip: f.get('ip'),
   });
 });
 
@@ -1468,13 +1408,15 @@ document.getElementById('teardownForm').addEventListener('submit', (e) => {
 });
 
 document.getElementById('migrateSharedServerMode').addEventListener('change', async (e) => {
-  const wrap = document.getElementById('migrateSharedServerIpWrap');
-  if (e.target.value !== 'join') { wrap.classList.add('hidden'); return; }
-  wrap.classList.remove('hidden');
+  const joinWrap = document.getElementById('migrateSharedServerIpWrap');
+  const newWrap = document.getElementById('migrateNewServerIpWrap');
+  if (e.target.value !== 'join') { joinWrap.classList.add('hidden'); newWrap.classList.remove('hidden'); return; }
+  newWrap.classList.add('hidden');
+  joinWrap.classList.remove('hidden');
   const select = document.getElementById('migrateSharedServerIp');
   select.innerHTML = '<option>Loading...</option>';
   const servers = await fetch('/api/workstation/shared-servers').then((r) => r.json());
-  select.innerHTML = servers.map((s) => '<option value="' + s.ip + '">' + s.ip + ' (' + s.provider + ', ' + s.clientCount + ' client(s))</option>').join('') || '<option value="">No shared servers yet</option>';
+  select.innerHTML = servers.map((s) => '<option value="' + s.ip + '">' + s.ip + ' (' + s.clientCount + ' client(s))</option>').join('') || '<option value="">No shared servers yet</option>';
 });
 
 document.getElementById('migrateForm2').addEventListener('submit', (e) => {
@@ -1484,9 +1426,9 @@ document.getElementById('migrateForm2').addEventListener('submit', (e) => {
   if (!confirm('Migrate ' + currentClient + ' to a ' + (sharedServerMode === 'join' ? 'shared server (' + f.get('sharedServerIp') + ')' : 'brand new shared server') + '? This deploys a real copy of its live data -- the old server keeps running untouched until you separately cut over.')) return;
   submitJson('/api/migrate-client', {
     client: currentClient,
-    provider: f.get('provider'),
     sharedServerMode,
     sharedServerIp: f.get('sharedServerIp') || undefined,
+    newServerIp: f.get('newServerIp') || undefined,
   });
 });
 
@@ -1700,146 +1642,6 @@ if (chowdeckSecretForm) {
     e.target.reset();
     loadChowdeckSecretStatus();
     alert('Saved. Toggle Chowdeck on for a business above to start using it.');
-  });
-}
-
-async function loadOvhCredsStatus() {
-  const el = document.getElementById('ovhCredsStatus');
-  if (!el) return;
-  try {
-    const res = await fetch('/api/ovh-creds-status');
-    const data = await res.json();
-    el.textContent = data.configured ? 'configured' : 'not set yet';
-  } catch (err) {
-    el.textContent = 'error checking';
-  }
-}
-loadOvhCredsStatus();
-
-const ovhCredsForm = document.getElementById('ovhCredsForm');
-if (ovhCredsForm) {
-  ovhCredsForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const f = new FormData(e.target);
-    const res = await fetch('/api/ovh-creds', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        applicationKey: f.get('applicationKey'),
-        applicationSecret: f.get('applicationSecret'),
-        consumerKey: f.get('consumerKey'),
-        projectId: f.get('projectId'),
-        sshPublicKey: f.get('sshPublicKey'),
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) { alert(data.error || 'Failed'); return; }
-    e.target.reset();
-    loadOvhCredsStatus();
-    alert('Saved. You can now create a client with OVHcloud as the provider.');
-  });
-}
-
-async function loadOracleCredsStatus() {
-  const el = document.getElementById('oracleCredsStatus');
-  if (!el) return;
-  try {
-    const res = await fetch('/api/oracle-creds-status');
-    const data = await res.json();
-    el.textContent = data.configured ? 'configured' : 'not set yet';
-  } catch (err) {
-    el.textContent = 'error checking';
-  }
-}
-loadOracleCredsStatus();
-
-const oracleCredsForm = document.getElementById('oracleCredsForm');
-if (oracleCredsForm) {
-  oracleCredsForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const f = new FormData(e.target);
-    const res = await fetch('/api/oracle-creds', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tenancyOcid: f.get('tenancyOcid'),
-        userOcid: f.get('userOcid'),
-        fingerprint: f.get('fingerprint'),
-        privateKey: f.get('privateKey'),
-        region: f.get('region'),
-        compartmentOcid: f.get('compartmentOcid'),
-        subnetOcid: f.get('subnetOcid'),
-        imageOcid: f.get('imageOcid'),
-        sshPublicKey: f.get('sshPublicKey'),
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) { alert(data.error || 'Failed'); return; }
-    e.target.reset();
-    loadOracleCredsStatus();
-    alert('Saved. You can now create a client with Oracle Cloud as the provider.');
-  });
-}
-
-async function loadDoCredsStatus() {
-  const el = document.getElementById('doCredsStatus');
-  if (!el) return;
-  try {
-    const res = await fetch('/api/do-creds-status');
-    const data = await res.json();
-    el.textContent = data.configured ? 'configured' : 'not set yet';
-  } catch (err) {
-    el.textContent = 'error checking';
-  }
-}
-loadDoCredsStatus();
-
-const doCredsForm = document.getElementById('doCredsForm');
-if (doCredsForm) {
-  doCredsForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const f = new FormData(e.target);
-    const res = await fetch('/api/do-creds', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: f.get('token') }),
-    });
-    const data = await res.json();
-    if (!res.ok) { alert(data.error || 'Failed'); return; }
-    e.target.reset();
-    loadDoCredsStatus();
-    alert('Saved. You can now create a client with DigitalOcean as the provider.');
-  });
-}
-
-async function loadHetznerCredsStatus() {
-  const el = document.getElementById('hetznerCredsStatus');
-  if (!el) return;
-  try {
-    const res = await fetch('/api/hetzner-creds-status');
-    const data = await res.json();
-    el.textContent = data.configured ? 'configured' : 'not set yet';
-  } catch (err) {
-    el.textContent = 'error checking';
-  }
-}
-loadHetznerCredsStatus();
-
-const hetznerCredsForm = document.getElementById('hetznerCredsForm');
-if (hetznerCredsForm) {
-  hetznerCredsForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const f = new FormData(e.target);
-    const res = await fetch('/api/hetzner-creds', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: f.get('token') }),
-    });
-    const data = await res.json();
-    if (!res.ok) { alert(data.error || 'Failed'); return; }
-    e.target.reset();
-    loadHetznerCredsStatus();
-    alert('Saved. You can now create a client with Hetzner as the provider.');
   });
 }
 
@@ -2127,14 +1929,7 @@ app.get('/api/ebos/deep-health', async (req, res) => {
 
 app.get('/api/ebos/status', async (req, res) => {
   const ebosClients = getEbosClients(loadRegistry());
-  let hetznerToken = null;
-  try {
-    hetznerToken = loadSecrets().HETZNER_TOKEN || null;
-  } catch {
-    // Server cost just comes back null for every row below if secrets.env
-    // can't be read -- uptime/AI cost still work without it.
-  }
-  const statuses = await Promise.all(ebosClients.map((c) => ebosBusinessStatus(c, hetznerToken)));
+  const statuses = await Promise.all(ebosClients.map((c) => ebosBusinessStatus(c)));
   res.json(statuses);
 });
 
@@ -2511,134 +2306,6 @@ app.post('/api/ebos/chowdeck-secret', (req, res) => {
   }
 });
 
-// OVHcloud credentials for create-client.mjs's --provider=ovh path (see
-// scripts/lib/ovh.mjs's header for what each key is/where it comes from).
-// Same "set once from the browser, never SSH" shape as the Chowdeck secret
-// above. Never returns the actual stored values back to the browser, only
-// whether they're currently set.
-app.get('/api/ovh-creds-status', (req, res) => {
-  try {
-    const secrets = loadSecrets();
-    res.json({ configured: Boolean(secrets.OVH_APPLICATION_KEY && secrets.OVH_APPLICATION_SECRET && secrets.OVH_CONSUMER_KEY && secrets.OVH_PROJECT_ID) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/ovh-creds', (req, res) => {
-  const { applicationKey, applicationSecret, consumerKey, projectId, sshPublicKey } = req.body;
-  if (!applicationKey || !applicationSecret || !consumerKey || !projectId || !sshPublicKey) {
-    return res.status(400).json({ error: 'applicationKey, applicationSecret, consumerKey, projectId and sshPublicKey are all required' });
-  }
-  try {
-    patchSecrets({
-      OVH_APPLICATION_KEY: applicationKey,
-      OVH_APPLICATION_SECRET: applicationSecret,
-      OVH_CONSUMER_KEY: consumerKey,
-      OVH_PROJECT_ID: projectId,
-      OVH_SSH_PUBLIC_KEY: sshPublicKey,
-    });
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Oracle Cloud credentials for create-client.mjs's --provider=oracle path
-// (scripts/lib/oracle.mjs). A single shared set, same keys era-demo's own
-// account happened to use -- safe to repoint at a different Oracle account
-// (Chidera's call, 2026-09-15: a second account dedicated to client
-// hosting, kept separate from the internal-ops one era-demo runs on),
-// since these credentials are only ever used to CREATE or DELETE a
-// server, never to operate one that's already running -- era-demo's own
-// live containers don't read secrets.env at all. Private key is accepted
-// here as the raw .pem contents (what OCI's console actually hands you)
-// and base64-encoded server-side into ORACLE_PRIVATE_KEY_B64 -- see
-// oracle.mjs's header comment for why that encoding exists (secrets.env
-// is single-line KEY=value, can't hold a real multi-line PEM directly).
-app.get('/api/oracle-creds-status', (req, res) => {
-  try {
-    const secrets = loadSecrets();
-    res.json({
-      configured: Boolean(
-        secrets.ORACLE_TENANCY_OCID && secrets.ORACLE_USER_OCID && secrets.ORACLE_FINGERPRINT && secrets.ORACLE_PRIVATE_KEY_B64 && secrets.ORACLE_REGION
-      ),
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/oracle-creds', (req, res) => {
-  const { tenancyOcid, userOcid, fingerprint, privateKey, region, compartmentOcid, subnetOcid, imageOcid, sshPublicKey } = req.body;
-  if (!tenancyOcid || !userOcid || !fingerprint || !privateKey || !region || !compartmentOcid || !subnetOcid || !imageOcid || !sshPublicKey) {
-    return res.status(400).json({ error: 'All fields are required.' });
-  }
-  try {
-    patchSecrets({
-      ORACLE_TENANCY_OCID: tenancyOcid,
-      ORACLE_USER_OCID: userOcid,
-      ORACLE_FINGERPRINT: fingerprint,
-      ORACLE_PRIVATE_KEY_B64: Buffer.from(privateKey, 'utf8').toString('base64'),
-      ORACLE_REGION: region,
-      ORACLE_COMPARTMENT_OCID: compartmentOcid,
-      ORACLE_SUBNET_OCID: subnetOcid,
-      ORACLE_IMAGE_OCID: imageOcid,
-      ORACLE_SSH_PUBLIC_KEY: sshPublicKey,
-    });
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// DigitalOcean credentials for create-client.mjs's --provider=digitalocean
-// path -- a plain bearer token (scripts/lib/digitalocean.mjs), no
-// multi-credential dance like OVH's. Same self-service shape as everything
-// else above.
-app.get('/api/do-creds-status', (req, res) => {
-  try {
-    const secrets = loadSecrets();
-    res.json({ configured: Boolean(secrets.DIGITALOCEAN_TOKEN) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/do-creds', (req, res) => {
-  const { token } = req.body;
-  if (!token) return res.status(400).json({ error: 'token is required' });
-  try {
-    patchSecrets({ DIGITALOCEAN_TOKEN: token });
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Hetzner credentials for create-client.mjs's --provider=hetzner path --
-// a plain bearer token (scripts/lib/hetzner.mjs), same self-service shape
-// as DigitalOcean's above.
-app.get('/api/hetzner-creds-status', (req, res) => {
-  try {
-    const secrets = loadSecrets();
-    res.json({ configured: Boolean(secrets.HETZNER_TOKEN) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/hetzner-creds', (req, res) => {
-  const { token } = req.body;
-  if (!token) return res.status(400).json({ error: 'token is required' });
-  try {
-    patchSecrets({ HETZNER_TOKEN: token });
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ONE shared Meta Tech Provider app for every EBOS business's self-serve
 // WhatsApp connect (see /connect/:token above), same "set once in
 // secrets.env, never per-business" shape as the Chowdeck/OVH creds above.
@@ -2702,17 +2369,16 @@ app.get('/api/clients', (req, res) => {
 // wrong: "ebos has its create workflow the form is for seperate businesses
 // that are not ebos." Reverted.
 app.post('/api/create', (req, res) => {
-  const { name, subdomain, customDomain, whatsapp, pdf, payment, size, provider } = req.body;
+  const { name, subdomain, customDomain, whatsapp, pdf, payment, ip } = req.body;
   if (!name) return res.status(400).json({ error: 'name is required' });
+  if (!ip) return res.status(400).json({ error: 'ip is required -- create the server by hand first, then paste its address here.' });
   if (subdomain && customDomain) return res.status(400).json({ error: 'Use either Subdomain or Custom domain, not both.' });
-  const args = [`--name=${name}`];
+  const args = [`--name=${name}`, `--ip=${ip}`];
   if (customDomain) args.push(`--custom-domain=${customDomain}`);
   else if (subdomain) args.push(`--subdomain=${subdomain}`);
   if (whatsapp) args.push('--whatsapp');
   if (pdf) args.push('--pdf');
   if (payment) args.push(`--payment=${payment}`);
-  if (size) args.push(`--size=${size}`);
-  if (provider) args.push(`--provider=${provider}`);
   const jobId = startJob('create-client.mjs', args);
   res.json({ jobId });
 });
@@ -2910,13 +2576,13 @@ app.post('/api/teardown', (req, res) => {
 // this does and doesn't touch (never DNS/registry -- that's cutover below,
 // a deliberate separate step after a human verifies the move worked).
 app.post('/api/migrate-client', (req, res) => {
-  const { client, provider, sharedServerMode, sharedServerIp } = req.body;
+  const { client, sharedServerMode, sharedServerIp, newServerIp } = req.body;
   if (!client) return res.status(400).json({ error: 'client is required' });
   if (sharedServerMode === 'join' && !sharedServerIp) return res.status(400).json({ error: 'Pick which shared server to join.' });
+  if (sharedServerMode !== 'join' && !newServerIp) return res.status(400).json({ error: 'Create the new server by hand first, then paste its IP.' });
   const args = [`--client=${client}`];
-  if (provider) args.push(`--provider=${provider}`);
   if (sharedServerMode === 'join') args.push(`--shared-server=${sharedServerIp}`);
-  else args.push('--new-shared-server');
+  else args.push('--new-shared-server', `--ip=${newServerIp}`);
   const jobId = startJob('migrate-client.mjs', args);
   res.json({ jobId });
 });

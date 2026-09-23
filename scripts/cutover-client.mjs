@@ -60,8 +60,6 @@ async function main() {
     name: args.client,
     ip: move.ip,
     hostedOn: move.ip,
-    provider: move.provider,
-    serverId: move.serverId,
     sharedPorts: move.sharedPorts,
   });
   saveRegistry(registry);

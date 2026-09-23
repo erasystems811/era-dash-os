@@ -1,17 +1,17 @@
 #!/usr/bin/env node
-// Usage: node redeploy-client.mjs --client=slug [--rebuild-os]
+// Usage: node redeploy-client.mjs --client=slug
 //
 // Re-deploys the standard app stack to an EXISTING client's server, using
 // exactly the same templates/steps create-client.mjs uses at first setup.
-// Does not touch the client's Hetzner server record, GitHub repo, or DNS —
+// Does not touch the client's server record, GitHub repo, or DNS —
 // only what's running on the server. Generates fresh secrets every run
 // (new DB password, dashboard password, etc.) since the old ones live only
 // on the server's disk and can't be recovered once wiped.
 //
-// --rebuild-os first reinstalls the server's OS from scratch (same IP) via
-// the Hetzner API before redeploying — use this when the server itself is
-// in a broken state (e.g. SSH key never got attached correctly at
-// creation), not for a routine app update.
+// Chidera, 2026-09-23: every automated cloud-provider integration is gone
+// (see scripts/lib/manual-server.mjs) -- if the server itself is in a
+// broken state (not just the app on it), that's now a manual OS reinstall
+// (whatever console the box actually lives on), then re-run this normally.
 
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -22,19 +22,17 @@ import { loadSecrets, requireSecrets } from './lib/secrets.mjs';
 import { loadRegistry, saveRegistry, upsertClient, findClient } from './lib/registry.mjs';
 import { randomSecret, randomPassword, randomEncryptionKey } from './lib/random.mjs';
 import { render } from './lib/render-template.mjs';
-import * as hetzner from './lib/hetzner.mjs';
-import { waitForSsh, waitForCloudInit, runRemote, copyToRemote } from './lib/ssh.mjs';
+import { runRemote, copyToRemote } from './lib/ssh.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = path.join(__dirname, '..', 'templates');
 
 function parseArgs(argv) {
-  const args = { rebuildOs: false };
+  const args = {};
   for (const arg of argv) {
-    if (arg === '--rebuild-os') args.rebuildOs = true;
-    else if (arg.startsWith('--client=')) args.client = arg.slice('--client='.length);
+    if (arg.startsWith('--client=')) args.client = arg.slice('--client='.length);
   }
-  if (!args.client) throw new Error('Usage: redeploy-client.mjs --client=slug [--rebuild-os]');
+  if (!args.client) throw new Error('Usage: redeploy-client.mjs --client=slug');
   return args;
 }
 
@@ -102,17 +100,9 @@ async function main() {
   }
 
   const secrets = loadSecrets();
-  requireSecrets(secrets, ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'HETZNER_TOKEN']);
+  requireSecrets(secrets, ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']);
 
   let ip = client.ip;
-
-  if (args.rebuildOs) {
-    console.log(`Rebuilding OS on server ${client.serverId} (same IP ${ip})...`);
-    await hetzner.rebuildServer(secrets.HETZNER_TOKEN, client.serverId);
-    console.log('Waiting for it to come back up...');
-    await waitForSsh(ip);
-    await waitForCloudInit(ip);
-  }
 
   const vars = {
     APP_SLUG: client.name,

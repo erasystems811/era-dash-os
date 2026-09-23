@@ -22,8 +22,7 @@ export default function App() {
   const [tab, setTab] = useState('business');
   const [navOpen, setNavOpen] = useState(false);
   const [subdomain, setSubdomain] = useState('');
-  const [size, setSize] = useState('small');
-  const [provider, setProvider] = useState('oracle');
+  const [ip, setIp] = useState('');
   // 'none' -- own dedicated server, same as always. 'join' -- pack onto an
   // existing shared server (scripts/lib/shared-host.mjs). 'new' -- start a
   // fresh server in shared mode, ready for more clients later.
@@ -56,8 +55,7 @@ export default function App() {
   const draft = {
     businessName: business.name,
     subdomain,
-    size,
-    provider,
+    ip,
     sharedServerMode,
     sharedServerIp,
     business,
@@ -103,10 +101,8 @@ export default function App() {
           <BusinessDetails
             subdomain={subdomain}
             setSubdomain={setSubdomain}
-            size={size}
-            setSize={setSize}
-            provider={provider}
-            setProvider={setProvider}
+            ip={ip}
+            setIp={setIp}
             sharedServerMode={sharedServerMode}
             setSharedServerMode={setSharedServerMode}
             sharedServerIp={sharedServerIp}

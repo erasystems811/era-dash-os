@@ -48,17 +48,16 @@ async function callClaudeForMenu({ text, image }) {
 }
 
 // Lets the Business Details tab offer "join an existing shared server" as
-// a real dropdown (IP + provider + how many EBOS clients already on it)
-// instead of asking someone to type an IP address from memory. Only
-// mode:'shared' servers -- create-client.mjs's --shared-server=ip only
-// ever makes sense against one of those (see shared-host.mjs's own
-// reasoning: a dedicated server has no shared Caddy for a second tenant
-// to attach to).
+// a real dropdown (IP + how many EBOS clients already on it) instead of
+// asking someone to type an IP address from memory. Only mode:'shared'
+// servers -- create-client.mjs's --shared-server=ip only ever makes sense
+// against one of those (see shared-host.mjs's own reasoning: a dedicated
+// server has no shared Caddy for a second tenant to attach to).
 router.get('/shared-servers', (req, res) => {
   const registry = loadRegistry();
   const servers = registry.servers
     .filter((s) => s.mode === 'shared')
-    .map((s) => ({ ip: s.ip, provider: s.provider, clientCount: clientsOnServer(registry, s.ip).length }));
+    .map((s) => ({ ip: s.ip, clientCount: clientsOnServer(registry, s.ip).length }));
   res.json(servers);
 });
 
@@ -75,13 +74,20 @@ router.post('/parse-menu', async (req, res) => {
 });
 
 router.post('/build', (req, res) => {
-  const { businessName, subdomain, size, provider, sharedServerMode, sharedServerIp, business, owner, branches, catalogue, botFields, botStates, knowledgeBase, sandbox } = req.body;
+  const { businessName, subdomain, ip, sharedServerMode, sharedServerIp, business, owner, branches, catalogue, botFields, botStates, knowledgeBase, sandbox } = req.body;
 
   if (!businessName || !business?.type || !owner?.name || !owner?.email) {
     return res.status(400).json({ error: 'Business name, business type, owner name and owner email are all required before building.' });
   }
   if (sharedServerMode === 'join' && !sharedServerIp) {
     return res.status(400).json({ error: 'Pick which shared server to join.' });
+  }
+  // Chidera, 2026-09-23: every automated cloud-provider integration is
+  // gone -- a server always exists already (dedicated: create it by hand
+  // first; new shared: same). Only "join an existing shared server" is
+  // exempt, since that server already exists too.
+  if (sharedServerMode !== 'join' && !ip) {
+    return res.status(400).json({ error: 'Create the server by hand first (any provider), then paste its IP.' });
   }
 
   const seedDir = path.join(os.tmpdir(), 'era-workstation-seeds');
@@ -91,22 +97,19 @@ router.post('/build', (req, res) => {
 
   const args = [`--name=${businessName}`, '--template=ebos', `--ebos-seed=${seedPath}`];
   if (subdomain) args.push(`--subdomain=${subdomain}`);
-  if (size) args.push(`--size=${size}`);
   // Sandbox toggle (no UI checkbox wired up for this yet -- passed straight
   // through when a caller sends it) -- see create-client.mjs's --sandbox
   // comment for what this actually protects.
   if (sandbox) args.push('--sandbox');
-  // Defaults to create-client.mjs's own default (currently 'oracle') when
-  // not passed -- the workstation UI's own form controls whether this is
-  // ever sent, same as size/subdomain above.
-  if (provider) args.push(`--provider=${provider}`);
   // Packing multiple EBOS clients onto one server (scripts/lib/shared-host.mjs)
   // instead of one dedicated server each -- Chidera's call, 2026-09-16:
   // start doing this going forward, once there's a server with real room
-  // to share (this account's own Oracle capacity is already down to its
-  // last slice, not a meaningful "share until full" candidate yet).
+  // to share.
   if (sharedServerMode === 'join') args.push(`--shared-server=${sharedServerIp}`);
-  else if (sharedServerMode === 'new') args.push('--new-shared-server');
+  else {
+    if (sharedServerMode === 'new') args.push('--new-shared-server');
+    args.push(`--ip=${ip}`);
+  }
 
   const jobId = startJob('create-client.mjs', args);
   res.json({ jobId });
