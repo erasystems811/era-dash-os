@@ -2317,7 +2317,14 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
   const useProviderPaystack = paymentConfig?.provider ? paymentConfig.provider === 'paystack' : process.env.PAYMENT_PROVIDER === 'paystack';
   if (useProviderPaystack && process.env.PAYMENT_SECRET_KEY) {
     try {
-      const url = await initializePaystackTransaction({ order, customer, amount });
+      // Chidera, 2026-09-23: "when i click pay now and go to pay stack i
+      // cant see back to chat." Every customer already has (or gets, right
+      // here) a persistent menu_token -- Paystack redirects back to this
+      // exact chat page once payment finishes, same "Back to chat" idea
+      // documents.js's invoice page already got.
+      const menuToken = await ensureMenuToken(customer);
+      const callbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${menuToken}` : undefined;
+      const url = await initializePaystackTransaction({ order, customer, amount, callbackUrl });
       if (url) {
         // Chidera, 2026-09-16: "i actually got a payment link o, but it
         // opened out of whatsapp not in" -- the URL used to be embedded
@@ -2848,7 +2855,9 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
   let paymentUrl = null;
   if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
     try {
-      paymentUrl = await initializePaystackTopupTransaction({ topupId, order, customer, amount: addedValue });
+      const menuToken = await ensureMenuToken(customer);
+      const callbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${menuToken}` : undefined;
+      paymentUrl = await initializePaystackTopupTransaction({ topupId, order, customer, amount: addedValue, callbackUrl });
     } catch (err) {
       console.error(`Paystack initialize failed for topup ${topupId}, falling back to bank details: ${err.message}`);
     }
