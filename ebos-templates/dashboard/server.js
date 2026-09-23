@@ -24,6 +24,7 @@ import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
 import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
 import { router as moniepointWebhook } from './engine/webhook-moniepoint.js';
+import { router as monnifyWebhook } from './engine/webhook-monnify.js';
 import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
@@ -46,6 +47,10 @@ app.use('/webhook/paystack', paystackWebhook);
 // express.json(), back when this route only checked Basic auth -- moved
 // once the real mechanism was confirmed.
 app.use('/webhook/moniepoint', moniepointWebhook);
+// Chidera, 2026-09-23: same reasoning as Paystack/Moniepoint above --
+// Monnify signs each webhook with HMAC-SHA512 over the raw body
+// (monnify-signature header), so this needs the raw body too.
+app.use('/webhook/monnify', monnifyWebhook);
 
 // Express's own default JSON body limit is 100kb -- far too small for any
 // of the data: URI image uploads this app already does (business logo,

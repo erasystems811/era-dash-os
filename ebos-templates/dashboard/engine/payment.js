@@ -3,6 +3,7 @@
 // encryption needed once there's only one business per deployment.
 import crypto from 'node:crypto';
 import { pool } from '../lib/db.js';
+import { callMonnifyDynamicAccount } from './monnify-api.js';
 
 // Chidera, 2026-09-16: "no paystack link for payment??" -- root cause,
 // confirmed by testing directly against Paystack's own live API: the
@@ -92,6 +93,26 @@ export async function initializeOrderPaymentPaystackTransaction({ orderPayment, 
   if (!result) return null;
   await pool.query('update order_payment set payment_reference = $1, payment_link_url = $2 where id = $3', [result.reference, result.authorizationUrl, orderPayment.id]);
   return result.authorizationUrl;
+}
+
+// Chidera, 2026-09-23: "then we wont use reserved we will use dynamic" --
+// Monnify's "Pay with Bank Transfer", a real per-order dynamic virtual
+// account (no BVN/NIN needed, unlike Reserved Accounts), auto-confirmed via
+// engine/webhook-monnify.js. Same shape as initializePaystackTransaction
+// above but returns account DETAILS (no clickable link exists for a bank
+// transfer) instead of a URL -- flow.js's buildPayLine renders those into
+// the plain-text pay line itself. The Monnify reference is stored in the
+// SAME payment_reference column Paystack already uses, so
+// findOrderByPaymentReference below resolves either provider's webhook
+// without any change.
+export async function initializeMonnifyTransaction({ order, customer, amount }) {
+  const result = await callMonnifyDynamicAccount({ customer, amount, referencePrefix: order.reference });
+  if (!result) return null;
+  await pool.query(
+    `update "order" set payment_reference = $1, monnify_account_number = $2, monnify_account_name = $3, monnify_bank_name = $4, monnify_account_expires_at = $5 where id = $6`,
+    [result.paymentReference, result.accountNumber, result.accountName, result.bankName, result.expiresAt, order.id]
+  );
+  return result;
 }
 
 // Chidera, 2026-09-20: "a business can choose pos, flutterwave, paystack,
