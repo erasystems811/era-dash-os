@@ -766,7 +766,9 @@ export async function handover(customer, reason, extra, ackText, primaryLink) {
 
     const voiceRecipients = await handoverRecipients();
     if (voiceRecipients.length) {
-      const alert = `A caller needs a person: ${displayNameFor(customer)}.\nReason: ${reason}\nThey were told someone will call them back on this number.`;
+      // Chidera, 2026-09-23: "handover be structured not a paragraph" --
+      // same fix as the text-channel alert just below, same reasoning.
+      const alert = `Customer: ${displayNameFor(customer)}\nReason: ${reason}\nNote: They were told someone will call them back on this number.`;
       for (const { phoneNumber: to, staffId } of voiceRecipients) {
         await notifyStaff({ staffId, phoneNumber: to, title: 'Voice callback needed', body: alert });
       }
@@ -801,7 +803,14 @@ export async function handover(customer, reason, extra, ackText, primaryLink) {
   const extraLines = extra ? `\n${Object.values(extra).filter(Boolean).join('\n')}` : '';
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   for (const { phoneNumber: to, staffId } of recipients) {
-    const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}`;
+    // Chidera, 2026-09-23: "handover be structured not a paragraph" --
+    // same one-fact-per-line convention every other staff alert in this
+    // file already follows (completePayment's "ready to prepare" ping,
+    // notifyCustomerClaimedPosPayment's claim alert). "Handing over a
+    // chat from X to you." read as a sentence to parse, not a field to
+    // scan -- "Customer:" is the same label shape as "Reason:" right
+    // below it.
+    const alert = `Customer: ${displayNameFor(customer)}\nReason: ${reason}\n${summary}${extraLines}`;
 
     // Chidera, 2026-09-16: "when a handover is sent the link should be
     // open in the whatsapp chat, they dnt have to leave to a site" -- this
