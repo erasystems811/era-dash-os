@@ -759,6 +759,22 @@ router.use(requireStaffApi);
 router.use(scopeToBranch);
 router.use(scopeToWorkArea);
 
+// Staff PWA push -- same shape as routes/rider.js's own push-public-key/
+// push-subscribe (engine/push-notify.js's own comment on why this reuses
+// the ERA-wide VAPID keys rather than a new per-business secret). Any
+// logged-in staff role can subscribe, not just owner/manager -- there's no
+// reason a PIN-tier counter/kitchen account shouldn't get real-time order
+// alerts too, same as they already can today over WhatsApp.
+router.get('/push-public-key', (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || '' });
+});
+router.post('/push-subscribe', async (req, res) => {
+  const subscription = req.body?.subscription;
+  if (!subscription?.endpoint) return res.status(400).json({ error: 'A real push subscription is required.' });
+  await pool.query('update staff set push_subscription = $1 where id = $2', [JSON.stringify(subscription), req.staff.id]);
+  res.json({ ok: true });
+});
+
 router.use('/delivery', deliveryRoutes);
 router.use('/voice', voiceRoutes);
 // Was never mounted at all -- DineIn.jsx's tables/feedback/orders-pending

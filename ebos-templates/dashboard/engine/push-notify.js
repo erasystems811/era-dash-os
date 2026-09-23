@@ -57,6 +57,42 @@ async function pushToRider(rider, payload) {
   }
 }
 
+// Staff PWA push -- Chidera, 2026-09-23: "make the dashboard pwa so staff
+// can get push notification or something," aimed at replacing real
+// WhatsApp staff alerts (sendStaffAlert, flow.js) with a free push once a
+// staff member has actually installed/subscribed. Same shape as
+// pushToRider above, same ERA-wide VAPID keys, own table/cleanup column
+// (staff.push_subscription) since a staff member and a rider are
+// different accounts entirely.
+async function pushToStaffMember(staff, payload) {
+  try {
+    await webpush.sendNotification(staff.push_subscription, payload, { urgency: 'high' });
+    return true;
+  } catch (err) {
+    if (err.statusCode === 404 || err.statusCode === 410) {
+      await pool.query('update staff set push_subscription = null where id = $1', [staff.id]);
+    } else {
+      console.error(`Push to staff ${staff.id} failed:`, err.message);
+    }
+    return false;
+  }
+}
+
+// Called from every real-alert call site (flow.js's sendStaffAlert callers)
+// BEFORE falling back to a real WhatsApp send -- returns whether a push was
+// actually delivered, so the caller knows whether it still needs to fall
+// back. false covers every "this staff member hasn't set up push yet" case
+// the same way (no VAPID configured on this deployment, no subscription
+// saved, or the one saved subscription turned out to be dead) -- the
+// caller doesn't need to tell those apart, just whether the alert got
+// through some free channel or still needs the real one.
+export async function pushToStaff(staffId, { title, body, url }) {
+  if (!ensureConfigured() || !staffId) return false;
+  const { rows } = await pool.query('select id, push_subscription from staff where id = $1 and push_subscription is not null', [staffId]);
+  if (!rows[0]) return false;
+  return pushToStaffMember(rows[0], JSON.stringify({ title, body, url }));
+}
+
 // One push per on-duty rider with a saved subscription, in the same
 // branch-or-unassigned scope the SSE broadcast already uses (spec B3: a
 // rider only ever sees offers from their own branch).

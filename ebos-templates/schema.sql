@@ -1355,6 +1355,11 @@ create table if not exists payment_config (
 -- service escalations). Chidera, 2026-09-16.
 alter table staff add column if not exists order_alerts boolean not null default false;
 
+-- Staff PWA + push notifications (0061_staff_push_notifications.sql) --
+-- same shape as rider.push_subscription above, reusing the ERA-wide VAPID
+-- keys already configured for the rider app.
+alter table staff add column if not exists push_subscription jsonb;
+
 -- ERA's own prepaid message wallet (engine/wallet.js) -- WhatsApp gives no
 -- self-service spending cap, so this enforces one in code. Deliberately
 -- off by default and built well ahead of being turned on for anyone real,

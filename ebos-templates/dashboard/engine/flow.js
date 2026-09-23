@@ -19,6 +19,7 @@ import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
 import { createMagicLink, findStaffByPhoneNumber, toWhatsAppDigits } from '../lib/auth.js';
 import { checkOperatingHours } from './hours.js';
+import { pushToStaff } from './push-notify.js';
 
 // The one place that decides "who is this customer and how do we reach
 // them" by channel -- WhatsApp uses their phone number, Instagram uses
@@ -615,6 +616,33 @@ export async function sendStaffAlert(to, text) {
   }
 }
 
+// Chidera, 2026-09-23: "make the dashboard pwa so staff can get push
+// notification or something... i need to reduce billable text all round
+// to highest 1-5." Tries a free push first (engine/push-notify.js's
+// pushToStaff) -- the SAME content a real WhatsApp alert would carry,
+// plus an optional deep link (linkUrl) the dashboard's own service worker
+// opens directly when tapped. That link used to need a SEPARATE real
+// WhatsApp CTA-URL message at almost every call site below (handover()'s
+// "Open Conversation" button, completePayment's "Open Orders" button,
+// notifyCustomerClaimedPosPayment's "Confirm payment" button) -- one push
+// notification now replaces what used to be up to TWO real WhatsApp
+// sends. Falls back to the exact original WhatsApp behavior (alert text,
+// then the separate CTA link if one was requested) for any staff member
+// who hasn't set up push yet, so nobody silently stops getting told --
+// same "additive, never a regression for someone not yet on the new
+// thing" shape as every website-channel branch built earlier this
+// feature.
+export async function notifyStaff({ staffId, phoneNumber, title, body, linkUrl, linkButtonText, linkBodyText, credentials }) {
+  if (await pushToStaff(staffId, { title, body, url: linkUrl })) return;
+  await sendStaffAlert(phoneNumber, body);
+  if (!linkUrl) return;
+  try {
+    await sendWhatsAppCtaUrl(phoneNumber, linkBodyText || 'Tap below to open this.', linkButtonText || 'Open', linkUrl, credentials);
+  } catch (err) {
+    console.error(`Failed to send staff link to ${phoneNumber}:`, err.message);
+  }
+}
+
 // A second, WhatsApp-native way into the same dashboard the browser already
 // gives owner/manager/staff logins -- not a replacement for it. Chidera
 // 2026-09-11: "not whatsapp only o, itll live on site and whatsapp." Any
@@ -687,7 +715,7 @@ const SYSTEM_ERROR_HANDOVER_REASON = 'Unexpected error while processing customer
 // destination and the button's own title; every other call site passes
 // nothing and keeps getting the generic conversation link exactly as
 // before, since none of them have anywhere more specific to send staff.
-async function handover(customer, reason, extra, ackText, primaryLink) {
+export async function handover(customer, reason, extra, ackText, primaryLink) {
   await pool.query(`update customers set handled_by = 'staff', handover_at = now(), handover_reason = $1 where id = $2`, [reason, customer.id]);
 
   // Voice add-on only (spec A8, Phase 1/call-forwarding -- no live transfer
@@ -736,8 +764,8 @@ async function handover(customer, reason, extra, ackText, primaryLink) {
     const voiceRecipients = await handoverRecipients();
     if (voiceRecipients.length) {
       const alert = `A caller needs a person: ${displayNameFor(customer)}.\nReason: ${reason}\nThey were told someone will call them back on this number.`;
-      for (const { phoneNumber: to } of voiceRecipients) {
-        await sendStaffAlert(to, alert);
+      for (const { phoneNumber: to, staffId } of voiceRecipients) {
+        await notifyStaff({ staffId, phoneNumber: to, title: 'Voice callback needed', body: alert });
       }
     }
     return;
@@ -771,7 +799,6 @@ async function handover(customer, reason, extra, ackText, primaryLink) {
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   for (const { phoneNumber: to, staffId } of recipients) {
     const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}`;
-    await sendStaffAlert(to, alert);
 
     // Chidera, 2026-09-16: "when a handover is sent the link should be
     // open in the whatsapp chat, they dnt have to leave to a site" -- this
@@ -784,17 +811,14 @@ async function handover(customer, reason, extra, ackText, primaryLink) {
     // -- falls back to the old bare (login-required) link when this
     // recipient has no staffId, since business.handover_number's fallback
     // isn't a real staff account with a session to bind a token to.
-    if (!process.env.PUBLIC_URL) continue;
     const path = primaryLink?.path || `/conversations/${customer.id}`;
     const title = primaryLink?.title || 'Open Conversation';
-    const link = staffId
-      ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
-      : `${process.env.PUBLIC_URL}${path}`;
-    try {
-      await sendWhatsAppCtaUrl(to, `Tap below to open this conversation.`, title, link, credentials);
-    } catch (err) {
-      console.error(`Failed to send handover conversation link to ${to}:`, err.message);
-    }
+    const link = !process.env.PUBLIC_URL
+      ? null
+      : staffId
+        ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
+        : `${process.env.PUBLIC_URL}${path}`;
+    await notifyStaff({ staffId, phoneNumber: to, title: 'Handover', body: alert, linkUrl: link, linkButtonText: title, linkBodyText: 'Tap below to open this conversation.', credentials });
   }
 }
 
@@ -3242,7 +3266,7 @@ export async function completeTopupPayment(topupId) {
   if (orderRecipients.length) {
     const itemLines = (topup.items || []).map((i) => `${i.quantity}x ${i.name}`).join(', ');
     const alertText = `Top-up payment confirmed on order ${order.reference}: ${itemLines} (NGN ${topup.amount}).`;
-    for (const { phoneNumber: to } of orderRecipients) await sendStaffAlert(to, alertText);
+    for (const { phoneNumber: to, staffId } of orderRecipients) await notifyStaff({ staffId, phoneNumber: to, title: 'Top-up paid', body: alertText });
   }
 }
 
@@ -3345,23 +3369,17 @@ export async function completePayment(orderId) {
     // same structured format, not a regression back to the paragraph.
     const { itemLines, total } = await summariseOrder(order);
     const alertText = `Payment confirmed, ready to prepare: ${displayNameFor(customer)} (${order.fulfilment_type || 'pickup'})\n${itemLines.join('\n')}\nTotal: NGN ${total}`;
+    const credentials = await getWhatsAppCredentials(order.branch_id);
     for (const { phoneNumber: to, staffId } of orderRecipients) {
-      await sendStaffAlert(to, alertText);
-      if (!process.env.PUBLIC_URL || !staffId) continue;
-      try {
-        // Chidera, 2026-09-17: "the link is meant to open the specific
-        // kanban inside for that order not the pipeline surface" -- still
-        // the board itself, not a detail page (her own earlier call: "the
-        // kanban not the conversation... the ready button" lives on the
-        // board's own card), just landing scrolled to and highlighting
-        // THIS order's card instead of the customer having to hunt for it
-        // among everything else in the pipeline. Orders.jsx reads ?order=.
-        const link = `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/?order=${order.id}`)}`;
-        const credentials = await getWhatsAppCredentials(order.branch_id);
-        await sendWhatsAppCtaUrl(to, `Tap below to open the board.`, 'Open Orders', link, credentials);
-      } catch (err) {
-        console.error(`Failed to send order-alert board link to ${to}:`, err.message);
-      }
+      // Chidera, 2026-09-17: "the link is meant to open the specific
+      // kanban inside for that order not the pipeline surface" -- still
+      // the board itself, not a detail page (her own earlier call: "the
+      // kanban not the conversation... the ready button" lives on the
+      // board's own card), just landing scrolled to and highlighting
+      // THIS order's card instead of the customer having to hunt for it
+      // among everything else in the pipeline. Orders.jsx reads ?order=.
+      const link = process.env.PUBLIC_URL && staffId ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/?order=${order.id}`)}` : null;
+      await notifyStaff({ staffId, phoneNumber: to, title: 'Order ready to prepare', body: alertText, linkUrl: link, linkButtonText: 'Open Orders', linkBodyText: 'Tap below to open the board.', credentials });
     }
   }
 }
@@ -3462,8 +3480,8 @@ function scheduleDebouncedProcessing(customer) {
             [customer.id]
           );
           const recipients = await handoverRecipients();
-          for (const { phoneNumber: to } of recipients) {
-            await sendStaffAlert(to, `${displayNameFor(customer)} sent another message while still erroring: ${lastMsg[0]?.body || '(no text)'}`);
+          for (const { phoneNumber: to, staffId } of recipients) {
+            await notifyStaff({ staffId, phoneNumber: to, title: 'Still erroring', body: `${displayNameFor(customer)} sent another message while still erroring: ${lastMsg[0]?.body || '(no text)'}` });
           }
         } else {
           // First failure -- one plain message, not two -- this used to
@@ -4069,7 +4087,7 @@ export async function matchPosTransactionToPayment(transaction) {
       // this file already falls back when a dine-in-only field is absent.
       const list = candidates.map((c) => (c.table_label ? `Table ${c.table_label}: NGN ${c.amount}` : `Order ${c.order_reference}: NGN ${c.amount}`)).join('\n');
       const alertText = `A POS payment of NGN ${transaction.amount} matched more than one order waiting to pay:\n${list}\n\nNot auto-confirmed, to avoid crediting the wrong one. Please confirm the right one from the dashboard.`;
-      for (const { phoneNumber: to } of orderRecipients) await sendStaffAlert(to, alertText);
+      for (const { phoneNumber: to, staffId } of orderRecipients) await notifyStaff({ staffId, phoneNumber: to, title: 'POS payment tie', body: alertText });
     }
   }
 }
@@ -4157,8 +4175,8 @@ export async function resetServedForAddOn(order) {
     const { rows: tableRows } = await pool.query('select label from restaurant_table where id = $1', [order.table_id]);
     const { itemLines } = await summariseOrder(order);
     const alertText = `Table ${tableRows[0]?.label || '?'} added more after being served:\n${itemLines.join('\n')}`;
-    for (const { phoneNumber: to } of orderRecipients) {
-      await sendStaffAlert(to, alertText);
+    for (const { phoneNumber: to, staffId } of orderRecipients) {
+      await notifyStaff({ staffId, phoneNumber: to, title: 'Added after serving', body: alertText });
     }
   }
   return true;
@@ -5396,16 +5414,12 @@ export async function notifyCustomerClaimedPosPayment(payment, order, customer) 
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   for (const { phoneNumber: to, staffId } of recipients) {
     const alert = `${displayNameFor(customer)} says they sent a POS transfer of NGN ${amount.toLocaleString()} but it hasn't auto-confirmed yet.${coverageNote}`;
-    await sendStaffAlert(to, alert);
-    if (!process.env.PUBLIC_URL) continue;
     const path = `/orders/${order.id}`;
-    const link = staffId
-      ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
-      : `${process.env.PUBLIC_URL}${path}`;
-    try {
-      await sendWhatsAppCtaUrl(to, `Tap below to confirm this payment.`, 'Confirm payment', link, credentials);
-    } catch (err) {
-      console.error(`Failed to send claimed-payment link to ${to}:`, err.message);
-    }
+    const link = !process.env.PUBLIC_URL
+      ? null
+      : staffId
+        ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
+        : `${process.env.PUBLIC_URL}${path}`;
+    await notifyStaff({ staffId, phoneNumber: to, title: 'POS transfer claimed', body: alert, linkUrl: link, linkButtonText: 'Confirm payment', linkBodyText: 'Tap below to confirm this payment.', credentials });
   }
 }
