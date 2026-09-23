@@ -974,7 +974,14 @@ async function sendStartOrderLink(customer) {
   const token = await ensureMenuToken(customer);
   const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), shortGreeting, 'Place an order', chatUrl, credentials);
+  // Chidera, 2026-09-23: "let first message still have that cover photo"
+  // -- handleGreeting (the original, full-length greeting) always resolved
+  // this; sendStartOrderLink replaced it as the real send for the SHORT
+  // first-contact message this feature introduced, and dropped the cover
+  // photo along the way. Same businessCoverPhotoUrl() fallback every other
+  // real send in this file already uses (sendWebMenuLink's own comment:
+  // "ensure image appear on chat cause its not still appearing").
+  await sendWhatsAppCtaUrl(recipientFor(customer), shortGreeting, 'Place an order', chatUrl, credentials, await businessCoverPhotoUrl());
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortGreeting, trigger: 'greeting', processed: true });
 }
 
@@ -4288,7 +4295,7 @@ export async function sendFeedbackRequest(orderId) {
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[feedback form sent: ${url}]`, trigger: 'feedback_form_sent' });
 }
 
-async function handlePendingBatch(customer, text) {
+export async function handlePendingBatch(customer, text) {
   if (await handleDineinScan(customer, text)) return;
   // Checked first, before ANY other routing -- deterministic and free.
   // Applies everywhere EXCEPT while an order is still actively being
@@ -4354,6 +4361,32 @@ async function handlePendingBatch(customer, text) {
   const order = await resolveCustomerOrder(customer);
 
   if (order) {
+    // Chidera, 2026-09-23: "if a customer message they send them the link
+    // again with chat here so they can keep chatting there... thats the
+    // only 3rd acceptable text that can go through normal route." A real
+    // WhatsApp text for an order already in progress used to go straight
+    // to detectWantsHuman/dispatch() below, which can both burn a real AI
+    // call AND reply with anything (a clarifying question, a price
+    // confirmation, an upsell offer, ...) -- unbounded real message count
+    // for anyone who drifts back to WhatsApp mid-order instead of using
+    // the free chat page. Redirected to the SAME chat page instead
+    // (ensureMenuToken is the same persistent token, so it's their actual
+    // history, not a fresh one) -- one short real message, same shape as
+    // the very first contact, no AI call needed at all. The chat page's
+    // own free-text pipeline still runs this same detectWantsHuman check
+    // (handleWebChatMessage -> handlePendingBatch, this exact function),
+    // so a genuine "I need a person" is never lost, just free to ask
+    // there instead of costing a real message here.
+    // Scoped narrowly on purpose: only a real WhatsApp text (not one
+    // relayed FROM the chat page itself -- handleWebChatMessage sets
+    // customer.channel = 'website' before calling in here, and that path
+    // must keep working exactly as before), and never for a dine-in order
+    // (guests there belong on their table's own page, /t, not /wa --
+    // dine-in was never in scope for this feature).
+    if (customer.channel === 'whatsapp' && order.channel !== 'dinein') {
+      await sendStartOrderLink(customer);
+      return;
+    }
     if (await detectWantsHuman(text)) {
       await handover(customer, 'Customer asked for a person');
       return;
