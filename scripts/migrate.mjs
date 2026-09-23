@@ -19,10 +19,14 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 import { loadRegistry } from './lib/registry.mjs';
 import { runRemote, copyToRemote } from './lib/ssh.mjs';
+import { requireDeployableState } from './lib/deploy-guard.mjs';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.join(__dirname, '..');
 const DESTRUCTIVE_PATTERN = /\b(drop\s+table|drop\s+column|truncate|delete\s+from)\b/i;
 
 function parseArgs(argv) {
@@ -81,6 +85,16 @@ async function main() {
 
   if (!targets.length) {
     throw new Error(args.allEbos ? 'No client in the registry is marked isEbos: true.' : `No client "${args.client}" in the registry.`);
+  }
+
+  // Same "only off a clean, approved main" rule as push-update.mjs -- a
+  // migration file sitting uncommitted (or on a branch nobody's reviewed)
+  // is exactly the kind of not-actually-approved-yet change this exists to
+  // catch, same as app code. Sandbox-only targets are exempt for the same
+  // reason: that's where trying a migration out before it's real is
+  // supposed to happen.
+  if (targets.some((c) => !c.sandbox)) {
+    requireDeployableState(REPO_ROOT);
   }
 
   console.log(`Running ${args.file} against ${targets.length} business(es)...`);

@@ -6,6 +6,7 @@ import Loading from '../components/Loading.jsx';
 
 const EMPTY = { name: '', phone_number: '', email: '', password: '', role: 'manager', branch_id: '' };
 const EMPTY_PIN = { name: '', pin: '', work_area: '' };
+const EMPTY_EDIT = { name: '', phone_number: '', email: '' };
 
 export default function StaffPage() {
   const { staff } = useStaff();
@@ -27,6 +28,9 @@ export default function StaffPage() {
   const [pinForm, setPinForm] = useState(EMPTY_PIN);
   const [error, setError] = useState(null);
   const [pinError, setPinError] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(EMPTY_EDIT);
+  const [editError, setEditError] = useState(null);
   // Work area (Online/In House) only means anything once dine-in is on --
   // Chidera 2026-09-11: "theyll be 2 types of staff for people with dine
   // in toggle on." Genuinely inert (the field doesn't even render) while
@@ -116,6 +120,46 @@ export default function StaffPage() {
     }
   }
 
+  function startEdit(p) {
+    setEditError(null);
+    setEditingId(p.id);
+    setEditForm({ name: p.name, phone_number: p.phone_number || '', email: p.email || '' });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+  }
+
+  // A number/email change is the whole reason this exists -- Chidera,
+  // 2026-09-22: "incase a change of number or email." Same branch-lock and
+  // owner-protection guard as every other per-row action here, enforced
+  // server-side (routes/api.js's own copy of this check) -- this one is
+  // just so the button doesn't render for someone who'd get a 403 anyway.
+  async function saveEdit(id) {
+    setEditError(null);
+    try {
+      await api.post(`/staff/${id}/edit`, editForm);
+      setEditingId(null);
+      load();
+    } catch (err) {
+      setEditError(err.message);
+    }
+  }
+
+  // Real removal -- Chidera, 2026-09-22: "i need to be able to delete not
+  // just disable." The server refuses (409) when this person has real
+  // order/activity history rather than silently losing it; that message
+  // is shown as-is, since "disable them instead" is the actual next step.
+  async function deleteStaff(p) {
+    if (!window.confirm(`Permanently delete ${p.name}? This can't be undone.`)) return;
+    try {
+      await api.delete(`/staff/${p.id}`);
+      load();
+    } catch (err) {
+      window.alert(err.message);
+    }
+  }
+
   async function changeBranch(person, branchId) {
     setError(null);
     try {
@@ -143,6 +187,7 @@ export default function StaffPage() {
       </div>
 
       <div className="card">
+        {editError && <div className="error-banner">{editError}</div>}
         <table>
           <thead>
             <tr>
@@ -161,9 +206,29 @@ export default function StaffPage() {
           <tbody>
             {list.map((p) => (
               <tr key={p.id}>
-                <td>{p.name}</td>
-                <td>{p.auth_type === 'pin' ? <span className="badge">PIN</span> : p.email}</td>
-                <td>{p.phone_number}</td>
+                {editingId === p.id ? (
+                  <>
+                    <td>
+                      <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+                    </td>
+                    <td>
+                      {p.auth_type === 'pin' ? (
+                        <span className="badge">PIN</span>
+                      ) : (
+                        <input type="email" value={editForm.email} onChange={(e) => setEditForm({ ...editForm, email: e.target.value })} />
+                      )}
+                    </td>
+                    <td>
+                      <input value={editForm.phone_number} onChange={(e) => setEditForm({ ...editForm, phone_number: e.target.value })} />
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td>{p.name}</td>
+                    <td>{p.auth_type === 'pin' ? <span className="badge">PIN</span> : p.email}</td>
+                    <td>{p.phone_number}</td>
+                  </>
+                )}
                 <td>{p.role}</td>
                 {showBranches && (
                   <td>
@@ -220,15 +285,32 @@ export default function StaffPage() {
                   )}
                 </td>
                 {editable && (
-                  <td style={{ display: 'flex', gap: 8 }}>
-                    {p.auth_type === 'pin' && (
-                      <button className="secondary" onClick={() => resetPin(p)}>
-                        Reset PIN
-                      </button>
+                  <td style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {editingId === p.id ? (
+                      <>
+                        <button onClick={() => saveEdit(p.id)}>Save</button>
+                        <button className="secondary" onClick={cancelEdit}>
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="secondary" onClick={() => startEdit(p)}>
+                          Edit
+                        </button>
+                        {p.auth_type === 'pin' && (
+                          <button className="secondary" onClick={() => resetPin(p)}>
+                            Reset PIN
+                          </button>
+                        )}
+                        <button className="secondary" onClick={() => toggleStatus(p)}>
+                          {p.status === 'active' ? 'Disable' : 'Re-enable'}
+                        </button>
+                        <button className="secondary" onClick={() => deleteStaff(p)}>
+                          Delete
+                        </button>
+                      </>
                     )}
-                    <button className="secondary" onClick={() => toggleStatus(p)}>
-                      {p.status === 'active' ? 'Disable' : 'Re-enable'}
-                    </button>
                   </td>
                 )}
               </tr>

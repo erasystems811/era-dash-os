@@ -2507,6 +2507,66 @@ router.post('/staff/:id/status', requireEditorApi, async (req, res) => {
   res.json(rows[0]);
 });
 
+// Chidera, 2026-09-22: "on roles and number i need to be able to... edit
+// incase a change of number or email" -- disabling never actually let a
+// business correct a typo or move a login to whoever now has that number,
+// only hide the old row. Name/phone/email only -- role, branch and
+// auth_type each already have their own dedicated, more carefully-guarded
+// endpoint (branch reassignment is owner-only, role changes never existed
+// at all) and don't belong bundled into a plain edit. Same branch-lock +
+// "never touch an owner" guard as /status above.
+router.post('/staff/:id/edit', requireEditorApi, async (req, res) => {
+  const { rows: target } = await pool.query('select id, role, branch_id, auth_type from staff where id = $1', [req.params.id]);
+  if (!target[0]) return res.status(404).json({ error: 'Staff member not found.' });
+  if (req.branchId && (target[0].role === 'owner' || target[0].branch_id !== req.branchId)) {
+    return res.status(403).json({ error: 'You can only manage staff in your own branch.' });
+  }
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name is required.' });
+  const phoneNumber = req.body.phone_number ? String(req.body.phone_number).trim() : null;
+  // PIN-tier staff have no email at all (see schema.sql's own comment on
+  // staff.email) -- only ever touch it for a password-login account, same
+  // as POST /staff never sets one for a PIN row.
+  const email = target[0].auth_type === 'pin' ? null : String(req.body.email || '').trim().toLowerCase() || null;
+  if (target[0].auth_type !== 'pin' && !email) return res.status(400).json({ error: 'Email is required.' });
+  try {
+    const { rows } = await pool.query(
+      'update staff set name = $1, phone_number = $2, email = $3 where id = $4 returning id, name, phone_number, email',
+      [name, phoneNumber, email, req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Another staff member already uses that email.' });
+    throw err;
+  }
+});
+
+// Real removal, not just hiding the row -- Chidera, 2026-09-22: "i need to
+// be able to delete not just disable." A staff member who ever actually
+// did anything (took an order, handled a handover, appears in the
+// activity log) is referenced by foreign key from that history, and this
+// deliberately does NOT cascade through years of real order/activity
+// records just to free up one row -- the 409 below is the signal to
+// disable instead, same as this file's other "can't just silently do the
+// wrong thing" guards. A staff member with no history at all (added by
+// mistake, or a PIN account nobody ever used) deletes cleanly.
+router.delete('/staff/:id', requireEditorApi, async (req, res) => {
+  const { rows: target } = await pool.query('select id, role, branch_id from staff where id = $1', [req.params.id]);
+  if (!target[0]) return res.status(404).json({ error: 'Staff member not found.' });
+  if (req.branchId && (target[0].role === 'owner' || target[0].branch_id !== req.branchId)) {
+    return res.status(403).json({ error: 'You can only manage staff in your own branch.' });
+  }
+  try {
+    await pool.query('delete from staff where id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(409).json({ error: 'This staff member has order/activity history and can’t be deleted -- disable them instead.' });
+    }
+    throw err;
+  }
+});
+
 // Only an owner/admin (branchId null) can move someone between branches --
 // a branch-locked manager reassigning their own staff elsewhere would be
 // exactly the branch-control gap the lock exists to close. Sending
