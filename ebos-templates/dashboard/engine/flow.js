@@ -4249,6 +4249,19 @@ export async function sendFeedbackRequest(orderId) {
   if (customer && customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(Date.now() - 30 * 60 * 1000)) {
     customer.channel = 'website';
   }
+  // Chidera, 2026-09-23: "i only want customer getting 2 messages- 1.
+  // greetings message and 2. you order is ready for pick up or the
+  // delivery message with delivery link" -- a web-chat customer who's
+  // gone stale (closed the tab) used to still get this as a real 3rd
+  // WhatsApp/Instagram message, the one gap left in the near-zero-message
+  // promise: by the time an order's actually fulfilled, they've almost
+  // always left the page. That's a real, deliberate trade-off (feedback
+  // is genuinely never collected from someone who doesn't reopen the
+  // chat), not a bug -- she chose the message cap over completeness here.
+  // A customer who never touched web-chat at all (web_chat_active_at is
+  // still null -- a classic WhatsApp/Instagram-only order) is unaffected:
+  // this promise was only ever about the new web-chat flow.
+  if (customer && customer.channel !== 'website' && customer.web_chat_active_at) return;
   // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
   // catch up to our current state" -- this used to flatly skip Instagram
   // (no feedback request ever sent), the one deliberate WhatsApp-only

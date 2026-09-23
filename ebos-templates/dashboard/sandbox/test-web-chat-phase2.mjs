@@ -127,6 +127,27 @@ async function main() {
   const { rows: fbMsg2 } = await pool.query(`select channel from message where customer_id = $1 and trigger = 'feedback_form_sent' order by created_at desc limit 1`, [feedbackStale.id]);
   assert(fbMsg2[0]?.channel === 'whatsapp', 'a customer who never touched web-chat still gets the real WhatsApp feedback request, unchanged');
 
+  // === Chidera, 2026-09-23: "i only want customer getting 2 messages- 1.
+  // greetings message and 2. you order is ready for pick up or the
+  // delivery message with delivery link" -- a web-chat customer who DID
+  // use the chat page (web_chat_active_at was set at some point) but has
+  // now gone stale (closed the tab, order fulfilled hours later) must get
+  // NOTHING here, not a 3rd real WhatsApp message. This is the one real
+  // behavior change: previously this fell through to the same real send
+  // as the "never touched web-chat" case above. ===
+  const feedbackWentQuiet = await flow.findOrCreateCustomer({ phoneNumber: '2348012344009', channel: 'whatsapp' });
+  await pool.query(`update customers set web_chat_active_at = now() - interval '2 hours' where id = $1`, [feedbackWentQuiet.id]);
+  const { rows: fbOrder3 } = await pool.query(
+    `insert into "order" (customer_id, reference, fulfilment_type, total, status, payment_status, engine_state, channel)
+     values ($1, 'REF-FB-QUIET', 'pickup', $2, 'completed', 'confirmed', 'completed', 'whatsapp') returning *`,
+    [feedbackWentQuiet.id, total]
+  );
+  await flow.sendFeedbackRequest(fbOrder3[0].id);
+  const { rows: fbMsg3 } = await pool.query(`select count(*)::int as n from message where customer_id = $1 and direction = 'outbound'`, [feedbackWentQuiet.id]);
+  assert(fbMsg3[0].n === 0, 'a web-chat customer who went quiet gets ZERO feedback messages -- not a bubble (they\'re not there) and not a real send (the 2-message cap)');
+  const { rows: fbOrderFeedbackRow } = await pool.query(`select id from order_feedback where order_id = $1`, [fbOrder3[0].id]);
+  assert(fbOrderFeedbackRow.length === 0, 'no order_feedback row is created either -- genuinely never asked, not just never delivered');
+
   // === Chidera, 2026-09-23: "after they name payment let feedback pop so
   // they remain on page" -- completePayment itself now also fires
   // sendFeedbackRequest, right alongside the payment-confirmed message,
