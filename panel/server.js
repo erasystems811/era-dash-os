@@ -297,8 +297,25 @@ if (process.env.PANEL_DISABLE_AUTH !== '1') {
 // store, since this is a single-operator panel with no other session
 // state anywhere. Parsed by hand (no cookie-parser dependency) since this
 // is the only cookie this app ever sets or reads.
+// Reads secrets.env fresh every call rather than caching in process.env --
+// found live, 2026-09-22, the same day 2FA shipped: PANEL_USER/PASSWORD
+// and everything else this panel reads live in the systemd unit's own
+// Environment= lines, which is what actually survives a restart; this was
+// the one value set only in the CURRENT process's memory at /2fa/setup
+// time (`process.env.PANEL_TOTP_SECRET = secret`), so every restart since
+// (the loopback fix alone) silently wiped it back to undefined -- every
+// correct code failed with no visible reason, even though patchSecrets
+// had genuinely already written the real value to disk the whole time.
+function getTotpSecret() {
+  try {
+    return loadSecrets().PANEL_TOTP_SECRET || null;
+  } catch {
+    return null;
+  }
+}
+
 function totpSessionSecretKey() {
-  return crypto.createHash('sha256').update(`${process.env.PANEL_TOTP_SECRET || ''}:2fa-session`).digest();
+  return crypto.createHash('sha256').update(`${getTotpSecret() || ''}:2fa-session`).digest();
 }
 
 function signTwoFaCookie(expiresAt) {
@@ -343,11 +360,33 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}
 </form></body></html>`;
 }
 
+// Loopback-only automation (monitor-ebos.mjs, check-bot-health.mjs, ...)
+// calls this same panel over plain http://localhost:4100 with valid basic
+// auth but obviously no browser session -- 2FA is a second factor for a
+// human logging in, not something a local cron script can ever present.
+// Found live, 2026-09-22: enabling enforcement immediately broke
+// monitor-ebos.mjs's alerting (it got redirected to the /2fa HTML page and
+// choked trying to parse that as JSON) within the hour. Gating on the
+// request's own remote address, not a bypass header/token, since anyone
+// who can already reach loopback on this box has root anyway.
+function isLoopback(req) {
+  const addr = req.socket.remoteAddress || '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
 if (process.env.PANEL_DISABLE_AUTH !== '1' && process.env.PANEL_2FA_ENABLED === '1') {
   app.use((req, res, next) => {
+    if (isLoopback(req)) return next();
     if (req.path === '/2fa' || req.path === '/2fa/verify' || req.path === '/2fa/setup') return next();
     if (verifyTwoFaCookie(readCookie(req, 'era_2fa'))) return next();
-    if (req.method !== 'GET') return res.status(403).json({ error: 'Two-factor verification required.' });
+    // needs2fa: true is the signal the panel's own client-side fetch
+    // wrapper (see page()'s <script>) watches for -- a button click has
+    // nowhere on screen to type a code the way a full page load does
+    // (that gets a real redirect below), so without this a POST/click
+    // action just dead-ended with a bare, unactionable error. Found live,
+    // 2026-09-22, the day 2FA was turned on: Chidera hit exactly this on
+    // "Push code update" with no way to actually verify.
+    if (req.method !== 'GET') return res.status(403).json({ error: 'Two-factor verification required.', needs2fa: true });
     res.redirect(`/2fa?redirect=${encodeURIComponent(req.originalUrl)}`);
   });
 }
@@ -358,7 +397,8 @@ app.get('/2fa', (req, res) => {
 
 app.post('/2fa/verify', express.urlencoded({ extended: false }), (req, res) => {
   const { code, redirect } = req.body;
-  if (!process.env.PANEL_TOTP_SECRET || !verifyTotp(process.env.PANEL_TOTP_SECRET, code)) {
+  const secret = getTotpSecret();
+  if (!secret || !verifyTotp(secret, code)) {
     return res.status(401).send(twoFaPage({ error: 'Wrong or expired code -- try again.', redirectTo: redirect }));
   }
   const expiresAt = Date.now() + TWO_FA_SESSION_MS;
@@ -376,12 +416,12 @@ app.post('/2fa/verify', express.urlencoded({ extended: false }), (req, res) => {
 // PANEL_2FA_ENABLED is turned on -- this is how that first real code gets
 // confirmed before enforcement flips on.
 app.get('/2fa/setup', (req, res) => {
-  if (!process.env.PANEL_TOTP_SECRET) {
-    const secret = generateTotpSecret();
+  let secret = getTotpSecret();
+  if (!secret) {
+    secret = generateTotpSecret();
     patchSecrets({ PANEL_TOTP_SECRET: secret });
-    process.env.PANEL_TOTP_SECRET = secret;
   }
-  const uri = otpauthUri(process.env.PANEL_TOTP_SECRET, process.env.PANEL_USER || 'admin');
+  const uri = otpauthUri(secret, process.env.PANEL_USER || 'admin');
   const enabled = process.env.PANEL_2FA_ENABLED === '1';
   res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Two-factor setup -- ERA Dash OS</title>
@@ -394,7 +434,7 @@ code{background:#f0f0f0;padding:8px 10px;display:block;font-size:16px;letter-spa
 <p>Add this to Google Authenticator, Authy, or any TOTP app. Scan isn't available here (no camera-facing UI), so use "enter a setup key manually":</p>
 <p><b>Account:</b> ERA Dash OS (${esc(process.env.PANEL_USER || 'admin')})</p>
 <p><b>Key:</b></p>
-<code>${esc(process.env.PANEL_TOTP_SECRET)}</code>
+<code>${esc(secret)}</code>
 <p><b>Full URI</b> (some apps accept pasting this directly):</p>
 <code>${esc(uri)}</code>
 <p>Once it's added, open <a href="/2fa">/2fa</a> in another tab and confirm a code actually verifies before enforcement is turned on.</p>
@@ -1041,6 +1081,28 @@ function page(clients, ebosClients) {
   <div id="log">(idle)</div>
 
 <script>
+// A page load that lacks a valid 2FA session gets a real redirect to
+// /2fa (server-side, see the app.use gate above) -- but a button click
+// (fetch, no navigation) has nowhere on screen to type a code, so the
+// server signals that case with needs2fa: true instead of just a bare
+// 403 dead end. This wraps every fetch call this whole page ever makes
+// (every button below already goes through window.fetch, none needs its
+// own change) so hitting that signal sends the browser to a real code
+// entry screen and back, instead of a silent failure with no way out.
+const _eraNativeFetch = window.fetch.bind(window);
+window.fetch = async function (...args) {
+  const res = await _eraNativeFetch(...args);
+  if (res.status === 403) {
+    const clone = res.clone();
+    let data = null;
+    try { data = await clone.json(); } catch (e) { data = null; }
+    if (data && data.needs2fa) {
+      window.location.href = "/2fa?redirect=" + encodeURIComponent(window.location.pathname + window.location.search);
+    }
+  }
+  return res;
+};
+
 let currentClient = null;
 let lastEbosStatus = [];
 const OFFBOARDING_SOP_TEXT = ${JSON.stringify(OFFBOARDING_SOP)};
@@ -1059,6 +1121,11 @@ function renderManageMonitoring(name) {
     + (b.recentErrorCount ? '<br><strong class="danger">' + b.recentErrorCount + ' Claude/API error(s) in the last 30 min</strong>: ' + escClient(b.lastErrorMessage || '(no message)') : '')
     + (b.offboarded ? '<br><strong class="danger">Offboarded</strong> -- data was exported, server is still running untouched.' : '')
     + '<br><button type="button" id="mgmtPushBtn" style="margin-top:8px;">Push code update to this business</button>'
+    // Sandbox-only in practice (push-update.mjs itself refuses --branch
+    // for any other target) -- shown for every business rather than
+    // threading a sandbox flag through this status object too, since a
+    // blank field here is a no-op push exactly like before this existed.
+    + ' <input type="text" id="mgmtPushBranch" placeholder="branch (sandbox only, optional)" style="margin-top:8px;width:220px;" title="Only takes effect for a sandbox client -- pushes that branch to it for testing, then always restores the control server\\'s own checkout to main afterward.">'
     + ' <button type="button" id="mgmtOffboardBtn" style="margin-top:8px;" title="Exports all of this business\\'s data and marks it offboarded. Never deletes the server or database -- that stays a separate, later, deliberate step.">Begin offboarding (exports data, never deletes anything)</button>'
     + '<details style="margin-top:8px;"><summary style="cursor:pointer;">Offboarding steps (SOP)</summary><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fff;padding:10px;border-radius:4px;margin-top:6px;">' + escClient(OFFBOARDING_SOP_TEXT) + '</pre></details>'
     + '<div id="waCatalogBlock" style="margin-top:10px;padding-top:10px;border-top:1px solid #ddd;">Loading WhatsApp Catalogue status...</div>';
@@ -1268,8 +1335,17 @@ document.getElementById('envForm').addEventListener('submit', (e) => {
 
 async function pushUpdate(name, allEbos) {
   const label = allEbos ? 'every EBOS business' : name;
-  if (!confirm('Push the current code to ' + label + '? This rebuilds the dashboard container -- secrets are reused as-is, nothing is regenerated.')) return;
-  const res = await fetch('/api/push-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(allEbos ? { allEbos: true } : { client: name }) });
+  // Branch field only makes real sense for a sandbox client -- harmless to
+  // read it for anyone else, push-update.mjs itself refuses --branch for
+  // a non-sandbox target regardless of what this sends.
+  const branchInput = !allEbos ? document.getElementById('mgmtPushBranch') : null;
+  const branch = branchInput ? branchInput.value.trim() : '';
+  const confirmMsg = branch
+    ? 'Push branch "' + branch + '" to ' + label + '? This is for testing in-progress work on a sandbox client only -- the control server\\'s own checkout always ends back on main afterward, whatever happens.'
+    : 'Push the current code to ' + label + '? This rebuilds the dashboard container -- secrets are reused as-is, nothing is regenerated.';
+  if (!confirm(confirmMsg)) return;
+  const body = allEbos ? { allEbos: true } : branch ? { client: name, branch: branch } : { client: name };
+  const res = await fetch('/api/push-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) { alert(data.error || 'Failed'); return; }
   pollJob(data.jobId, () => setTimeout(() => location.reload(), 1500));
@@ -1880,6 +1956,27 @@ function monitoringPage(ebosClients) {
   </table>
 
 <script>
+// Same fix as the main dashboard page (see its own copy of this comment)
+// -- /monitoring is a fully separate page with its own <script>, so the
+// fetch wrapper needs its own copy here too, not just on "/". Found live,
+// 2026-09-22/23: Chidera reported Bot Monitoring "isn't working" here
+// specifically -- the backend and the data were both fine the whole time
+// (confirmed directly), the page had just silently hit the same needs2fa
+// dead end this page never knew how to handle.
+const _eraNativeFetch = window.fetch.bind(window);
+window.fetch = async function (...args) {
+  const res = await _eraNativeFetch(...args);
+  if (res.status === 403) {
+    const clone = res.clone();
+    let data = null;
+    try { data = await clone.json(); } catch (e) { data = null; }
+    if (data && data.needs2fa) {
+      window.location.href = "/2fa?redirect=" + encodeURIComponent(window.location.pathname + window.location.search);
+    }
+  }
+  return res;
+};
+
 function escClient(value) {
   const div = document.createElement('div');
   div.textContent = value ?? '';
@@ -2679,9 +2776,14 @@ app.post('/api/verify-backups-now', (req, res) => {
 // pattern as every other action on this page. --all-ebos runs it across
 // every EBOS business in one go instead of one row at a time.
 app.post('/api/push-update', (req, res) => {
-  const { client, allEbos } = req.body;
+  const { client, allEbos, branch } = req.body;
   if (!client && !allEbos) return res.status(400).json({ error: 'client or allEbos is required' });
   const args = allEbos ? ['--all-ebos'] : [`--client=${client}`];
+  // --branch: in-progress feature work, tested against a real sandbox
+  // deployment without touching main -- push-update.mjs itself refuses
+  // this for anything but a single sandbox:true target, so this is just
+  // passthrough, not where the actual safety check lives.
+  if (branch && !allEbos) args.push(`--branch=${branch}`);
   const jobId = startJob('push-update.mjs', args);
   res.json({ jobId });
 });
