@@ -2,6 +2,7 @@ import express from 'express';
 import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, retryFailedSendAsTemplate, handleStaffCommand } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
+import { pool } from '../lib/db.js';
 
 export const router = express.Router();
 
@@ -183,5 +184,19 @@ router.post('/', async (req, res) => {
     }
   } catch (err) {
     console.error('WhatsApp webhook processing failed:', err);
+    // Chidera, 2026-09-23, real live incident: this used to only go to
+    // docker logs -- nobody was watching them, so a bot that silently
+    // failed on every single inbound message (a migration never run
+    // against this business's database, in that case) still showed
+    // "up: true, 0 errors" on the status dashboard for as long as nobody
+    // happened to check logs by hand. ai_errors already feeds that
+    // dashboard's own error count (routes/api.js's /monitor/summary,
+    // codeErrorCount) -- reusing it here means ANY future exception in
+    // webhook processing, not just Claude/AI failures, shows up there too,
+    // the same place she already looks. Never let this insert itself throw
+    // and mask the real error above.
+    await pool
+      .query(`insert into ai_errors (message) values ($1)`, [`WhatsApp webhook processing failed: ${err.message}`.slice(0, 500)])
+      .catch(() => {});
   }
 });

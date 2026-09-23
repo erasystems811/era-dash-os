@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 // Usage:
-//   node push-update.mjs --client=slug
-//   node push-update.mjs --all-ebos
+//   node push-update.mjs --client=slug [--confirmed]
+//   node push-update.mjs --all-ebos [--confirmed]
+//
+// --confirmed is required the moment any TARGETED client isn't a sandbox
+// and isn't era-demo -- Chidera's own real businesses need her explicit
+// go-ahead first, every time, not just a clean-main check. See
+// lib/business-permission-guard.mjs.
 //
 // Pushes the CURRENT dashboard app code to an already-live client's server
 // -- for rolling out a bot behavior fix (wording rule, flow bug, timing
@@ -50,6 +55,7 @@ import { loadRegistry, saveRegistry, upsertClient } from './lib/registry.mjs';
 import { templatesDirFor } from './lib/templates-dir.mjs';
 import { runRemote, copyToRemote } from './lib/ssh.mjs';
 import { requireDeployableState } from './lib/deploy-guard.mjs';
+import { requireBusinessPermission } from './lib/business-permission-guard.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, '..');
@@ -67,6 +73,7 @@ function parseArgs(argv) {
     if (arg.startsWith('--client=')) args.client = arg.slice('--client='.length);
     else if (arg === '--all-ebos') args.allEbos = true;
     else if (arg.startsWith('--branch=')) args.branch = arg.slice('--branch='.length);
+    else if (arg === '--confirmed') args.confirmed = true;
   }
   if (!args.client && !args.allEbos) {
     throw new Error('Usage: push-update.mjs --client=slug [--branch=name] | --all-ebos');
@@ -209,6 +216,7 @@ async function main() {
   if (targets.some((c) => !c.sandbox)) {
     requireDeployableState(REPO_ROOT);
   }
+  requireBusinessPermission(targets, args.confirmed);
 
   // --branch: real, in-progress feature work (a branch not yet merged to
   // main) tested against an actual sandbox deployment. Restricted to

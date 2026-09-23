@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Usage:
-//   node migrate.mjs --client=slug --file=path/to.sql
-//   node migrate.mjs --all-ebos --file=path/to.sql
+//   node migrate.mjs --client=slug --file=path/to.sql [--confirmed]
+//   node migrate.mjs --all-ebos --file=path/to.sql [--confirmed]
+//
+// --confirmed is required the moment any TARGETED client isn't a sandbox
+// and isn't era-demo -- see lib/business-permission-guard.mjs.
 //
 // Runs a schema change against an already-live business's database --
 // deliberately separate from push-update.mjs (app code only, never touches
@@ -24,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { loadRegistry } from './lib/registry.mjs';
 import { runRemote, copyToRemote } from './lib/ssh.mjs';
 import { requireDeployableState } from './lib/deploy-guard.mjs';
+import { requireBusinessPermission } from './lib/business-permission-guard.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, '..');
@@ -35,6 +39,7 @@ function parseArgs(argv) {
     if (arg.startsWith('--client=')) args.client = arg.slice('--client='.length);
     else if (arg === '--all-ebos') args.allEbos = true;
     else if (arg.startsWith('--file=')) args.file = arg.slice('--file='.length);
+    else if (arg === '--confirmed') args.confirmed = true;
   }
   if (!args.file) throw new Error('Usage: migrate.mjs (--client=slug | --all-ebos) --file=path/to.sql');
   if (!args.client && !args.allEbos) throw new Error('Usage: migrate.mjs (--client=slug | --all-ebos) --file=path/to.sql');
@@ -96,6 +101,7 @@ async function main() {
   if (targets.some((c) => !c.sandbox)) {
     requireDeployableState(REPO_ROOT);
   }
+  requireBusinessPermission(targets, args.confirmed);
 
   console.log(`Running ${args.file} against ${targets.length} business(es)...`);
   const results = [];

@@ -72,5 +72,9 @@ router.post('/', async (req, res) => {
     }
   } catch (err) {
     console.error('Instagram webhook processing failed:', err);
+    // Same reasoning as webhook-whatsapp.js's own catch -- see its comment.
+    await pool
+      .query(`insert into ai_errors (message) values ($1)`, [`Instagram webhook processing failed: ${err.message}`.slice(0, 500)])
+      .catch(() => {});
   }
 });
