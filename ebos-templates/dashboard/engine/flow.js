@@ -745,29 +745,43 @@ async function handover(customer, reason, extra, ackText, primaryLink) {
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   for (const { phoneNumber: to, staffId } of recipients) {
     const alert = `Handing over a chat from ${displayNameFor(customer)} to you.\nReason: ${reason}\n${summary}${extraLines}`;
-    await sendStaffAlert(to, alert);
 
+    // Chidera, 2026-09-23: "make handover chats in ebos one, meaning add
+    // both the tap to open and message in one text to reduce my charges"
+    // -- the alert text and the conversation-link button used to be two
+    // separate WhatsApp sends (two billable messages, matters with Meta's
+    // per-message pricing) per staff member. Now one cta_url message
+    // carries the alert as its body AND the button, when a link is even
+    // possible (see the magic-link comment below).
+    if (!process.env.PUBLIC_URL) {
+      await sendStaffAlert(to, alert);
+      continue;
+    }
     // Chidera, 2026-09-16: "when a handover is sent the link should be
-    // open in the whatsapp chat, they dnt have to leave to a site" -- this
-    // used to append the link as plain text onto the alert above, which
-    // opens the device's own external browser when tapped. A real CTA-URL
-    // button instead, same mechanism handleStaffCommand's "text dashboard"
-    // link already uses (opens inside WhatsApp's own in-app browser). A
-    // magic link (not a bare dashboard URL) signs this exact staff member
-    // straight in and lands them on this conversation, no separate login
-    // -- falls back to the old bare (login-required) link when this
-    // recipient has no staffId, since business.handover_number's fallback
-    // isn't a real staff account with a session to bind a token to.
-    if (!process.env.PUBLIC_URL) continue;
+    // open in the whatsapp chat, they dnt have to leave to a site" -- a
+    // real CTA-URL button, same mechanism handleStaffCommand's "text
+    // dashboard" link already uses (opens inside WhatsApp's own in-app
+    // browser). A magic link (not a bare dashboard URL) signs this exact
+    // staff member straight in and lands them on this conversation, no
+    // separate login -- falls back to the old bare (login-required) link
+    // when this recipient has no staffId, since business.handover_number's
+    // fallback isn't a real staff account with a session to bind a token to.
     const path = primaryLink?.path || `/conversations/${customer.id}`;
     const title = primaryLink?.title || 'Open Conversation';
     const link = staffId
       ? `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, path)}`
       : `${process.env.PUBLIC_URL}${path}`;
     try {
-      await sendWhatsAppCtaUrl(to, `Tap below to open this conversation.`, title, link, credentials);
+      await sendWhatsAppCtaUrl(to, alert, title, link, credentials);
     } catch (err) {
-      console.error(`Failed to send handover conversation link to ${to}:`, err.message);
+      // A cta_url send has no template equivalent -- WhatsApp only allows
+      // a pre-approved TEMPLATE message outside the 24h customer-service
+      // window, which can't carry a dynamic button. sendStaffAlert already
+      // has that template fallback (see its own 131047 handling), so a
+      // staff member outside the window still gets the alert text, same
+      // as before this change, just without the one-tap link in that case.
+      console.error(`Failed to send merged handover message to ${to}, falling back to text-only alert:`, err.message);
+      await sendStaffAlert(to, alert);
     }
   }
 }
