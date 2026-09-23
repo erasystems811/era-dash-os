@@ -3472,61 +3472,71 @@ function stopTypingKeepAlive(customerId) {
   }
 }
 
+// Whatever broke (a payment provider down, an unexpected bug, a dependency
+// error, the AI provider itself failing/rate-limited), the customer must
+// never be left with pure silence -- found live: a Paystack failure
+// mid-flow left a WhatsApp customer hanging after "switching to pickup"
+// with nothing further, ever, until they happened to message again. Best-
+// effort and deliberately swallows its own failure, so a second error here
+// can't cascade. Shared by scheduleDebouncedProcessing (the real WhatsApp
+// path) and handleWebChatMessage (the web-chat path, added 2026-09-23 --
+// found live, Chidera: "i sent a text, bot didnt reply me", on the /wa
+// chat page, which had NO equivalent safety net at all until this) -- one
+// place decides what a broken processing turn looks like to the customer,
+// not two copies that could quietly drift apart.
+async function recoverFromProcessingError(customer) {
+  try {
+    // Still lets the bot retry normally on every later message (the usual
+    // handled_by='staff'-but-no-real-human-yet gate in handlePendingBatch
+    // already does that) -- this only decides what the CUSTOMER sees when
+    // a retry fails again. First failure: the one-time ack below. Every
+    // failure after that, while still the same unresolved outage and no
+    // staff reply yet: stay silent to the customer (no repeat "someone
+    // will be with you shortly" spam) but still relay to staff, so a
+    // message sent during a still-broken retry isn't lost. The moment a
+    // retry actually succeeds, this never runs and the customer gets a
+    // normal reply again.
+    const { rows: freshRows } = await pool.query(
+      'select handled_by, handover_reason, handled_by_staff_id, app_handled_at from customers where id = $1',
+      [customer.id]
+    );
+    const fresh = freshRows[0];
+    const alreadyInErrorHandover =
+      fresh?.handled_by === 'staff' &&
+      fresh.handover_reason === SYSTEM_ERROR_HANDOVER_REASON &&
+      !(fresh.handled_by_staff_id || fresh.app_handled_at);
+
+    if (alreadyInErrorHandover) {
+      const { rows: lastMsg } = await pool.query(
+        `select body from message where customer_id = $1 and direction = 'inbound' order by created_at desc limit 1`,
+        [customer.id]
+      );
+      const recipients = await handoverRecipients();
+      for (const { phoneNumber: to, staffId } of recipients) {
+        await notifyStaff({ staffId, phoneNumber: to, title: 'Still erroring', body: `${displayNameFor(customer)} sent another message while still erroring: ${lastMsg[0]?.body || '(no text)'}` });
+      }
+    } else {
+      // First failure -- one plain message, not two -- this used to send
+      // its own "having trouble" line here and then handover()'s default
+      // "let me confirm this properly" right after, which read as a
+      // stitched-together non-sequitur to the customer (found live,
+      // 2026-09-02: "let me confirm this properly" makes no sense right
+      // after being told something broke).
+      await handover(customer, SYSTEM_ERROR_HANDOVER_REASON, null, 'Hello, please someone will be with you shortly.');
+    }
+  } catch (innerErr) {
+    console.error('Failed to notify customer after a processing error:', innerErr);
+  }
+}
+
 function scheduleDebouncedProcessing(customer) {
   const existing = pendingTimers.get(customer.id);
   if (existing) clearTimeout(existing);
   const timer = setTimeout(() => {
     pendingTimers.delete(customer.id);
-    processPendingMessages(customer.id).catch(async (err) => {
+    processPendingMessages(customer.id).catch((err) => {
       console.error('Debounced message processing failed:', err);
-      // Whatever broke (a payment provider down, an unexpected bug, a
-      // dependency error), the customer must never be left with pure
-      // silence -- found live: a Paystack failure mid-flow left a customer
-      // hanging after "switching to pickup" with nothing further, ever,
-      // until they happened to message again. Best-effort and deliberately
-      // swallows its own failure, so a second error here can't cascade.
-      try {
-        // Still lets the bot retry normally on every later message (the
-        // usual handled_by='staff'-but-no-real-human-yet gate in
-        // handlePendingBatch already does that) -- this only decides what
-        // the CUSTOMER sees when a retry fails again. First failure: the
-        // one-time ack below. Every failure after that, while still the
-        // same unresolved outage and no staff reply yet: stay silent to
-        // the customer (no repeat "someone will be with you shortly" spam)
-        // but still relay to staff, so a message sent during a still-broken
-        // retry isn't lost. The moment a retry actually succeeds, this
-        // catch never runs and the customer gets a normal reply again.
-        const { rows: freshRows } = await pool.query(
-          'select handled_by, handover_reason, handled_by_staff_id, app_handled_at from customers where id = $1',
-          [customer.id]
-        );
-        const fresh = freshRows[0];
-        const alreadyInErrorHandover =
-          fresh?.handled_by === 'staff' &&
-          fresh.handover_reason === SYSTEM_ERROR_HANDOVER_REASON &&
-          !(fresh.handled_by_staff_id || fresh.app_handled_at);
-
-        if (alreadyInErrorHandover) {
-          const { rows: lastMsg } = await pool.query(
-            `select body from message where customer_id = $1 and direction = 'inbound' order by created_at desc limit 1`,
-            [customer.id]
-          );
-          const recipients = await handoverRecipients();
-          for (const { phoneNumber: to, staffId } of recipients) {
-            await notifyStaff({ staffId, phoneNumber: to, title: 'Still erroring', body: `${displayNameFor(customer)} sent another message while still erroring: ${lastMsg[0]?.body || '(no text)'}` });
-          }
-        } else {
-          // First failure -- one plain message, not two -- this used to
-          // send its own "having trouble" line here and then handover()'s
-          // default "let me confirm this properly" right after, which read
-          // as a stitched-together non-sequitur to the customer (found
-          // live, 2026-09-02: "let me confirm this properly" makes no
-          // sense right after being told something broke).
-          await handover(customer, SYSTEM_ERROR_HANDOVER_REASON, null, 'Hello, please someone will be with you shortly.');
-        }
-      } catch (innerErr) {
-        console.error('Failed to notify customer after a processing error:', innerErr);
-      }
+      return recoverFromProcessingError(customer);
     });
   }, DEBOUNCE_MS);
   pendingTimers.set(customer.id, timer);
@@ -5050,7 +5060,22 @@ export async function handleWebChatMessage({ customer, text }) {
     await handleClosedHoursMessage(customer, hours.opensAt, hoursBranchId);
     return;
   }
-  await handlePendingBatch(customer, text);
+  // Chidera, 2026-09-23, live report: "i sent a text, bot didnt reply me"
+  // -- unlike the real WhatsApp path (scheduleDebouncedProcessing's own
+  // catch, above), this had no error-recovery net at all: a free-text turn
+  // on the /wa chat page failing for ANY reason (the AI provider down/
+  // rate-limited, any dependency error) threw straight out of this
+  // function with nothing caught anywhere -- the client's own fetch is a
+  // silent try/catch (web-chat-page-template.js's sendText), so the
+  // customer got absolute silence, not even an error toast. Same recovery
+  // now, reused: an apologetic ack + staff handover on first failure, a
+  // repeat one just re-alerts staff without re-spamming the customer.
+  try {
+    await handlePendingBatch(customer, text);
+  } catch (err) {
+    console.error('Web-chat message processing failed:', err);
+    await recoverFromProcessingError(customer);
+  }
 }
 
 // Voice add-on's own front door onto this SAME engine (spec 0.6: "voice is
