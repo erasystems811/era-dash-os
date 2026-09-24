@@ -136,6 +136,14 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   #textInput:focus{outline:none}
   #sendBtn{flex:none;width:42px;height:42px;border-radius:50%;background:var(--accent);border:none;color:#fff;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center}
   #sendBtn:disabled{opacity:.5}
+  /* Chidera, 2026-09-24: "the tapping should feel like ive tapped
+     something, like the effect of popping or bounce." A real press-down,
+     not just whatever happens after -- fires instantly on touch/press via
+     :active (no JS, no round-trip wait), on every real tappable control
+     on this page, so a tap always reads as "that registered" the moment
+     it happens, not only once a reply eventually shows up. */
+  .actionrow,.linkbtn,.confirmbtn,.sheetrow-toggle,.qtybtn,#listSheetSend,.composer-icon,#sendBtn{transition:transform .08s ease}
+  .actionrow:active,.linkbtn:active,.confirmbtn:active,.sheetrow-toggle:active,.qtybtn:active,#listSheetSend:active,.composer-icon:active,#sendBtn:active{transform:scale(.94)}
   /* Chidera, 2026-09-24: "the next text just appears, customer may not
      even notice its a new text... add the typing sign." A real WhatsApp-
      style three-dot bubble shown for 2s before a new bot message actually
@@ -451,10 +459,24 @@ document.getElementById('scroll').addEventListener('click', function (e) {
   tap({ buttonId: btn.dataset.buttonId, title: btn.dataset.title });
 });
 
+// Chidera, 2026-09-24, real report: "when i tapped make a complaint it
+// sent double reply... it should be able to know when a double tap of a
+// button is a mistake." The individual per-button disabled-attribute
+// guards (confirmbtns, the upsell list sheet's Send/skip) already existed, but
+// each one was its own separate, easy-to-miss copy of the same idea --
+// one centralized, ALWAYS-on guard right here instead, so every single
+// caller of tap() (current and future) is covered the same way, with no
+// possible gap. A tap while one's already in flight is silently dropped,
+// never queued or retried -- the customer's first tap is what happens,
+// a second one on top of it never means "do it twice."
+let tapInFlight = false;
 async function tap(body) {
+  if (tapInFlight) return;
+  tapInFlight = true;
   try {
     await fetch(TAP_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   } catch (err) {}
+  tapInFlight = false;
   poll();
 }
 

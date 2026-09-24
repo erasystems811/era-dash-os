@@ -1601,16 +1601,18 @@ function catalogueOptions(menu, keywords) {
 // Chidera, 2026-09-24: "if youll recommend a side, then the side should
 // be first and its either side then protein then drink or protein then
 // snack then drink...and recommendation should depend on what is needed
-// for that customer." Two priority tracks, picked once per call by the
-// one real thing that decides which is "needed": whether this order
-// already has a side. A side genuinely missing gets offered FIRST (ahead
-// of protein/drink, reversing the old fixed drink-first order); an order
-// that already has one skips straight to the other track instead (a
-// second side offer would never fire anyway -- orderHasIt below already
-// excludes it -- so protein/snack/drink is what's actually left to offer,
-// in the order she asked for).
+// for that customer" -- then corrected the WITH-side order specifically:
+// "instead of side then protein then drink make it protein then side then
+// drink." Two priority tracks, picked once per call by the one real thing
+// that decides which is "needed": whether this order already has a side.
+// A side genuinely missing still gets offered (ahead of drink, reversing
+// the old fixed drink-first order), just after protein now, not before
+// it; an order that already has one skips straight to the other track
+// instead (a second side offer would never fire anyway -- orderHasIt
+// below already excludes it -- so protein/snack/drink is what's actually
+// left to offer, in the order she asked for).
 const SIDE_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'side').keywords;
-const UPSELL_PRIORITY_WITH_SIDE = ['side', 'protein', 'drink'];
+const UPSELL_PRIORITY_WITH_SIDE = ['protein', 'side', 'drink'];
 const UPSELL_PRIORITY_WITHOUT_SIDE = ['protein', 'snack', 'drink'];
 
 // Next upsell offer worth making, if any -- one whole category at a time
