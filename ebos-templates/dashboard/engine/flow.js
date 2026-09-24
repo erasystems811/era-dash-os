@@ -1514,7 +1514,7 @@ export async function handleCollectInfo(customer, order, text, greetingPrefix = 
 // specific question been asked yet" is a real fact, not a guess.
 async function askNextItemQuestion(orderId) {
   const { rows } = await pool.query(
-    `select oi.id as order_item_id, oi.quantity, pq.id as question_id, pq.question, p.name as product_name
+    `select oi.id as order_item_id, pq.id as question_id, pq.question, p.name as product_name
      from order_item oi
      join product p on p.id = oi.product_id
      join product_question pq on pq.product_id = p.id
@@ -1807,20 +1807,16 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
       if (shownLink) return;
     }
     const soFar = await orderSoFarSummary(order);
-    // Chidera, 2026-09-24: "for things like drink just asks for your
-    // drinks cold or room temperature, the customer can type 1 cold and 1
-    // room temperature and you just show it like that for staff."
-    // handlePendingItemQuestion already stores whatever's typed here
-    // verbatim as this line's modification, no forced single answer -- the
-    // real gap was that a quantity>1 line never told the customer there
-    // WAS more than one, so nothing hinted a split answer was even an
-    // option. Only worth naming the quantity/split hint once there
-    // genuinely is more than one -- a plain "For your Zobo Drink, cold or
-    // room temperature?" stays exactly as before for a single unit.
-    const qtyHint = nextQuestion.quantity > 1
-      ? ` (You have ${nextQuestion.quantity} -- feel free to split it, e.g. "1 cold, 1 room temperature".)`
-      : '';
-    await reply(customer, `${prefix}${soFar}For your ${nextQuestion.quantity > 1 ? `${nextQuestion.quantity}x ` : ''}${nextQuestion.product_name}, ${nextQuestion.question}${qtyHint}`.trim(), 'item_question_asked');
+    // Chidera, 2026-09-24: first tried naming the quantity + a split-answer
+    // hint here for a multi-unit line ("for things like drink just asks
+    // for your drinks cold or room temperature, the customer can type 1
+    // cold and 1 room temperature") -- then corrected: "no need to ask
+    // that extra 'you have 2, feel free to split it'...blah blah...the
+    // first cold or room temperature is fine." Back to the plain question,
+    // every time. handlePendingItemQuestion already stores whatever's
+    // typed here verbatim (no forced single answer), so a real split
+    // answer still works fine without the bot spelling out the option.
+    await reply(customer, `${prefix}${soFar}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
     return;
   }
 
