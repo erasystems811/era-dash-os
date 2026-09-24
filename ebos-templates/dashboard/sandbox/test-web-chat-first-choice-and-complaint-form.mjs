@@ -37,7 +37,7 @@ async function main() {
   const html1 = await (await fetch(`${BASE}/wa/${token}`)).text();
   assert(html1.includes('Hey! What would you like to do?'), 'first visit shows the choice prompt');
   assert(!html1.includes('what would you like to order?'), 'the full order-framing welcome text is NOT shown up front anymore');
-  assert(html1.includes('Place an order') && html1.includes('Give feedback'), 'both choice buttons are present');
+  assert(html1.includes('Place an order') && html1.includes('Make a complaint'), 'both choice buttons are present');
 
   const messages1 = await (await fetch(`${BASE}/wa/${token}/messages`)).json();
   const choiceMsg = messages1.find((m) => m.trigger === 'first_choice');
@@ -59,8 +59,8 @@ async function main() {
   assert(/what would you like to order/i.test(greetingMsg?.body || ''), 'and it carries the full order-framing welcome text');
   assert(greetingMsg?.interactive?.type === 'cta_url' && greetingMsg?.interactive?.buttonText === 'See menu', 'with the See menu button, same as before');
 
-  // === 3. Tapping "Give feedback" (on a SEPARATE, fresh customer) links to
-  // the real complaint form, and submitting it works end to end. ===
+  // === 3. Tapping "Make a complaint" (on a SEPARATE, fresh customer) links
+  // to the real complaint form, and submitting it works end to end. ===
   const feedbackCustomer = await flow.findOrCreateCustomer({ phoneNumber: '2348012356002', channel: 'whatsapp' });
   const feedbackToken = await flow.ensureMenuToken(feedbackCustomer);
   await fetch(`${BASE}/wa/${feedbackToken}`); // first visit, logs the choice bubble
@@ -69,7 +69,7 @@ async function main() {
   });
   const messages3 = await (await fetch(`${BASE}/wa/${feedbackToken}/messages`)).json();
   const complaintPromptMsg = messages3.find((m) => m.trigger === 'complaint_greeting');
-  assert(Boolean(complaintPromptMsg), 'tapping "Give feedback" logs the complaint prompt bubble');
+  assert(Boolean(complaintPromptMsg), 'tapping "Make a complaint" logs the complaint prompt bubble');
   assert(complaintPromptMsg?.interactive?.type === 'cta_url', 'linking out to a real form page, not just chat text');
   assert(complaintPromptMsg?.interactive?.url === `${process.env.PUBLIC_URL}/c/${feedbackToken}`, 'pointing at this exact customer\'s own complaint form');
 

@@ -24,7 +24,7 @@ import {
   magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, UPSELL_GROUPS, categoryMatchesGroup } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, UPSELL_GROUPS, categoryMatchesGroup, notifyComplaintReply } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
@@ -1400,6 +1400,54 @@ router.get('/feedback/monthly', requireEditorApi, async (req, res) => {
     [req.branchId, channel]
   );
   res.json(rows);
+});
+
+// --- Complaints ---------------------------------------------------------
+// Chidera, 2026-09-24: "in that feedback tab in dashboard create a tab for
+// complaint." Own table (complaint), separate from order_feedback (star
+// ratings tied to a completed order) -- a complaint has no rating and
+// doesn't require an order at all.
+
+router.get('/complaints', requireEditorApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select c.*, cu.name as customer_name, cu.phone_number as customer_phone
+     from complaint c
+     join customers cu on cu.id = c.customer_id
+     where ($1::uuid is null or c.branch_id = $1)
+     order by c.created_at desc limit 200`,
+    [req.branchId]
+  );
+  res.json(rows);
+});
+
+// Chidera, 2026-09-24: "if they want to reply, let reply not come to the
+// bare chat let the customer be pinged with a you have a message from our
+// manager, with tap here to chat button" -- notifyComplaintReply (not the
+// generic sendStaffReply /conversations/:id/send uses) logs the real
+// reply as a free website bubble and sends a short, generic real WhatsApp
+// ping pointing back to it, rather than the reply itself landing as a
+// real send or silently sitting unnoticed in a chat the customer has
+// likely already left.
+router.post('/complaints/:id/reply', requireEditorApi, async (req, res) => {
+  const text = (req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'A reply is required.' });
+  const { rows } = await pool.query(
+    `update complaint set staff_reply = $1, replied_by_staff_id = $2, replied_at = now(), status = 'replied'
+     where id = $3 returning customer_id`,
+    [text, req.staff.id, req.params.id]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Complaint not found.' });
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [rows[0].customer_id]);
+  if (custRows[0]) await notifyComplaintReply(custRows[0], text);
+  await logActivity(req, 'complaint_replied', { entityType: 'complaint', entityId: req.params.id });
+  res.json({ ok: true });
+});
+
+router.post('/complaints/:id/resolve', requireEditorApi, async (req, res) => {
+  const { rows } = await pool.query(`update complaint set status = 'resolved' where id = $1 returning id`, [req.params.id]);
+  if (!rows.length) return res.status(404).json({ error: 'Complaint not found.' });
+  await logActivity(req, 'complaint_resolved', { entityType: 'complaint', entityId: req.params.id });
+  res.json({ ok: true });
 });
 
 // --- Catalogue --------------------------------------------------------

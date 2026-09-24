@@ -41,9 +41,18 @@ router.post('/:token/submit', async (req, res) => {
   if (!text) return res.status(400).json({ error: 'Please tell us what happened first.' });
   customer.channel = 'website';
   await logInboundWebsiteMessage(customer, text);
+  // Chidera, 2026-09-24: "there is also nowhere for complaint to go to,
+  // there is no database table." handover() alone (the real WhatsApp ping
+  // to whichever staff have handover_alerts on) never left a persistent
+  // record anywhere -- this is the one, so the dashboard's own Complaints
+  // tab has something real to list and reply to.
+  await pool.query(
+    `insert into complaint (customer_id, branch_id, message) values ($1, $2, $3)`,
+    [customer.id, customer.branch_id, text]
+  );
   await handover(
     customer,
-    'Customer submitted a complaint via the feedback form',
+    'Customer submitted a complaint via the complaint form',
     null,
     `Thanks, we've received your message and will get back to you shortly.`
   );

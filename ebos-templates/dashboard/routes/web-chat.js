@@ -22,6 +22,7 @@ import {
   handleWebChatMedia,
   handleUpsellListTap,
   handleOrderConfirmNoTap,
+  handleOrderConfirmYesTap,
   logWebsiteBubble,
   getOpenOrder,
 } from '../engine/flow.js';
@@ -62,7 +63,11 @@ async function sendComplaintPrompt(customer, token) {
     customerId: customer.id,
     body: `Sorry to hear that. Tap below to tell us what happened.`,
     trigger: 'complaint_greeting',
-    interactive: { type: 'cta_url', buttonText: 'Give feedback', url: complaintUrl },
+    // Chidera, 2026-09-24: "write make a complaint so that its not
+    // confused with the other rating feedback" -- both the first-choice
+    // bubble's own button and this second one (leading to the actual
+    // form) stay consistently worded, not "feedback" anywhere in either.
+    interactive: { type: 'cta_url', buttonText: 'Make a complaint', url: complaintUrl },
   });
 }
 
@@ -153,7 +158,7 @@ router.get('/:token', async (req, res) => {
           type: 'buttons',
           buttons: [
             { id: 'wa_start_order', title: 'Place an order' },
-            { id: 'wa_give_feedback', title: 'Give feedback' },
+            { id: 'wa_give_feedback', title: 'Make a complaint' },
           ],
         },
       });
@@ -285,6 +290,15 @@ router.post('/:token/tap', async (req, res) => {
     await handleOrderConfirmNoTap({ channel: 'website', branchId: customer.branch_id, customer });
     return res.json({ ok: true });
   }
+  // Chidera, 2026-09-24: "after taping yes confirm the reply after that
+  // is too slow" -- this used to fall into the generic text-pipeline
+  // bucket below (handleWebChatMessage), which burned TWO real Anthropic
+  // calls just to work out that "Yes, confirm" meant yes. Dedicated,
+  // zero-AI handler, same shape as order_confirm_no right above.
+  if (buttonId === 'order_confirm_yes') {
+    await handleOrderConfirmYesTap({ channel: 'website', branchId: customer.branch_id, customer });
+    return res.json({ ok: true });
+  }
   // The first-visit choice bubble's own two buttons -- Chidera, 2026-09-24:
   // "hey, what would you like to do? with 2 buttons 1.place an order
   // 2.give feedback." Deterministic sends, no dispatch()/AI call needed --
@@ -299,10 +313,10 @@ router.post('/:token/tap', async (req, res) => {
     await sendComplaintPrompt(customer, menuToken);
     return res.json({ ok: true });
   }
-  // order_confirm_yes, fulfilment_delivery/pickup, confirm_yes/no -- same
-  // "button's own title through the normal text pipeline" shape the real
-  // WhatsApp webhook already uses for all four of these.
-  if (['order_confirm_yes', 'fulfilment_delivery', 'fulfilment_pickup', 'confirm_yes', 'confirm_no'].includes(buttonId) && title) {
+  // fulfilment_delivery/pickup, confirm_yes/no -- same "button's own title
+  // through the normal text pipeline" shape the real WhatsApp webhook
+  // already uses for these.
+  if (['fulfilment_delivery', 'fulfilment_pickup', 'confirm_yes', 'confirm_no'].includes(buttonId) && title) {
     await handleWebChatMessage({ customer, text: String(title) });
     return res.json({ ok: true });
   }

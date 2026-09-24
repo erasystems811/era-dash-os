@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleUpsellListTap, retryFailedSendAsTemplate, handleStaffCommand } from './flow.js';
+import { handleInboundMessage, handleInboundMedia, recordAppReply, handleMenuItemTap, handleStartOrderTap, handleDineinButtonTap, handleOrderConfirmNoTap, handleOrderConfirmYesTap, handleUpsellListTap, retryFailedSendAsTemplate, handleStaffCommand } from './flow.js';
 import { menuRowKind, handleMenuNavigation, productForRowId } from './menu-message.js';
 import { resolveBranchByPhoneNumberId } from './branch-channel.js';
 
@@ -140,13 +140,15 @@ router.post('/', async (req, res) => {
             } else if (['dinein_menu', 'dinein_specials'].includes(buttonId)) {
               await handleDineinButtonTap({ phoneNumber: message.from, buttonId, channel: 'whatsapp', branchId });
             } else if (buttonId === 'order_confirm_yes') {
-              // flow.js's sendConfirmButtons -- put through the exact same
-              // text pipeline a typed "yes" would take, so every state-
-              // dependent confirm branch already in dispatch() handles it
-              // correctly with no new logic needed here. Uses the button's
-              // own title, not a hardcoded 'yes', so the transcript reads
-              // the same as if they'd typed it themselves.
-              await handleInboundMessage({ phoneNumber: message.from, text: buttonTitle, channel: 'whatsapp', messageId: message.id, branchId });
+              // Chidera, 2026-09-24: "after taping yes confirm the reply
+              // after that is too slow." Used to go through the normal
+              // debounced text pipeline (handleInboundMessage), same as a
+              // genuinely typed "yes" -- a 2s debounce wait PLUS two real
+              // Anthropic calls (dispatch()'s own extractOrderModifications,
+              // then handleConfirmOrder's own extractField) just to work out
+              // that the tap meant yes. Direct, zero-AI, zero-debounce
+              // handler now, same shape as order_confirm_no right below.
+              await handleOrderConfirmYesTap({ phoneNumber: message.from, channel: 'whatsapp', branchId });
             } else if (buttonId === 'order_confirm_no') {
               // Sent directly, not through the AI confirm pipeline -- see
               // handleOrderConfirmNoTap's own comment for why.

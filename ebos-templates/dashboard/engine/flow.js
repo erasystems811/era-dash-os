@@ -1042,6 +1042,33 @@ export async function sendComplaintLink(customer) {
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortMessage, trigger: 'complaint_redirect', processed: true });
 }
 
+// Chidera, 2026-09-24: "if they want to reply, let reply not come to the
+// bare chat let the customer be pinged with a you have a message from our
+// manager, with tap here to chat button." routes/api.js's own complaint
+// reply endpoint calls this: the manager's actual reply text is logged as
+// a free website bubble (so it's there once they open the chat, same
+// near-zero-cost shape as everything else on this page), but a customer
+// who's genuinely left has no way to know it's waiting -- a manager
+// replying is unscheduled, unlike a payment confirmation the customer is
+// actively expecting, so this always sends a real, short WhatsApp ping
+// pointing them back, never conditional on whether they're still on the
+// page right now.
+export async function notifyComplaintReply(customer, replyText) {
+  const token = await ensureMenuToken(customer);
+  // The manager's real reply lives as a free website bubble -- the ping
+  // below stays generic on purpose, never the reply content itself,
+  // matching this whole feature's own near-zero-message-cost shape (the
+  // real content is free once they're on the page, only the nudge to get
+  // them there is a billable send).
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'website', sender: 'bot', body: replyText, trigger: 'complaint_reply' });
+  if (!process.env.PUBLIC_URL) return;
+  const shortMessage = `You have a message from our manager.`;
+  const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  await sendWhatsAppCtaUrl(recipientFor(customer), shortMessage, 'Tap here to chat', chatUrl, credentials);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'whatsapp', sender: 'bot', body: shortMessage, trigger: 'complaint_reply_ping', processed: true });
+}
+
 async function handleGreeting(customer, text) {
   // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
   // catch up to our current state" -- found live: an Instagram customer
@@ -1971,17 +1998,23 @@ export async function handleConfirmOrder(customer, order, text) {
     return;
   }
 
+  await markOrderConfirmed(customer, order);
+}
+
+// Chidera, 2026-09-20: "when they add on send them the yes to confirm
+// button and place the ordr" -- the staff "table added more" alert
+// (resetServedForAddOn) fires HERE, on the real yes, not the moment the
+// item was inserted -- same two-step "shown, then confirmed" shape the
+// very first round of an order already has. order.served_at still holds
+// whatever it was before this round started (nothing resets it earlier
+// anymore), so this is a genuine no-op for a first-ever order (never
+// served yet) and the real, intended alert for a repeat add-on round on a
+// table that had already been served. Shared by handleConfirmOrder (a
+// genuine typed "yes") and handleOrderConfirmYesTap below (a tap on the
+// button itself) so both converge on the exact same confirmation.
+async function markOrderConfirmed(customer, order) {
   await pool.query(`update "order" set confirmed_at = now() where id = $1`, [order.id]);
   order.confirmed_at = new Date();
-  // Chidera, 2026-09-20: "when they add on send them the yes to confirm
-  // button and place the ordr" -- the staff "table added more" alert
-  // (resetServedForAddOn) now fires HERE, on the real yes tap, not the
-  // moment the item was inserted -- same two-step "shown, then confirmed"
-  // shape the very first round of an order already has. order.served_at
-  // still holds whatever it was before this round started (nothing
-  // resets it earlier anymore), so this is a genuine no-op for a first-
-  // ever order (never served yet) and the real, intended alert for a
-  // repeat add-on round on a table that had already been served.
   await resetServedForAddOn(order);
   await handleCollectFulfilment(customer, order, null);
 }
@@ -4820,6 +4853,28 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
   }
   const shown = await sendWebMenuLink(customer, message, 'Tap here to see menu');
   if (!shown) await reply(customer, message, 'order_confirm_no');
+}
+
+// Chidera, 2026-09-24: "after taping yes confirm the reply after that is
+// too slow." Root cause, confirmed reading the actual path: a tap on
+// "Yes, confirm" used to go through the normal text pipeline
+// (handleWebChatMessage/dispatch), same as a genuinely typed reply --
+// which meant TWO real Anthropic calls back to back before anything
+// happened (dispatch()'s own extractOrderModifications check, then
+// handleConfirmOrder's own extractField to work out the tap's title
+// meant yes) for something the tap itself already answers with zero
+// ambiguity. A dedicated handler, same zero-AI-cost shape as
+// handleOrderConfirmNoTap right above and handleUpsellListTap -- the tap
+// IS the confirmation, no AI needed to confirm what it already is.
+export async function handleOrderConfirmYesTap({ phoneNumber, channelId, channel = 'whatsapp', branchId, customer: presetCustomer }) {
+  const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
+  const order = await resolveCustomerOrder(customer);
+  // A stale tap (already confirmed another way, or the order's moved on)
+  // -- nothing to do, same "stale tap = no-op" reasoning as
+  // handleUpsellListTap's own guard.
+  if (!order || order.confirmed_at || order.engine_state !== 'confirm_order') return;
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Yes, confirm]', processed: true });
+  await markOrderConfirmed(customer, order);
 }
 
 export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId, customer: presetCustomer }) {

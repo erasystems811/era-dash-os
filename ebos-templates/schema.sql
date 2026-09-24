@@ -1205,6 +1205,26 @@ create table if not exists order_feedback (
 create unique index if not exists order_feedback_order_idx on order_feedback (order_id);
 create index if not exists order_feedback_branch_created_idx on order_feedback (branch_id, created_at desc);
 
+-- Chidera, 2026-09-24: "there is also nowhere for complaint to go to,
+-- there is no database table" -- a complaint submitted via routes/
+-- complaint.js used to only ever exist as a real WhatsApp handover() alert
+-- (ephemeral, no persistent record). order_id is deliberately absent --
+-- a complaint doesn't require an existing order (a customer can complain
+-- before ever placing one).
+create table if not exists complaint (
+  id uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references customers(id),
+  branch_id uuid references branch(id),
+  message text not null,
+  status text not null default 'open' check (status in ('open', 'replied', 'resolved')),
+  staff_reply text,
+  replied_by_staff_id uuid references staff(id),
+  replied_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists complaint_customer_idx on complaint (customer_id);
+create index if not exists complaint_status_idx on complaint (status);
+
 -- A dine-in order's own channel/fulfilment shape -- settled at the table,
 -- never delivered or collected, no payment confirmation step.
 alter table "order" add column if not exists channel text not null default 'whatsapp' check (channel in ('whatsapp', 'instagram', 'dinein'));

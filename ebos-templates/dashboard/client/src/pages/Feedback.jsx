@@ -39,12 +39,70 @@ function avg(n) {
   return n == null ? '--' : Number(n).toFixed(1);
 }
 
+// Chidera, 2026-09-24: "in that feedback tab in dashboard create a tab for
+// complaint... if they want to reply, let reply not come to the bare chat
+// let the customer be pinged." A small inline component (not a shared
+// per-row state array on the parent) so each complaint's own draft reply
+// text doesn't reset or clash with any other row's while typing.
+function ComplaintReplyBox({ complaint, onReplied, onResolved }) {
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  if (complaint.status !== 'open') {
+    return (
+      <div>
+        <div style={{ color: 'var(--text-muted)', marginBottom: complaint.status === 'replied' ? 8 : 0 }}>
+          {complaint.staff_reply ? `Replied: "${complaint.staff_reply}"` : null}
+        </div>
+        {complaint.status === 'replied' && (
+          <button className="secondary" onClick={() => onResolved(complaint.id)}>
+            Mark resolved
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  async function send() {
+    const text = draft.trim();
+    if (!text) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await onReplied(complaint.id, text);
+      setDraft('');
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 220 }}>
+      <textarea
+        rows={2}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="Type a reply..."
+        style={{ width: '100%', fontFamily: 'inherit', fontSize: 13.5, padding: 8, borderRadius: 8 }}
+      />
+      <button disabled={busy || !draft.trim()} onClick={send}>
+        {busy ? 'Sending...' : 'Send reply'}
+      </button>
+      {err && <div style={{ color: 'var(--hot, #C5452B)', fontSize: 12.5 }}>{err}</div>}
+    </div>
+  );
+}
+
 export default function Feedback() {
   const { scope } = useScope();
   const [channel, setChannel] = useState('all');
   const [summary, setSummary] = useState(null);
   const [recent, setRecent] = useState(null);
   const [monthly, setMonthly] = useState(null);
+  const [complaints, setComplaints] = useState(null);
   const [view, setView] = useState('recent');
   // Chidera, 2026-09-16: "if a business does not have in house or dine in
   // why does feedback dashboard make room for it on toogle?" -- the
@@ -69,6 +127,10 @@ export default function Feedback() {
     api.get(`/feedback/recent${q}`).then(setRecent).catch((err) => setError(err.message));
     api.get(`/feedback/monthly${q}`).then(setMonthly).catch((err) => setError(err.message));
   }
+  function loadComplaints() {
+    const branchQ = scopeQuery(scope);
+    api.get(`/complaints${branchQ}`).then(setComplaints).catch((err) => setError(err.message));
+  }
   useEffect(() => {
     setSummary(null);
     setRecent(null);
@@ -77,11 +139,25 @@ export default function Feedback() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel, scope]);
   useEffect(() => {
+    setComplaints(null);
+    loadComplaints();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope]);
+  useEffect(() => {
     api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
   }, []);
 
+  async function handleReply(id, text) {
+    await api.post(`/complaints/${id}/reply`, { text });
+    loadComplaints();
+  }
+  async function handleResolve(id) {
+    await api.post(`/complaints/${id}/resolve`, {});
+    loadComplaints();
+  }
+
   if (error) return <div className="error-banner">{error}</div>;
-  if (!summary || !recent || !monthly) return <Loading />;
+  if (!summary || !recent || !monthly || !complaints) return <Loading />;
 
   return (
     <div>
@@ -153,7 +229,48 @@ export default function Feedback() {
         <button className={view === 'monthly' ? '' : 'secondary'} onClick={() => setView('monthly')}>
           By month
         </button>
+        <button className={view === 'complaints' ? '' : 'secondary'} onClick={() => setView('complaints')}>
+          Complaints{complaints.filter((c) => c.status === 'open').length ? ` (${complaints.filter((c) => c.status === 'open').length})` : ''}
+        </button>
       </div>
+
+      {view === 'complaints' && (
+        <div className="card">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Customer</th>
+                <th>Message</th>
+                <th>Status</th>
+                <th>Reply</th>
+              </tr>
+            </thead>
+            <tbody>
+              {complaints.map((c) => (
+                <tr key={c.id} style={c.status === 'open' ? { background: 'rgba(197, 69, 43, 0.08)' } : undefined}>
+                  <td>{new Date(c.created_at).toLocaleString()}</td>
+                  <td>{c.customer_name || c.customer_phone}</td>
+                  <td style={{ maxWidth: 260 }}>{c.message}</td>
+                  <td>
+                    <span className={`badge ${c.status === 'open' ? 'new' : c.status === 'replied' ? 'active' : ''}`}>{c.status}</span>
+                  </td>
+                  <td>
+                    <ComplaintReplyBox complaint={c} onReplied={handleReply} onResolved={handleResolve} />
+                  </td>
+                </tr>
+              ))}
+              {!complaints.length && (
+                <tr>
+                  <td colSpan={5} className="empty-state">
+                    No complaints yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {view === 'recent' && (
         <div className="card">
