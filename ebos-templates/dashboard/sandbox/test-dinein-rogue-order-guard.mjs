@@ -116,17 +116,43 @@ async function main() {
     const order = orderRowsA[0];
     await pool.query(`insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, 3, 4700, $3)`, [order.id, product1, customer2.id]);
 
-    // JV's own real message, verbatim.
+    // JV's own real message, verbatim -- Chidera, 2026-09-24: "now we need
+    // dine in to go through web chat too." Dine-in is now folded into the
+    // universal redirect gate, so this raw bare-WhatsApp text no longer
+    // reaches classifyIntent/dispatch at all -- it gets redirected to the
+    // chat instead, same as any other first-ever bare text with no chat
+    // visit yet.
     await sendAndWait({ phoneNumber: '2348011110102', text: 'Yes, confirm', channel: 'whatsapp', messageId: 'a3', branchId });
+    const { rows: jvRedirectRows } = await pool.query(
+      `select trigger from message where customer_id = $1 and direction = 'outbound' and channel = 'whatsapp' order by created_at desc limit 1`,
+      [customer2.id]
+    );
+    assert(jvRedirectRows[0]?.trigger === 'greeting', 'JV\'s raw "Yes, confirm" text redirects to the chat now instead of reaching classifyIntent/dispatch directly');
+
+    const { rows: reloadedOrderA0 } = await pool.query(`select * from "order" where id = $1`, [order.id]);
+    assert(reloadedOrderA0[0].confirmed_at === null, 'and the real order is genuinely still unconfirmed -- the redirect, not a silent real confirm');
+
+    // JV actually opens the chat and taps "Yes, confirm" there instead --
+    // the real, still-current path a dine-in guest confirms through. This
+    // is what the original rogue-order bug was actually about
+    // (resolveCustomerOrder finding JV's shared order via
+    // table_session_guest, not just customer_id) -- same shared lookup,
+    // just reached through the tap handler now instead of raw text.
+    const { rows: jv2Rows } = await pool.query(`select menu_token from customers where id = $1`, [customer2.id]);
+    await fetch(`${BASE}/wa/${jv2Rows[0].menu_token}`);
+    const tapRes = await fetch(`${BASE}/wa/${jv2Rows[0].menu_token}/tap`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ buttonId: 'order_confirm_yes' }),
+    });
+    assert(tapRes.status === 200, 'JV\'s real "Yes, confirm" tap on the chat page is accepted');
 
     const { rows: ordersForSessionA } = await pool.query(`select * from "order" where session_id = $1`, [session.id]);
-    assert(ordersForSessionA.length === 1, 'still exactly one order for the table -- JV\'s "Yes, confirm" did not spawn a second one');
+    assert(ordersForSessionA.length === 1, 'still exactly one order for the table -- JV\'s confirm did not spawn a second one');
 
     const { rows: rogueOrdersA } = await pool.query(`select * from "order" where customer_id = $1 and channel <> 'dinein'`, [customer2.id]);
     assert(rogueOrdersA.length === 0, 'no separate online/pickup order got created for JV -- the exact rogue-order bug from the live incident');
 
     const { rows: reloadedOrderA } = await pool.query(`select * from "order" where id = $1`, [order.id]);
-    assert(reloadedOrderA[0].confirmed_at !== null, "JV's real dine-in order actually got confirmed -- his \"Yes, confirm\" reached the real order, not classifyIntent");
+    assert(reloadedOrderA[0].confirmed_at !== null, "JV's real dine-in order actually got confirmed -- his tap reached the real shared order, not a rogue one");
 
     // === Scenario B: guest joined the table but no order exists yet at all ===
     const { rows: tableRowsB } = await pool.query(
@@ -146,10 +172,16 @@ async function main() {
     const { rows: rogueOrdersB } = await pool.query(`select * from "order" where customer_id = $1`, [customer3.id]);
     assert(rogueOrdersB.length === 0, 'a dine-in guest typing free text before any order exists still never got routed into a fresh online order');
 
+    // Chidera, 2026-09-24: the old real-message "here's your table's menu
+    // link" re-send this used to check for is genuinely gone now -- the
+    // universal redirect gate fires first for ANY whatsapp customer and
+    // returns before that dine-in-specific code could ever run (it's dead
+    // code, removed this session). This guest's free text redirects to the
+    // chat instead, same as scenario A's JV.
     const { rows: lastMsgB } = await pool.query(
       `select trigger from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`, [customer3.id]
     );
-    assert(lastMsgB[0]?.trigger === 'dinein_menu_sent', 'instead, pointed straight back at their own table\'s menu link');
+    assert(lastMsgB[0]?.trigger === 'greeting', 'instead, redirected to the chat -- still never a rogue online order, and never the AI-dependent path');
   } finally {
     global.fetch = realFetch;
   }

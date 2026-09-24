@@ -103,11 +103,24 @@ async function main() {
   assert(guestRows2.length === 2, 'both guests now in table_session_guest');
   assert(guestRows2.some((g) => g.customer_id === customer2.id), 'guest 2 upserted into table_session_guest on scan');
 
-  const { rows: welcome2Rows } = await pool.query(
-    `select body from message where customer_id = $1 and trigger = 'dinein_welcome' order by created_at desc limit 1`,
+  // Chidera, 2026-09-24: "now we need dine in to go through web chat too."
+  // The real WhatsApp scan reply is now the same single universal CTA
+  // every first contact gets (sendStartOrderLink, trigger 'greeting') --
+  // the "active order, add to it" wording moved to the free dine-in
+  // greeting bubble on /wa/:token, only shown once the guest actually
+  // visits.
+  const { rows: scan2Rows } = await pool.query(
+    `select body, trigger from message where customer_id = $1 and direction = 'outbound' and channel = 'whatsapp' order by created_at desc limit 1`,
     [customer2.id]
   );
-  assert(/active order/i.test(welcome2Rows[0]?.body || ''), 'guest 2 got the "active order, add to it" wording, not the generic first-timer welcome');
+  assert(scan2Rows[0]?.trigger === 'greeting' && /tap below to get started/i.test(scan2Rows[0]?.body || ''), 'guest 2\'s own scan reply is the same universal single-CTA send, not a real 2-step dine-in welcome');
+  const g2ChatPage = await fetch(`${BASE}/wa/${customer2.menu_token}`);
+  assert(g2ChatPage.status === 200, 'guest 2 can open their own chat page');
+  const { rows: welcome2Rows } = await pool.query(
+    `select body from message where customer_id = $1 and trigger = 'dinein_greeting' order by created_at desc limit 1`,
+    [customer2.id]
+  );
+  assert(/active order/i.test(welcome2Rows[0]?.body || ''), 'guest 2 got the "active order, add to it" wording, not the generic first-timer welcome, once they open the chat');
 
   // Guest 2 taps "See the menu" -- this used to fail with "please scan your table's QR code" before the currentDineinSession fix
   await flow.handleDineinButtonTap({ phoneNumber: '2348022220002', buttonId: 'dinein_menu', channel: 'whatsapp', branchId });
@@ -194,15 +207,28 @@ async function main() {
   const { rows: servedRows } = await pool.query(`update "order" set served_at = now() where id = $1 returning *`, [order.id]);
   const servedOrder = servedRows[0];
 
+  // Chidera, 2026-09-24: "now we need dine in to go through web chat too."
+  // notifyGuestsReadyToPay no longer sends a real WhatsApp message with the
+  // link inline in the body -- the real "Ready to pay?" content (and its
+  // link) now lands as a free website bubble (the url lives in
+  // `interactive.url`, not restated in `body`, same as every other
+  // button/list bubble on this page); only a short once-then-silent real
+  // ping goes out on WhatsApp, worded separately (trigger
+  // 'dinein_ready_to_pay_ping'), with no link of its own at all.
   await flow.notifyGuestsReadyToPay(servedOrder);
   const { rows: pay1Rows } = await pool.query(
-    `select body from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer1.id]
+    `select body, interactive, channel from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer1.id]
   );
   const { rows: pay2Rows } = await pool.query(
-    `select body from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer2.id]
+    `select body, interactive, channel from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer2.id]
   );
-  assert(pay1Rows[0]?.body?.includes('/pay?g='), 'guest 1 got their own Ready-to-pay link');
-  assert(pay2Rows[0]?.body?.includes('/pay?g='), 'guest 2 got their own Ready-to-pay link');
+  assert(pay1Rows[0]?.channel === 'website' && pay1Rows[0]?.interactive?.url?.includes('/pay?g='), 'guest 1 got their own free Ready-to-pay bubble, linking to their own pay page');
+  assert(pay2Rows[0]?.channel === 'website' && pay2Rows[0]?.interactive?.url?.includes('/pay?g='), 'guest 2 got their own free Ready-to-pay bubble, linking to their own pay page');
+
+  const { rows: ping1Rows } = await pool.query(
+    `select channel from message where customer_id = $1 and trigger = 'dinein_ready_to_pay_ping' order by created_at desc limit 1`, [customer1.id]
+  );
+  assert(ping1Rows[0]?.channel === 'whatsapp', 'and a real, once-only WhatsApp ping also went out redirecting guest 1 to the chat');
 
   const payPage = await fetch(`${BASE}/t/qrtest5/pay?g=${g1}`);
   assert(payPage.status === 200, 'pay page loads');

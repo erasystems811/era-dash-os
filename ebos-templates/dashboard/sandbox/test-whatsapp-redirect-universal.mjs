@@ -71,34 +71,31 @@ async function main() {
   assert(Boolean(websiteThanks), `a website-channel customer still gets the real "You're welcome!" bubble, unaffected by any of this`);
   assert(websiteThanks.channel === 'website', 'on the free website channel, as always');
 
-  // === 5. Dine-in stays completely unaffected -- a dine-in guest's own
-  // bare-WhatsApp text still goes through the normal (AI-dependent) path,
-  // never redirected to /wa (the wrong page for them). ===
+  // === 5. Chidera, 2026-09-24: "now we need dine in to go through web
+  // chat too." Dine-in is now folded INTO the universal gate, same as
+  // every other whatsapp customer -- a dine-in guest's own bare text (no
+  // chat visit since the last ping) gets redirected too, not routed
+  // through the normal AI-dependent path. This deliberately replaces the
+  // earlier version of this assertion (dine-in used to be excluded here on
+  // purpose, before the dine-in-to-web-chat migration existed). ===
   const dineinCustomer = await flow.findOrCreateCustomer({ phoneNumber: '2348012361004', channel: 'whatsapp' });
   const { rows: tableRows } = await pool.query(`select id from restaurant_table limit 1`);
-  let dineinOrderId = null;
   if (tableRows.length) {
-    const { rows: dOrder } = await pool.query(
+    await pool.query(
       `insert into "order" (customer_id, reference, fulfilment_type, total, status, payment_status, engine_state, channel, table_id)
-       values ($1, 'REF-DINEIN-UNIV', null, 3500, 'new', 'pending', 'collect_info', 'dinein', $2) returning id`,
+       values ($1, 'REF-DINEIN-UNIV', null, 3500, 'new', 'pending', 'collect_info', 'dinein', $2)`,
       [dineinCustomer.id, tableRows[0].id]
     );
-    dineinOrderId = dOrder[0].id;
   } else {
-    const { rows: dOrder } = await pool.query(
+    await pool.query(
       `insert into "order" (customer_id, reference, fulfilment_type, total, status, payment_status, engine_state, channel)
-       values ($1, 'REF-DINEIN-UNIV', null, 3500, 'new', 'pending', 'collect_info', 'dinein') returning id`,
+       values ($1, 'REF-DINEIN-UNIV', null, 3500, 'new', 'pending', 'collect_info', 'dinein')`,
       [dineinCustomer.id]
     );
-    dineinOrderId = dOrder[0].id;
   }
-  try {
-    await flow.handlePendingBatch(dineinCustomer, 'do you have jollof rice');
-  } catch (err) {
-    if (!/Anthropic API|x-api-key/i.test(err.message)) throw err;
-  }
+  await flow.handlePendingBatch(dineinCustomer, 'do you have jollof rice');
   rows = await outboundRows(pool, dineinCustomer.id);
-  assert(!rows.some((r) => r.trigger === 'greeting'), 'a dine-in guest\'s bare WhatsApp text is never redirected to /wa -- still tries the normal (AI-dependent) path');
+  assert(rows.length === 1 && rows[0].trigger === 'greeting', 'a dine-in guest\'s own bare WhatsApp text also redirects now -- no AI call, no leaked normal-path reply');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

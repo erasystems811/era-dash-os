@@ -230,27 +230,10 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
 // uses; Instagram/voice/an already-website customer keep the original
 // direct send below, unchanged.
 async function sendStaffReplyRedirect(customer, text, staffId) {
-  const token = await ensureMenuToken(customer);
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
 
   if (await needsChatRedirect(customer)) {
-    const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
-    const pingText = `We're trying to reach out to you.`;
-    let sendResult;
-    try {
-      const credentials = await getWhatsAppCredentials(customer.branch_id);
-      sendResult = await sendWhatsAppCtaUrl(recipientFor(customer), pingText, 'Tap here to text', chatUrl, credentials);
-    } catch (err) {
-      // Same 131047 (24h session window closed) fallback sendStaffReply's
-      // direct-send path already relies on -- the ping itself must not
-      // just fail silently either.
-      if (!/131047/.test(err.message)) throw err;
-      const credentials = await getWhatsAppCredentials(customer.branch_id);
-      const components = [{ type: 'body', parameters: [{ type: 'text', text: pingText }] }];
-      sendResult = await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
-    }
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'staff', body: pingText, trigger: 'staff_reply_ping', platformMessageId: platformMessageIdFrom(customer, sendResult) });
-    await markChatRedirectSent(customer.id);
+    await sendChatRedirectPing(customer, `We're trying to reach out to you.`, { trigger: 'staff_reply_ping', sender: 'staff' });
   }
   await pool.query(
     `update customers set handled_by = 'staff', handled_by_staff_id = coalesce($1, handled_by_staff_id), handover_at = coalesce(handover_at, now()) where id = $2`,
@@ -1025,6 +1008,33 @@ async function markChatRedirectSent(customerId) {
   await pool.query('update customers set chat_redirect_sent_at = now() where id = $1', [customerId]);
 }
 
+// Sends ONLY the real ping itself (send + log + mark chat_redirect_sent_at)
+// -- shared by sendStaffReplyRedirect, notifyComplaintReply, and
+// notifyGuestsReadyToPay, which each had their own near-identical copy of
+// this exact "real CTA-URL send, 24h-window template fallback, log the
+// ping (never the real content)" logic. Whether to call this at all is
+// each caller's own decision -- notifyComplaintReply always does (a
+// manager's reply is unscheduled); the others gate it on
+// needsChatRedirect(customer) first.
+async function sendChatRedirectPing(customer, pingText, { trigger = 'chat_redirect_ping', sender = 'bot' } = {}) {
+  const token = await ensureMenuToken(customer);
+  const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  let sendResult;
+  try {
+    sendResult = await sendWhatsAppCtaUrl(recipientFor(customer), pingText, 'Tap here to text', chatUrl, credentials);
+  } catch (err) {
+    // Same 131047 (24h session window closed) fallback every real send in
+    // this file already relies on -- the ping itself must not just fail
+    // silently either.
+    if (!/131047/.test(err.message)) throw err;
+    const components = [{ type: 'body', parameters: [{ type: 'text', text: pingText }] }];
+    sendResult = await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
+  }
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender, body: pingText, trigger, platformMessageId: platformMessageIdFrom(customer, sendResult) });
+  await markChatRedirectSent(customer.id);
+}
+
 // Chidera, 2026-09-22: "meta will start charging 14 naira per message...
 // there should be a greeting text o, like hello tap the link below to
 // place an order." The one real WhatsApp message a customer's first
@@ -1104,7 +1114,6 @@ export async function sendComplaintLink(customer) {
 // pointing them back, never conditional on whether they're still on the
 // page right now.
 export async function notifyComplaintReply(customer, replyText) {
-  const token = await ensureMenuToken(customer);
   // The manager's real reply lives as a free website bubble -- the ping
   // below stays generic on purpose, never the reply content itself,
   // matching this whole feature's own near-zero-message-cost shape (the
@@ -1112,11 +1121,7 @@ export async function notifyComplaintReply(customer, replyText) {
   // them there is a billable send).
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'website', sender: 'bot', body: replyText, trigger: 'complaint_reply' });
   if (!process.env.PUBLIC_URL) return;
-  const shortMessage = `You have a message from our manager.`;
-  const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
-  const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppCtaUrl(recipientFor(customer), shortMessage, 'Tap here to chat', chatUrl, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'whatsapp', sender: 'bot', body: shortMessage, trigger: 'complaint_reply_ping', processed: true });
+  await sendChatRedirectPing(customer, `You have a message from our manager.`, { trigger: 'complaint_reply_ping' });
 }
 
 async function handleGreeting(customer, text) {
@@ -4020,49 +4025,27 @@ export async function getOrCreateTableOrder(session, table, customer) {
   return created[0];
 }
 
+// Chidera, 2026-09-24: "now we need dine in to go through web chat too."
+// Content only (no send) -- routes/web-chat.js's own dine-in branch builds
+// the actual bubble (menu link, specials line), same split
+// buildGreetingContent/sendOrderGreeting already use for the online flow.
 // joiningActiveTable -- Chidera, joint dine-in concept: "is it possible
 // that when a persons scans a qr for a table let everyone on that table be
-// able to join in and see each other". A guest scanning a table that
+// able to join in and see each other". A guest joining a table that
 // already has another guest's order open gets told there's something to
-// join, not the same first-timer "what would you like to do" -- their own
-// button taps already resolve into that same shared order either way
-// (currentDineinSession now matches table_session_guest too), this is
-// purely the wording matching what's actually true for them.
-async function sendDineinWelcome(customer, table, { joiningActiveTable = false } = {}) {
-  const dinein = await getDineinConfig();
+// join, not the same first-timer "what would you like to do".
+export async function buildDineinGreetingContent(customer, session, { joiningActiveTable = false } = {}) {
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const biz = bizRows[0];
   const body = joiningActiveTable
-    ? `Welcome to ${biz?.name || 'us'}! Table ${table.label} has an active order -- add to it, or see what's already been ordered.`
-    : `Welcome to ${biz?.name || 'us'}! You're at Table ${table.label}. What would you like to do?`;
-  const buttons = [
-    // Chidera, 2026-09-20: "that see menu put 'tap here to see menu'" --
-    // exactly 20 characters, Meta's own cap on a reply button's title too.
-    { id: 'dinein_menu', title: 'Tap here to see menu' },
-  ];
+    ? `Welcome to ${biz?.name || 'us'}! Table ${session.table_label} has an active order -- add to it, or see what's already been ordered.`
+    : `Welcome to ${biz?.name || 'us'}! You're at Table ${session.table_label}. What would you like to do?`;
   // Chidera, 2026-09-20, real report: "there is no special currently on
-  // menu so why is today specials button still showing" -- this button
-  // was unconditional, always shown regardless of whether a real special
-  // actually exists right now. findSpecialsCategory (is_combo, the same
-  // deterministic signal handleDineinButtonTap's own tap already checks
-  // before building the specials link) is the real answer to "is there
-  // one" -- only shown when that's actually true, same as the general
+  // menu so why is today specials button still showing" -- only surfaced
+  // when a real special actually exists right now, same as the general
   // greeting's own logic already does.
-  if (await findSpecialsCategory(customer.branch_id)) {
-    buttons.push({ id: 'dinein_specials', title: "Today's specials" });
-  }
-  // Same cover-photo mechanism the normal chat greeting already uses
-  // (handleGreeting's businessCoverPhotoUrl) -- Chidera 2026-09-11: "why
-  // does dine in not have the photo thing we did from normal conversation
-  // flow on the chat?" welcome_image_url has no UI anywhere to ever set it
-  // (always null in practice), and business.logo_data_url is a data: URI,
-  // which sendWhatsAppButtons silently drops (Meta needs a real http URL
-  // to fetch it) -- so this never actually showed a header image before,
-  // regardless of what a business had uploaded.
-  const headerImage = dinein?.welcome_image_url || (await businessCoverPhotoUrl()) || null;
-  const credentials = await getWhatsAppCredentials(customer.branch_id);
-  await sendWhatsAppButtons(recipientFor(customer), body, buttons, credentials, headerImage);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body, trigger: 'dinein_welcome' });
+  const specialsCategory = await findSpecialsCategory(customer.branch_id);
+  return { body, specialsCategory };
 }
 
 async function handleDineinScan(customer, text) {
@@ -4121,24 +4104,33 @@ async function handleDineinScan(customer, text) {
   // level too, this is just avoiding hitting that constraint at all).
   const { rows: sessionRows } = await pool.query(`select * from table_session where table_id = $1 and closed_at is null`, [table.id]);
   let session = sessionRows[0];
-  let joiningActiveTable = false;
   if (!session) {
     const { rows: created } = await pool.query(
       `insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3) returning *`,
       [table.id, table.branch_id, customer.id]
     );
     session = created[0];
-  } else if (session.customer_id !== customer.id) {
-    // A second (or third...) guest scanning the same table's own code,
-    // not the original opener -- joint dine-in, Stage 1. table_session_
-    // guest is what lets currentDineinSession/the shared order page
-    // recognize them from here on, same as the original scanner already
-    // could via session.customer_id.
-    joiningActiveTable = true;
   }
+  // A second (or third...) guest scanning the same table's own code, not
+  // the original opener, still needs table_session_guest -- joint dine-in,
+  // Stage 1 -- so currentDineinSession/the shared chat page recognize them
+  // from here on, same as the original scanner already could via
+  // session.customer_id. routes/web-chat.js's own first-load render
+  // re-derives "joining an active table" vs "the original scanner" the
+  // same way (session.customer_id !== customer.id) when it renders the
+  // actual welcome bubble -- no need to compute or pass it through here.
   await upsertTableGuest(session.id, customer.id);
 
-  await sendDineinWelcome(customer, table, { joiningActiveTable });
+  // Chidera, 2026-09-24: "now we need dine in to go through web chat too
+  // ... study how it works and the best way it can go through web chat and
+  // bare chat to reduce my cost." Used to be its own 2-step real send
+  // (sendDineinWelcome's buttons message, THEN handleDineinButtonTap's
+  // separate menu-link message once tapped) -- now the exact same single
+  // real message every other first contact gets (sendStartOrderLink). The
+  // real dine-in welcome (table label, "join an active order" wording,
+  // the actual menu link) becomes the free first bubble on /wa/:token
+  // instead (routes/web-chat.js's own dine-in branch).
+  await sendStartOrderLink(customer);
   return true;
 }
 
@@ -4153,7 +4145,12 @@ async function handleDineinScan(customer, text) {
 // ts.customer_id alone (only ever the FIRST scanner) left every other
 // guest's own button taps with "please scan your table's QR code to get
 // started" even though they very much had.
-async function currentDineinSession(customer) {
+// Chidera, 2026-09-24: "now we need dine in to go through web chat too."
+// Exported for routes/web-chat.js's own first-load render -- same reason
+// getOpenOrder/buildGreetingContent are exported, so it can tell a dine-in
+// guest's first visit apart from a normal online one without a second,
+// parallel way of answering "is this customer at a table right now".
+export async function currentDineinSession(customer) {
   const { rows } = await pool.query(
     `select ts.*, rt.label as table_label, rt.qr_token
      from table_session ts join restaurant_table rt on rt.id = ts.table_id
@@ -4415,22 +4412,35 @@ export async function notifyGuestsReadyToPay(order) {
   );
   if (!guests.length) return;
   const { total } = await summariseOrder(order);
-  const credentials = await getWhatsAppCredentials(order.branch_id);
   for (const guest of guests) {
     try {
       const token = await ensureMenuToken(guest);
       const url = `${process.env.PUBLIC_URL}/t/${table.qr_token}/pay?g=${token}`;
-      // Chidera, 2026-09-20 (repeated): "i told you to change the wording
-      // to 'ready to pay? click here'" -- applied to the online order's
-      // own pay link earlier, missed this dine-in one, the actual origin
-      // of the wording request.
-      await sendWhatsAppCtaUrl(recipientFor(guest), `Table ${table.label} is served! Total so far: NGN ${total}. Ready to pay?`, 'Click here', url, credentials);
-      await logMessage({ customerId: guest.id, direction: 'outbound', channel: guest.channel, sender: 'bot', body: `[ready to pay link sent: ${url}]`, trigger: 'dinein_ready_to_pay' });
+      // Chidera, 2026-09-24: "now we need dine in to go through web chat
+      // too... reduce my cost." Used to be a real send to every single
+      // guest at the table, every time -- the real "ready to pay" content
+      // (and its own real button, same "Ready to pay? Click here" wording)
+      // now lands as a free website bubble per guest; a real WhatsApp send
+      // only happens for the short redirect ping, and only once per guest
+      // until each one has genuinely come back to the chat since the last
+      // one.
+      await logMessage({
+        customerId: guest.id,
+        direction: 'outbound',
+        channel: 'website',
+        sender: 'bot',
+        body: `Table ${table.label} is served! Total so far: NGN ${total}. Ready to pay?`,
+        trigger: 'dinein_ready_to_pay',
+        interactive: { type: 'cta_url', buttonText: 'Ready to pay?', url },
+      });
+      if (await needsChatRedirect(guest)) {
+        await sendChatRedirectPing(guest, `Your table is ready to pay.`, { trigger: 'dinein_ready_to_pay_ping' });
+      }
     } catch (err) {
       // Best-effort, per guest -- one guest's send failing (a stale
       // number, WhatsApp's 24h window) must never stop the others from
       // getting told the table's ready.
-      console.error(`Failed to send ready-to-pay link to ${guest.id}:`, err.message);
+      console.error(`Failed to notify guest ${guest.id} the table is ready to pay:`, err.message);
     }
   }
 }
@@ -4637,21 +4647,25 @@ export async function handlePendingBatch(customer, text) {
 
   // Chidera, 2026-09-24: "in general, any outbound text should redirect
   // customer to the web chat and if customer text on bare again only 1 re
-  // ping after that bot only responds in web chat not bare chat." Was
-  // scoped narrowly to "only once an order's already in progress" (2026-
-  // 09-23) -- now applies to ANY real WhatsApp text, greeting or not,
-  // order or not. classifyIntent/dispatch/handleGreeting/handleEnquiry
-  // never even run for a whatsapp customer anymore; the entire rest of
-  // this engine (everything below this point) is website-only now,
-  // reached exclusively through handleWebChatMessage. Two carve-outs,
-  // both pre-existing and unchanged: text relayed FROM the chat page
-  // itself (handleWebChatMessage sets customer.channel = 'website' before
-  // calling in here) and dine-in (guests there belong on their table's
-  // own page, /t, not /wa -- dine-in was never in scope for this
-  // feature). A genuine "I need a person" typed on the free chat page
-  // still reaches detectWantsHuman/handover below exactly as before --
-  // nothing is lost, just deferred to the free surface.
-  if (customer.channel === 'whatsapp' && order?.channel !== 'dinein') {
+  // ping after that bot only responds in web chat not bare chat" -- then,
+  // separately: "now we need dine in to go through web chat too... study
+  // how it works and the best way it can go through web chat and bare
+  // chat to reduce my cost." Dine-in's own carve-out here is now removed
+  // -- a dine-in guest (order or not, session or not) gets the exact same
+  // treatment as every other whatsapp customer: sendStartOrderLink points
+  // at /wa/:token, and their own first bubble there (routes/web-chat.js)
+  // is dine-in-aware (table label, menu link to /t/:token, "joining an
+  // active order" wording) instead of the generic choice. Two carve-outs
+  // remain, both pre-existing and unchanged: text relayed FROM the chat
+  // page itself (handleWebChatMessage sets customer.channel = 'website'
+  // before calling in here) and a genuine "I need a person" typed on the
+  // free chat page, which still reaches detectWantsHuman/handover below
+  // exactly as before -- nothing is lost, just deferred to the free
+  // surface. classifyIntent/dispatch/handleGreeting/handleEnquiry never
+  // even run for a whatsapp customer anymore, dine-in or online; the
+  // entire rest of this engine (everything below this point) is
+  // website-only now, reached exclusively through handleWebChatMessage.
+  if (customer.channel === 'whatsapp') {
     if (await needsChatRedirect(customer)) {
       await sendStartOrderLink(customer);
       await markChatRedirectSent(customer.id);
@@ -4665,35 +4679,6 @@ export async function handlePendingBatch(customer, text) {
       return;
     }
     await dispatch(customer, order, text);
-    return;
-  }
-
-  // Chidera, 2026-09-20 (same JV report): "just seperate dine in and
-  // online order, a person already on dine in shouldnt transition to
-  // online same with online." resolveCustomerOrder above already fixes
-  // the case where the guest's own shared order exists but couldn't be
-  // found -- this covers the earlier moment too, before any order exists
-  // yet for them (a guest who's scanned but not ordered anything, then
-  // types something free-text instead of tapping the menu link). Without
-  // this, that message fell straight into classifyIntent below, which
-  // only ever knows how to build a normal WhatsApp/online order -- the
-  // exact mechanism that created JV's rogue pickup order. A guest already
-  // seated at an open table stays inside dine-in no matter what they
-  // type; they're pointed back at their table's own page, never routed
-  // into a fresh online order.
-  const dineinSession = await currentDineinSession(customer);
-  if (dineinSession && process.env.PUBLIC_URL) {
-    const guestToken = await ensureMenuToken(customer);
-    const url = `${process.env.PUBLIC_URL}/t/${dineinSession.qr_token}?g=${guestToken}`;
-    const credentials = await getWhatsAppCredentials(customer.branch_id);
-    await sendWhatsAppCtaUrl(
-      recipientFor(customer),
-      `You're at Table ${dineinSession.table_label}. Tap below to see the menu or what's already been ordered.`,
-      'Tap here to see menu',
-      url,
-      credentials
-    );
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
     return;
   }
 

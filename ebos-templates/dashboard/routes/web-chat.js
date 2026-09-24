@@ -17,6 +17,8 @@ import { renderWebChatPage } from '../engine/web-chat-page-template.js';
 import { resolveMenuBranding } from './dinein-menu.js';
 import {
   buildGreetingContent,
+  buildDineinGreetingContent,
+  currentDineinSession,
   ensureMenuToken,
   handleWebChatMessage,
   handleWebChatMedia,
@@ -56,6 +58,22 @@ async function sendOrderGreeting(customer, token) {
     ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
     : message;
   await logWebsiteBubble({ customerId: customer.id, body, trigger: 'greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
+}
+
+// Chidera, 2026-09-24: "now we need dine in to go through web chat too."
+// A dine-in guest's first visit gets THIS instead of the generic order-vs-
+// complaint choice above -- they've already signalled clear intent by
+// scanning the table's QR code. Menu link points at /t/:token (the
+// existing table-scoped ordering page, reused as-is, same hand-off shape
+// /m/:token already has for online), not /m/:token.
+async function sendDineinGreeting(customer, token, session) {
+  const joiningActiveTable = session.customer_id !== customer.id;
+  const { body, specialsCategory } = await buildDineinGreetingContent(customer, session, { joiningActiveTable });
+  const menuUrl = `${process.env.PUBLIC_URL}/t/${session.qr_token}?g=${token}`;
+  const fullBody = specialsCategory
+    ? `${body}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
+    : body;
+  await logWebsiteBubble({ customerId: customer.id, body: fullBody, trigger: 'dinein_greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
 }
 
 async function sendComplaintPrompt(customer, token) {
@@ -140,9 +158,18 @@ router.get('/:token', async (req, res) => {
     // like to order?", they came here to explain a problem. A returning
     // customer (history already non-empty) is unaffected either way, this
     // only shapes the very first bubble a brand-new visit ever sees.
+    const dineinSession = req.query.ctx === 'complaint' ? null : await currentDineinSession(customer);
     if (req.query.ctx === 'complaint') {
       const menuToken = await ensureMenuToken(customer);
       await sendComplaintPrompt(customer, menuToken);
+    } else if (dineinSession) {
+      // Chidera, 2026-09-24: "now we need dine in to go through web chat
+      // too." A dine-in guest already signalled clear intent by scanning
+      // the table's QR code -- skip the generic order-vs-complaint choice
+      // entirely, go straight to the real dine-in welcome (table label,
+      // "join an active order" wording, the actual menu link).
+      const menuToken = await ensureMenuToken(customer);
+      await sendDineinGreeting(customer, menuToken, dineinSession);
     } else {
       // Chidera, 2026-09-24: "instead of bot sending menu immediately, it
       // should send a hey, what would you like to do? with 2 buttons
@@ -178,7 +205,13 @@ router.get('/:token', async (req, res) => {
     const last = history[history.length - 1];
     if (last?.trigger !== 'order_again_prompt') {
       const menuToken = await ensureMenuToken(customer);
-      const menuUrl = `${process.env.PUBLIC_URL}/m/${menuToken}`;
+      // Chidera, 2026-09-24: dine-in awareness -- a guest still sitting at
+      // an open table session (paid for one round, wants to add more)
+      // belongs back on /t/:token, not the generic /m/:token shop page.
+      const dineinSession = await currentDineinSession(customer);
+      const menuUrl = dineinSession
+        ? `${process.env.PUBLIC_URL}/t/${dineinSession.qr_token}?g=${menuToken}`
+        : `${process.env.PUBLIC_URL}/m/${menuToken}`;
       await logWebsiteBubble({
         customerId: customer.id,
         body: `Welcome back! Tap below to place a new order.`,
