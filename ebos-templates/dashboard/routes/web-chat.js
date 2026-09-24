@@ -41,6 +41,31 @@ async function touchWebChatActive(customerId) {
   await pool.query('update customers set web_chat_active_at = now() where id = $1', [customerId]);
 }
 
+// Chidera, 2026-09-24: "instead of bot sending menu immediately, it should
+// send a hey, what would you like to do? with 2 buttons 1.place an order
+// 2.give feedback." The FULL welcome (buildGreetingContent) now only shows
+// once they've actually said they want to order (POST /:token/tap's
+// wa_start_order handler below) -- shared here since that's the only
+// place it's still needed from.
+async function sendOrderGreeting(customer, token) {
+  const { message, specialsCategory } = await buildGreetingContent(customer);
+  const menuUrl = `${process.env.PUBLIC_URL}/m/${token}`;
+  const body = specialsCategory
+    ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
+    : message;
+  await logWebsiteBubble({ customerId: customer.id, body, trigger: 'greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
+}
+
+async function sendComplaintPrompt(customer, token) {
+  const complaintUrl = `${process.env.PUBLIC_URL}/c/${token}`;
+  await logWebsiteBubble({
+    customerId: customer.id,
+    body: `Sorry to hear that. Tap below to tell us what happened.`,
+    trigger: 'complaint_greeting',
+    interactive: { type: 'cta_url', buttonText: 'Give feedback', url: complaintUrl },
+  });
+}
+
 // flow.js's logMessage calls append a raw "[payment link sent: url]" or
 // "[invoice] url" style suffix onto body -- meant for the staff dashboard's
 // own plain-text conversation view, which has no button UI. Redundant on
@@ -100,11 +125,7 @@ router.get('/:token', async (req, res) => {
 
   let history = await messageHistory(customer.id);
   // First visit -- nothing logged on the website channel for this customer
-  // yet. Render the FULL welcome (buildGreetingContent, the same content
-  // the real WhatsApp message used to carry in full before this feature)
-  // as the first bubble, plus a "See menu" button navigating to /m/:token
-  // -- never a real Cloud API send, just a logged row this page renders
-  // straight back to itself.
+  // yet.
   if (!history.length) {
     // Chidera, 2026-09-23: "i need customer complaint and all those in the
     // site as well." flow.js's sendComplaintLink sends this exact same
@@ -114,22 +135,28 @@ router.get('/:token', async (req, res) => {
     // customer (history already non-empty) is unaffected either way, this
     // only shapes the very first bubble a brand-new visit ever sees.
     if (req.query.ctx === 'complaint') {
+      const menuToken = await ensureMenuToken(customer);
+      await sendComplaintPrompt(customer, menuToken);
+    } else {
+      // Chidera, 2026-09-24: "instead of bot sending menu immediately, it
+      // should send a hey, what would you like to do? with 2 buttons
+      // 1.place an order 2.give feedback, so that they can make their
+      // complaint from feedback button than having 2 chats." Deterministic,
+      // no AI call needed -- the FULL welcome (buildGreetingContent) only
+      // shows once they've actually tapped "Place an order" (POST
+      // /:token/tap's wa_start_order branch below).
       await logWebsiteBubble({
         customerId: customer.id,
-        body: `Sorry to hear that. Please tell us what happened and we'll help sort it out.`,
-        trigger: 'complaint_greeting',
+        body: `Hey! What would you like to do?`,
+        trigger: 'first_choice',
+        interactive: {
+          type: 'buttons',
+          buttons: [
+            { id: 'wa_start_order', title: 'Place an order' },
+            { id: 'wa_give_feedback', title: 'Give feedback' },
+          ],
+        },
       });
-    } else {
-      const { message, specialsCategory } = await buildGreetingContent(customer);
-      const menuToken = await ensureMenuToken(customer);
-      const menuUrl = `${process.env.PUBLIC_URL}/m/${menuToken}`;
-      // Same specials line Instagram's own greeting already shows (flow.js's
-      // buildGreetingContent/handleGreeting) -- a second, auto-linked URL
-      // inside the body text, not a second bubble.
-      const body = specialsCategory
-        ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
-        : message;
-      await logWebsiteBubble({ customerId: customer.id, body, trigger: 'greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
     }
     history = await messageHistory(customer.id);
   } else if (!openOrder) {
@@ -256,6 +283,20 @@ router.post('/:token/tap', async (req, res) => {
 
   if (buttonId === 'order_confirm_no') {
     await handleOrderConfirmNoTap({ channel: 'website', branchId: customer.branch_id, customer });
+    return res.json({ ok: true });
+  }
+  // The first-visit choice bubble's own two buttons -- Chidera, 2026-09-24:
+  // "hey, what would you like to do? with 2 buttons 1.place an order
+  // 2.give feedback." Deterministic sends, no dispatch()/AI call needed --
+  // the tap itself is unambiguous about which the customer wants.
+  if (buttonId === 'wa_start_order') {
+    const menuToken = await ensureMenuToken(customer);
+    await sendOrderGreeting(customer, menuToken);
+    return res.json({ ok: true });
+  }
+  if (buttonId === 'wa_give_feedback') {
+    const menuToken = await ensureMenuToken(customer);
+    await sendComplaintPrompt(customer, menuToken);
     return res.json({ ok: true });
   }
   // order_confirm_yes, fulfilment_delivery/pickup, confirm_yes/no -- same

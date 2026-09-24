@@ -19,6 +19,7 @@ import { router as dineinMenuRoutes } from './routes/dinein-menu.js';
 import { router as menuPageRoutes } from './routes/menu-page.js';
 import { router as webChatRoutes } from './routes/web-chat.js';
 import { router as feedbackFormRoutes } from './routes/feedback-form.js';
+import { router as complaintRoutes } from './routes/complaint.js';
 import { router as productPhotoRoutes } from './routes/product-photo.js';
 import { router as riderApiRoutes } from './routes/rider.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
@@ -87,6 +88,11 @@ app.use('/wa', webChatRoutes);
 // The rating form sent by engine/flow.js's sendFeedbackRequest -- public,
 // no login, order_feedback.id itself is the link's token.
 app.use('/f', feedbackFormRoutes);
+// The complaint form (routes/complaint.js) -- reached from the web chat's
+// own first-choice bubble ("Give feedback") or a real WhatsApp complaint
+// redirect (flow.js's sendComplaintLink). Same public, token-authenticated
+// trust boundary as every other page keyed off menu_token.
+app.use('/c', complaintRoutes);
 // A product's photo, served as a real image response instead of the raw
 // data: URI -- see routes/product-photo.js for why.
 app.use('/photo', productPhotoRoutes);

@@ -67,7 +67,7 @@ async function main() {
   console.log = originalLog;
   const redirectLog = logs2.find((l) => l.includes('2348012349002'));
   assert(Boolean(redirectLog), 'the customer gets a real reply');
-  assert(redirectLog?.includes('Tap below to place your order') || redirectLog?.includes('Place an order'), 'and it\'s the chat-link redirect, not the AI engine\'s own answer to the question');
+  assert(redirectLog?.includes('Tap below to get started') || redirectLog?.includes('Tap here to text'), 'and it\'s the chat-link redirect, not the AI engine\'s own answer to the question');
   const { rows: msgAfter1 } = await pool.query(`select trigger from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`, [customer.id]);
   assert(msgAfter1[0]?.trigger === 'greeting', 'tagged as the same greeting/redirect trigger, not a real engine reply');
 

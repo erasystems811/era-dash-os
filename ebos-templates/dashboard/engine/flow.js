@@ -116,6 +116,17 @@ export async function logWebsiteBubble({ customerId, body, trigger, interactive 
   await logMessage({ customerId, direction: 'outbound', channel: 'website', sender: 'bot', body, trigger, interactive });
 }
 
+// Chidera, 2026-09-24: "now feedback can have a fill a complaint form kind
+// of thing" -- routes/complaint.js's own form submit logs the customer's
+// typed complaint as a real inbound turn (so handover()'s own transcript
+// summary actually includes what they wrote) without running it through
+// handlePendingBatch/dispatch -- a complaint form submit is a deterministic
+// handover, not a bot conversation turn that needs the AI engine's
+// classifyIntent/order-state logic at all.
+export async function logInboundWebsiteMessage(customer, text) {
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: text, processed: true });
+}
+
 // Instagram's send response carries the new message's own id (message_id).
 // WhatsApp's carries its own wamid too (sendResult.messages[0].id) -- kept
 // unused here until 2026-09-02, when a real live bug (a plain-text send
@@ -979,7 +990,12 @@ async function sendStartOrderLink(customer) {
     await reply(customer, message, 'greeting');
     return;
   }
-  const shortGreeting = customer.name ? `Hello ${customer.name}! Tap below to place your order.` : `Hello! Tap below to place your order.`;
+  // Chidera, 2026-09-24: "that first greeting text should be tap here to
+  // text... instead of bot sending menu immediately, it should send a
+  // hey, what would you like to do? with 2 buttons." The chat page this
+  // links to now asks first (order vs feedback) instead of assuming
+  // ordering -- the real WhatsApp CTA shouldn't presuppose that either.
+  const shortGreeting = customer.name ? `Hello ${customer.name}! Tap below to get started.` : `Hello! Tap below to get started.`;
   const token = await ensureMenuToken(customer);
   const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
@@ -990,7 +1006,7 @@ async function sendStartOrderLink(customer) {
   // photo along the way. Same businessCoverPhotoUrl() fallback every other
   // real send in this file already uses (sendWebMenuLink's own comment:
   // "ensure image appear on chat cause its not still appearing").
-  await sendWhatsAppCtaUrl(recipientFor(customer), shortGreeting, 'Place an order', chatUrl, credentials, await businessCoverPhotoUrl());
+  await sendWhatsAppCtaUrl(recipientFor(customer), shortGreeting, 'Tap here to text', chatUrl, credentials, await businessCoverPhotoUrl());
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortGreeting, trigger: 'greeting', processed: true });
 }
 
