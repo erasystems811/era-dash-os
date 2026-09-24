@@ -1094,7 +1094,7 @@ async function sendChatRedirectPing(customer, pingText, { trigger = 'chat_redire
 // moves to the web-chat page's own first bubble (routes/web-chat.js),
 // never sent over the real Cloud API -- only this short line + one CTA
 // button is.
-async function sendStartOrderLink(customer) {
+async function sendStartOrderLink(customer, { dineinTableLabel = null, dineinQrToken = null } = {}) {
   if (!process.env.PUBLIC_URL) {
     const { message } = await buildGreetingContent(customer);
     await reply(customer, message, 'greeting');
@@ -1112,11 +1112,24 @@ async function sendStartOrderLink(customer) {
   // rest of the welcome moved to the free chat bubble.
   const { rows: bizRows } = await pool.query('select name from business limit 1');
   const bizName = bizRows[0]?.name || 'us';
+  // Chidera, 2026-09-25: "let the greeting text difference be welcome to
+  // <restaurant name> tap below to get started on for your dine in
+  // session." A table scanner already knows exactly why they're texting
+  // (they just scanned a table's QR code) -- the one real WhatsApp message
+  // they get should say so, not the generic online-order wording.
+  const tail = dineinTableLabel ? 'get started on your dine-in session.' : 'get started.';
   const shortGreeting = customer.name
-    ? `Welcome to ${bizName}, ${customer.name}! Tap below to get started.`
-    : `Welcome to ${bizName}! Tap below to get started.`;
+    ? `Welcome to ${bizName}, ${customer.name}! Tap below to ${tail}`
+    : `Welcome to ${bizName}! Tap below to ${tail}`;
   const token = await ensureMenuToken(customer);
-  const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
+  // Chidera, 2026-09-25: "let table dine in and online delivery have their
+  // complete different web chat." Routes/web-chat.js's own ?table= is what
+  // actually opens THIS table's separate thread instead of the generic
+  // online one -- without it a table scan and a plain "hi" would land on
+  // the exact same page/thread for the same customer_id.
+  const chatUrl = dineinQrToken
+    ? `${process.env.PUBLIC_URL}/wa/${token}?table=${encodeURIComponent(dineinQrToken)}`
+    : `${process.env.PUBLIC_URL}/wa/${token}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   // Chidera, 2026-09-23: "let first message still have that cover photo"
   // -- handleGreeting (the original, full-length greeting) always resolved
@@ -4283,7 +4296,7 @@ async function handleDineinScan(customer, text) {
   // real dine-in welcome (table label, "join an active order" wording,
   // the actual menu link) becomes the free first bubble on /wa/:token
   // instead (routes/web-chat.js's own dine-in branch).
-  await sendStartOrderLink(customer);
+  await sendStartOrderLink(customer, { dineinTableLabel: table.label, dineinQrToken: table.qr_token });
   return true;
 }
 

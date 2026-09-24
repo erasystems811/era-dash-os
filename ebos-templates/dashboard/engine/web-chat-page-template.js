@@ -708,7 +708,10 @@ function showBanner(text) {
 async function poll() {
   if (pendingTyping) return;
   try {
-    const url = POLL_PATH + (lastCursor ? '?since=' + encodeURIComponent(lastCursor) : '');
+    // POLL_PATH may already carry its own ?table=... query (dine-in's own
+    // separate chat thread, routes/web-chat.js) -- joiner must be & in
+    // that case, not a second ?, or the since= param is silently dropped.
+    const url = POLL_PATH + (lastCursor ? (POLL_PATH.includes('?') ? '&' : '?') + 'since=' + encodeURIComponent(lastCursor) : '');
     const res = await fetch(url);
     const rows = await res.json();
     if (Array.isArray(rows) && rows.length) {

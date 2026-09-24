@@ -78,6 +78,11 @@ async function main() {
     [customer.id]
   );
   assert(/tap below to get started/i.test(greetRows[0].body), 'and it is the short universal CTA, not the old 2-step dine-in welcome');
+  // Chidera, 2026-09-25: "let the greeting text difference be welcome to
+  // <restaurant name> tap below to get started on for your dine in
+  // session." The one real WhatsApp message a table scan gets must name
+  // the dine-in session specifically, not the generic online wording.
+  assert(/dine-in session/i.test(greetRows[0].body), 'and the real WhatsApp message names it as a dine-in session, not the generic online CTA');
   assert(Boolean(customer.menu_token), 'the scan already generated this guest a reusable menu_token');
   const token = customer.menu_token;
 

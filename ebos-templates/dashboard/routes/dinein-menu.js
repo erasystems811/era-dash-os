@@ -375,6 +375,11 @@ router.post('/:qrToken/review', async (req, res) => {
     await restartItemsCollection(order);
     if (isViaWebChat(customer)) {
       customer.channel = 'website';
+      // Chidera, 2026-09-25: dine-in's own separate web chat -- without
+      // this, these bubbles would log with table_session_id null and show
+      // up on the generic online /wa/:token thread instead of this table's
+      // own /wa/:token?table=... one.
+      customer.tableSessionId = session.id;
       await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
     }
     await finishItemsCollection(customer, order, '', { deltaLines });
@@ -395,6 +400,9 @@ router.post('/:qrToken/review', async (req, res) => {
   // below would go out as a real WhatsApp send instead of a free bubble.
   if (isViaWebChat(customer)) {
     customer.channel = 'website';
+    // Chidera, 2026-09-25: dine-in's own separate web chat -- see the
+    // isRepeatAddOn branch above's own comment.
+    customer.tableSessionId = session.id;
     await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
   }
 
@@ -533,7 +541,12 @@ router.get('/:qrToken', async (req, res) => {
       // takes back to web chat." Same isViaWebChat gate /review's own
       // channel flip already uses -- only real when this guest actually
       // has a chat thread to go back to.
-      webChatPath: actingCustomer && isViaWebChat(actingCustomer) ? `/wa/${guestToken}` : null,
+      // Chidera, 2026-09-25: "let table dine in and online delivery have
+      // their complete different web chat" -- this table's own separate
+      // thread (routes/web-chat.js's ?table=), not the now online-only
+      // bare /wa/:token, or this link would silently drop the guest into
+      // the wrong (empty, for a dine-in-only guest) thread.
+      webChatPath: actingCustomer && isViaWebChat(actingCustomer) ? `/wa/${guestToken}?table=${req.params.qrToken}` : null,
       // Chidera, 2026-09-24, real report: "when i tapped place order, it
       // took me back to bare chat not web chat." This route never passed
       // `channel` at all (defaults to 'whatsapp' in renderMenuPage), so

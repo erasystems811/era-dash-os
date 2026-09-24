@@ -70,7 +70,12 @@ async function main() {
   const realChannelMatch = afterChatVisit.match(/const CHANNEL = (".*?");/);
   assert(realChannelMatch && realChannelMatch[1] === '"website"', 'after a genuine web-chat visit, the menu page renders CHANNEL=website -- the actual fix');
   const webChatPathMatch = afterChatVisit.match(/const WEB_CHAT_PATH = (.*?);/);
-  assert(webChatPathMatch && webChatPathMatch[1] === `"/wa/${token}"`, 'and WEB_CHAT_PATH points at the real chat link -- submitOrder() will redirect there, not to wa.me');
+  // Chidera, 2026-09-25: "let table dine in and online delivery have their
+  // complete different web chat" -- this must point at the TABLE's own
+  // separate thread (?table=qrchanneltest), not the now online-only bare
+  // /wa/:token, or submitOrder()'s post-submit redirect would silently
+  // drop this dine-in guest into the wrong (empty) thread.
+  assert(webChatPathMatch && webChatPathMatch[1] === `"/wa/${token}?table=qrchanneltest"`, 'and WEB_CHAT_PATH points at this table\'s own separate chat thread, not the generic online one');
   assert(afterChatVisit.includes('<a class="back-to-chat"'), 'the visible "Back to chat" header link shows too, same gate');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');

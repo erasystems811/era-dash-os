@@ -38,6 +38,28 @@ async function resolveCustomer(token) {
   return rows[0] || null;
 }
 
+// Chidera, 2026-09-25: "let table dine in and online delivery have their
+// complete different web chat so a person can be doing both at same time
+// in 2 different web chats." req.query.table (a real table's qr_token, not
+// this customer's own menu_token) is what actually selects the dine-in
+// thread instead of the generic online one -- validated against THIS
+// customer specifically (owner or a joint-dinein guest of that exact open
+// session), the same trust boundary handleDineinScan/resolveActingCustomer
+// already use, so guessing another table's qr_token in the URL can never
+// surface a different customer's own dine-in chat.
+async function resolveTableSession(qrToken, customerId) {
+  if (!qrToken) return null;
+  const { rows } = await pool.query(
+    `select ts.*, rt.label as table_label, rt.qr_token
+     from table_session ts join restaurant_table rt on rt.id = ts.table_id
+     where rt.qr_token = $1 and ts.closed_at is null
+       and (ts.customer_id = $2 or exists (select 1 from table_session_guest g where g.session_id = ts.id and g.customer_id = $2))
+     limit 1`,
+    [qrToken, customerId]
+  );
+  return rows[0] || null;
+}
+
 // Touched on every request into this page -- see 0060_website_chat.sql's
 // own comment for why this exists (lets completePayment, fired from
 // Paystack's webhook with no live customer object, know this customer's
@@ -74,7 +96,11 @@ async function sendDineinGreeting(customer, token, session) {
   const fullBody = specialsCategory
     ? `${body}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
     : body;
-  await logWebsiteBubble({ customerId: customer.id, body: fullBody, trigger: 'dinein_greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
+  // tableSessionId -- Chidera, 2026-09-25: the bubble that opens this
+  // table's own separate chat thread must itself be tagged into it, or the
+  // very first thing a guest sees here would silently belong to the
+  // generic online thread instead.
+  await logWebsiteBubble({ customerId: customer.id, tableSessionId: session.id, body: fullBody, trigger: 'dinein_greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
 }
 
 async function sendComplaintPrompt(customer, token) {
@@ -114,12 +140,22 @@ function withDisplayBody(rows) {
   return rows.map((r) => ({ ...r, body: displayBody(r) }));
 }
 
-async function messageHistory(customerId) {
+// tableSessionId -- null means the generic online thread (message rows
+// with no table_session_id at all); a real id scopes to that table's own
+// separate dine-in thread. Two different WHERE shapes, not just a
+// parameter swap: `= $2` can never match a NULL column, so passing null
+// straight through as a bind param would silently return zero rows for
+// the online thread instead of every untagged message in it.
+async function messageHistory(customerId, tableSessionId) {
   const { rows } = await pool.query(
-    `select id, direction, sender, body, interactive, trigger, created_at from message
-     where customer_id = $1 and channel = 'website'
-     order by created_at asc`,
-    [customerId]
+    tableSessionId
+      ? `select id, direction, sender, body, interactive, trigger, created_at from message
+         where customer_id = $1 and channel = 'website' and table_session_id = $2
+         order by created_at asc`
+      : `select id, direction, sender, body, interactive, trigger, created_at from message
+         where customer_id = $1 and channel = 'website' and table_session_id is null
+         order by created_at asc`,
+    tableSessionId ? [customerId, tableSessionId] : [customerId]
   );
   return withDisplayBody(rows);
 }
@@ -128,6 +164,41 @@ router.get('/:token', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
   await touchWebChatActive(customer.id);
+
+  // Chidera, 2026-09-25: "let table dine in and online delivery have their
+  // complete different web chat so a person can be doing both at same time
+  // in 2 different web chats." req.query.table (present) means "load THIS
+  // table's own separate thread"; absent means the generic online one.
+  // Bad/stale ?table= (table not found, session closed, or this customer
+  // was never actually part of it) degrades to the generic thread instead
+  // of erroring -- a GET is safe to just fall back on.
+  const tableSession = req.query.table ? await resolveTableSession(req.query.table, customer.id) : null;
+  const tableQs = tableSession ? `?table=${encodeURIComponent(tableSession.qr_token)}` : '';
+
+  if (tableSession) {
+    let history = await messageHistory(customer.id, tableSession.id);
+    if (!history.length) {
+      const menuToken = await ensureMenuToken(customer);
+      await sendDineinGreeting(customer, menuToken, tableSession);
+      history = await messageHistory(customer.id, tableSession.id);
+    }
+    const branding = await resolveMenuBranding();
+    const waNumber = await resolveWaNumber(customer.branch_id);
+    res.set('Content-Type', 'text/html').send(
+      renderWebChatPage({
+        businessName: branding.business_name || '',
+        coverPhotoVersion: branding.cover_photo_version,
+        waNumber,
+        history,
+        messagePath: `/wa/${req.params.token}/message${tableQs}`,
+        mediaPath: `/wa/${req.params.token}/media${tableQs}`,
+        tapPath: `/wa/${req.params.token}/tap${tableQs}`,
+        pollPath: `/wa/${req.params.token}/messages${tableQs}`,
+      })
+    );
+    return;
+  }
+
   // Chidera, 2026-09-23: "anytime they start using the link let whatever
   // stage they are in ... not be restarting ... let it keep them where
   // they stopped." getOpenOrder's own 3h freshness window only gets
@@ -148,9 +219,9 @@ router.get('/:token', async (req, res) => {
   // abandonment.
   const openOrder = await getOpenOrder(customer.id);
 
-  let history = await messageHistory(customer.id);
-  // First visit -- nothing logged on the website channel for this customer
-  // yet.
+  let history = await messageHistory(customer.id, null);
+  // First visit -- nothing logged on the generic online thread for this
+  // customer yet.
   if (!history.length) {
     // Chidera, 2026-09-23: "i need customer complaint and all those in the
     // site as well." flow.js's sendComplaintLink sends this exact same
@@ -163,14 +234,14 @@ router.get('/:token', async (req, res) => {
     if (req.query.ctx === 'complaint') {
       const menuToken = await ensureMenuToken(customer);
       await sendComplaintPrompt(customer, menuToken);
+      history = await messageHistory(customer.id, null);
     } else if (dineinSession) {
-      // Chidera, 2026-09-24: "now we need dine in to go through web chat
-      // too." A dine-in guest already signalled clear intent by scanning
-      // the table's QR code -- skip the generic order-vs-complaint choice
-      // entirely, go straight to the real dine-in welcome (table label,
-      // "join an active order" wording, the actual menu link).
-      const menuToken = await ensureMenuToken(customer);
-      await sendDineinGreeting(customer, menuToken, dineinSession);
+      // Chidera, 2026-09-25: dine-in now lives on its own separate thread
+      // entirely (see the tableSession branch above) -- a first-ever visit
+      // to the bare link while a dine-in session is open sends them
+      // straight there instead of rendering the dine-in welcome inline on
+      // what's now the online-only thread.
+      return res.redirect(302, `/wa/${req.params.token}?table=${encodeURIComponent(dineinSession.qr_token)}`);
     } else {
       // Chidera, 2026-09-24: "instead of bot sending menu immediately, it
       // should send a hey, what would you like to do? with 2 buttons
@@ -191,8 +262,8 @@ router.get('/:token', async (req, res) => {
           ],
         },
       });
+      history = await messageHistory(customer.id, null);
     }
-    history = await messageHistory(customer.id);
   } else if (!openOrder) {
     // Chidera, 2026-09-24: "when i enter the web chat to place an order
     // again it should still resend that menu for a new order to be
@@ -206,20 +277,19 @@ router.get('/:token', async (req, res) => {
     const last = history[history.length - 1];
     if (last?.trigger !== 'order_again_prompt') {
       const menuToken = await ensureMenuToken(customer);
-      // Chidera, 2026-09-24: dine-in awareness -- a guest still sitting at
-      // an open table session (paid for one round, wants to add more)
-      // belongs back on /t/:token, not the generic /m/:token shop page.
-      const dineinSession = await currentDineinSession(customer);
-      const menuUrl = dineinSession
-        ? `${process.env.PUBLIC_URL}/t/${dineinSession.qr_token}?g=${menuToken}`
-        : `${process.env.PUBLIC_URL}/m/${menuToken}`;
+      // Chidera, 2026-09-25: dine-in now has its own separate thread
+      // entirely -- this generic thread only ever nudges towards a new
+      // ONLINE order, never /t/:token (a customer with an open dine-in
+      // session gets that nudge on that thread's own reopen instead, see
+      // the tableSession branch above).
+      const menuUrl = `${process.env.PUBLIC_URL}/m/${menuToken}`;
       await logWebsiteBubble({
         customerId: customer.id,
         body: `Welcome back! Tap below to place a new order.`,
         trigger: 'order_again_prompt',
         interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl },
       });
-      history = await messageHistory(customer.id);
+      history = await messageHistory(customer.id, null);
     }
   }
 
@@ -248,6 +318,10 @@ router.get('/:token', async (req, res) => {
 router.get('/:token/messages', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  // Chidera, 2026-09-25: same ?table= scoping as GET /:token -- a bad/stale
+  // one here just falls back to the generic thread, same as the page load
+  // itself, rather than erroring out mid-poll.
+  const tableSession = req.query.table ? await resolveTableSession(req.query.table, customer.id) : null;
   const since = req.query.since;
   // Chidera, 2026-09-23, live report + screenshot: the same bubble (an
   // upsell offer, in her case) repeating forever, ~every 3s -- matches
@@ -267,20 +341,42 @@ router.get('/:token/messages', async (req, res) => {
       ? `select id, direction, sender, body, interactive, trigger, created_at from message
          where customer_id = $1 and channel = 'website'
            and date_trunc('milliseconds', created_at) > date_trunc('milliseconds', $2::timestamptz)
+           and table_session_id ${tableSession ? '= $3' : 'is null'}
          order by created_at asc`
       : `select id, direction, sender, body, interactive, trigger, created_at from message
-         where customer_id = $1 and channel = 'website' order by created_at asc`,
-    since ? [customer.id, since] : [customer.id]
+         where customer_id = $1 and channel = 'website' and table_session_id ${tableSession ? '= $2' : 'is null'}
+         order by created_at asc`,
+    since
+      ? (tableSession ? [customer.id, since, tableSession.id] : [customer.id, since])
+      : (tableSession ? [customer.id, tableSession.id] : [customer.id])
   );
   res.json(withDisplayBody(rows));
 });
 
+// Chidera, 2026-09-25: shared by all three POST routes below -- unlike the
+// GET routes (which fall back to the generic thread on a bad ?table=,
+// safe since nothing is written), a POST with an explicit but INVALID
+// table param 404s outright rather than silently misrouting a real typed
+// message/tap into the wrong thread.
+async function requireTableSessionIfGiven(req, res, customer) {
+  if (!req.query.table) return { ok: true, tableSession: null };
+  const tableSession = await resolveTableSession(req.query.table, customer.id);
+  if (!tableSession) {
+    res.status(404).json({ error: 'Link not found.' });
+    return { ok: false };
+  }
+  return { ok: true, tableSession };
+}
+
 router.post('/:token/message', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  const { ok, tableSession } = await requireTableSessionIfGiven(req, res, customer);
+  if (!ok) return;
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Type something first.' });
   customer.channel = 'website';
+  if (tableSession) customer.tableSessionId = tableSession.id;
   await touchWebChatActive(customer.id);
   await handleWebChatMessage({ customer, text });
   res.json({ ok: true });
@@ -294,9 +390,12 @@ router.post('/:token/message', async (req, res) => {
 router.post('/:token/media', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  const { ok, tableSession } = await requireTableSessionIfGiven(req, res, customer);
+  if (!ok) return;
   const dataUrl = String(req.body?.dataUrl || '');
   if (!/^data:(image\/|application\/pdf)/.test(dataUrl)) return res.status(400).json({ error: 'Only a photo or PDF can be sent here.' });
   customer.channel = 'website';
+  if (tableSession) customer.tableSessionId = tableSession.id;
   await touchWebChatActive(customer.id);
   await handleWebChatMedia(customer, dataUrl, dataUrl.startsWith('data:application/pdf') ? 'file' : 'photo');
   res.json({ ok: true });
@@ -313,7 +412,10 @@ router.post('/:token/media', async (req, res) => {
 router.post('/:token/tap', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).json({ error: 'Link not found.' });
+  const { ok, tableSession } = await requireTableSessionIfGiven(req, res, customer);
+  if (!ok) return;
   customer.channel = 'website';
+  if (tableSession) customer.tableSessionId = tableSession.id;
   await touchWebChatActive(customer.id);
 
   const { buttonId, title, rowId, upsellPicks, itemQuestionAnswer } = req.body || {};
