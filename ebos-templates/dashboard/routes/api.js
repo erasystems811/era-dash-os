@@ -1304,7 +1304,17 @@ router.post('/orders/:id/release', requireEditorApi, async (req, res) => {
     );
   }
   await pool.query(`update delivery set status = 'delivered' where order_id = $1`, [order.id]);
-  await pool.query(`update "order" set status = 'completed' where id = $1`, [order.id]);
+  // Chidera, real live report right after this route shipped: "my order
+  // with dee is complete but im texting them and instead of starting a
+  // new chat im geting the paid and its on its way text" -- status alone
+  // isn't enough. engine/flow.js's getOpenOrder gates on engine_state, not
+  // status (see routes/rider.js's own /deliver route and its 2026-09-03
+  // comment for the first time this exact bug was found and fixed) --
+  // without also moving engine_state here, a released order still looks
+  // "open" to the bot forever, and the customer's next message keeps
+  // routing into the finished order's own fulfilment-stage handler instead
+  // of ever reaching the post-completion flow.
+  await pool.query(`update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1`, [order.id]);
   sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
   await logActivity(req, 'order_released', { entityType: 'order', entityId: order.id, detail: { reason, hadAssignment: !!assignmentRows[0] } });
   res.json({ ok: true });

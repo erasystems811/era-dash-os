@@ -180,8 +180,17 @@ router.post('/assignments/:id/release', requireEditorApi, async (req, res) => {
   await pool.query(`update delivery set status = 'delivered' where order_id = $1`, [rows[0].order_id]);
   // Same automatic advance the rider's own real deliver action would have
   // caused -- a staff override closing out a stuck delivery is just as
-  // real a completion as the rider entering the code themselves.
-  await pool.query(`update "order" set status = 'completed' where id = $1 and status in ('ready', 'in_transit')`, [rows[0].order_id]);
+  // real a completion as the rider entering the code themselves. Also
+  // engine_state, not just status -- see routes/rider.js's own /deliver
+  // route and its 2026-09-03 comment: engine/flow.js's getOpenOrder gates
+  // on engine_state, so without this a released order still looks "open"
+  // to the bot forever (real live report, routes/api.js's newer
+  // /orders/:id/release, this route's own successor, hit the exact same
+  // gap first).
+  await pool.query(
+    `update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1 and status in ('ready', 'in_transit')`,
+    [rows[0].order_id]
+  );
   // Third of the three real completion sites -- see engine/flow.js's own
   // comment on sendFeedbackRequest. Fire-and-forget, never blocks the
   // release itself.
