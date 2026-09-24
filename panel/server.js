@@ -976,8 +976,17 @@ function page(clients, ebosClients) {
       <button type="submit">Add payment</button>
     </form>
 
+    <h4>Add / update Monnify</h4>
+    <p class="muted">Chidera, 2026-09-23: "monify first" -- Monnify's dynamic bank-transfer account needs 3 credentials (API key, secret key, contract code), a different shape from Flutterwave/Paystack above, so it gets its own form. Get these from Monnify's own dashboard after signing up.</p>
+    <form id="monnifyForm">
+      <label>API key</label><input name="apiKey" required>
+      <label>Secret key</label><input name="secretKey" required>
+      <label>Contract code</label><input name="contractCode" required>
+      <button type="submit">Add Monnify</button>
+    </form>
+
     <h4>How this client gets paid</h4>
-    <p class="muted">Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE CLIENT DASHBOARD" -- ERA's own call per client, not something the business's own staff can set. POS: customer pays by transfer (a real Moniepoint transaction auto-confirms it, no staff step) or taps a card on the terminal for dine-in. Paystack: a real payment link, using the API keys above. Manual: bank details + a photo of proof. "ISNT THERE ALREADY SPACE IN SETTING TO PUT ACCOUNT NUMBER AND ALL?" -- yes: the transfer account quoted to customers is whatever bank name/account number/account name the business already has saved in their own Settings (the same fields "manual" has always used) -- nothing to duplicate here, just the provider choice. Leave provider blank to keep things exactly as they are today. <button type="button" onclick="loadPaymentConfig()">Load current</button></p>
+    <p class="muted">Chidera, 2026-09-21: "THAT POS MANUAL AND PAYSTACK IS FOR DASH NOT THE CLIENT DASHBOARD" -- ERA's own call per client, not something the business's own staff can set. POS: customer pays by transfer (a real Moniepoint transaction auto-confirms it, no staff step) or taps a card on the terminal for dine-in. Paystack: a real payment link, using the API keys above. Monnify: a dynamic bank-transfer account, auto-confirmed the same way, using the Monnify credentials above -- no BVN/NIN needed. Manual: bank details + a photo of proof. "ISNT THERE ALREADY SPACE IN SETTING TO PUT ACCOUNT NUMBER AND ALL?" -- yes: the transfer account quoted to customers is whatever bank name/account number/account name the business already has saved in their own Settings (the same fields "manual" has always used) -- nothing to duplicate here, just the provider choice. Leave provider blank to keep things exactly as they are today. <button type="button" onclick="loadPaymentConfig()">Load current</button></p>
     <div id="paymentConfigStatus" style="margin:10px 0;"></div>
     <form id="paymentConfigForm">
       <label>Provider</label>
@@ -985,6 +994,7 @@ function page(clients, ebosClients) {
         <option value="">Not set (keep current behaviour)</option>
         <option value="pos">POS</option>
         <option value="paystack">Paystack</option>
+        <option value="monnify">Monnify</option>
         <option value="manual">Manual</option>
       </select>
       <button type="submit">Save</button>
@@ -1219,6 +1229,12 @@ document.getElementById('paymentForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
   submitJson('/api/add-payment', { client: currentClient, provider: f.get('provider'), secretKey: f.get('secretKey'), publicKey: f.get('publicKey') });
+});
+
+document.getElementById('monnifyForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  submitJson('/api/add-payment-monnify', { client: currentClient, apiKey: f.get('apiKey'), secretKey: f.get('secretKey'), contractCode: f.get('contractCode') });
 });
 
 async function loadPaymentConfig() {
@@ -2590,6 +2606,13 @@ app.post('/api/add-payment', (req, res) => {
   const { client, provider, secretKey, publicKey } = req.body;
   if (!client || !provider || !secretKey || !publicKey) return res.status(400).json({ error: 'missing fields' });
   const jobId = startJob('add-payment.mjs', [`--client=${client}`, `--provider=${provider}`, `--secret-key=${secretKey}`, `--public-key=${publicKey}`]);
+  res.json({ jobId });
+});
+
+app.post('/api/add-payment-monnify', (req, res) => {
+  const { client, apiKey, secretKey, contractCode } = req.body;
+  if (!client || !apiKey || !secretKey || !contractCode) return res.status(400).json({ error: 'missing fields' });
+  const jobId = startJob('add-payment.mjs', [`--client=${client}`, `--provider=monnify`, `--api-key=${apiKey}`, `--secret-key=${secretKey}`, `--contract-code=${contractCode}`]);
   res.json({ jobId });
 });
 

@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 // Usage:
 //   node add-payment.mjs --client=slug --provider=flutterwave|paystack --secret-key=... --public-key=...
+//   node add-payment.mjs --client=slug --provider=monnify --api-key=... --secret-key=... --contract-code=...
 //
 // Adds a payment provider to an EXISTING client app, any time after initial
 // setup. Restarts that client's containers. Does NOT do the provider's own
-// business/KYC verification — that's a manual step on Flutterwave's or
-// Paystack's dashboard that can't be scripted; this script only wires the
-// technical side (env vars) so it's ready the moment verification is done.
+// business/KYC verification — that's a manual step on Flutterwave's,
+// Paystack's, or Monnify's dashboard that can't be scripted; this script
+// only wires the technical side (env vars) so it's ready the moment
+// verification is done.
+//
+// Monnify uses its OWN env var names (MONNIFY_*), not the generic
+// PAYMENT_* ones Flutterwave/Paystack share -- deliberately, so a business
+// can have both a Paystack key set AND Monnify credentials set at once;
+// payment_config.provider (Settings, "How this client gets paid") decides
+// which is actually active, not which env vars merely exist.
 
 import { loadRegistry, saveRegistry, findClient, upsertClient } from './lib/registry.mjs';
 import { readRemote, runRemote, copyToRemote } from './lib/ssh.mjs';
@@ -21,11 +29,21 @@ function parseArgs(argv) {
     const [key, ...rest] = arg.replace(/^--/, '').split('=');
     args[key] = rest.join('=');
   }
-  if (!args.client || !args.provider || !args['secret-key'] || !args['public-key']) {
-    throw new Error('Usage: add-payment.mjs --client=slug --provider=flutterwave|paystack --secret-key=... --public-key=...');
+  if (!args.client || !args.provider) {
+    throw new Error(
+      'Usage: add-payment.mjs --client=slug --provider=flutterwave|paystack --secret-key=... --public-key=...\n' +
+        '       add-payment.mjs --client=slug --provider=monnify --api-key=... --secret-key=... --contract-code=...'
+    );
   }
-  if (!['flutterwave', 'paystack'].includes(args.provider)) {
-    throw new Error('--provider must be "flutterwave" or "paystack"');
+  if (!['flutterwave', 'paystack', 'monnify'].includes(args.provider)) {
+    throw new Error('--provider must be "flutterwave", "paystack", or "monnify"');
+  }
+  if (args.provider === 'monnify') {
+    if (!args['api-key'] || !args['secret-key'] || !args['contract-code']) {
+      throw new Error('monnify requires --api-key, --secret-key, and --contract-code');
+    }
+  } else if (!args['secret-key'] || !args['public-key']) {
+    throw new Error(`${args.provider} requires --secret-key and --public-key`);
   }
   return args;
 }
@@ -38,11 +56,20 @@ async function main() {
 
   const remoteDir = `/opt/${client.name}`;
   const current = await readRemote(client.ip, `${remoteDir}/.env`);
-  const patched = patchEnv(current, {
-    PAYMENT_PROVIDER: args.provider,
-    PAYMENT_SECRET_KEY: args['secret-key'],
-    PAYMENT_PUBLIC_KEY: args['public-key'],
-  });
+  const patched = patchEnv(
+    current,
+    args.provider === 'monnify'
+      ? {
+          MONNIFY_API_KEY: args['api-key'],
+          MONNIFY_SECRET_KEY: args['secret-key'],
+          MONNIFY_CONTRACT_CODE: args['contract-code'],
+        }
+      : {
+          PAYMENT_PROVIDER: args.provider,
+          PAYMENT_SECRET_KEY: args['secret-key'],
+          PAYMENT_PUBLIC_KEY: args['public-key'],
+        }
+  );
 
   const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'era-pay-'));
   const tmpFile = path.join(tmpDir, '.env');

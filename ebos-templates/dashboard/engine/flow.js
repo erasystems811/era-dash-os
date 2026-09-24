@@ -12,7 +12,7 @@ import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCt
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice } from './documents.js';
-import { initializePaystackTransaction, initializePaystackTopupTransaction, getPaymentConfig } from './payment.js';
+import { initializePaystackTransaction, initializePaystackTopupTransaction, initializeMonnifyTransaction, getPaymentConfig } from './payment.js';
 import { pushPaymentRequest, lookupTransactionByReference } from './moniepoint-api.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
 import { getWhatsAppCredentials } from './branch-channel.js';
@@ -2325,6 +2325,25 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
   // why this must never change behavior on its own.
   if (paymentConfig?.provider === 'pos') {
     return { payLine: null, needsHandover: false, paymentUrl: null, posChoice: true };
+  }
+  // Chidera, 2026-09-23: "monify first" -- Monnify's dynamic bank-transfer
+  // account. Unlike Paystack, there's no legacy env-var fallback to
+  // consider here (this provider never existed before payment_config did),
+  // so it only ever activates on an explicit Settings choice.
+  if (paymentConfig?.provider === 'monnify') {
+    try {
+      const result = await initializeMonnifyTransaction({ order, customer, amount });
+      if (result) {
+        const minutesLeft = Math.max(1, Math.round((new Date(result.expiresAt).getTime() - Date.now()) / 60000));
+        return {
+          payLine: `Please pay NGN ${amountLabel} using the account below (valid for the next ${minutesLeft} minutes).\n\nBank: ${result.bankName}\nAccount number: ${result.accountNumber}\nAccount name: ${result.accountName}\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
+          needsHandover: false,
+          paymentUrl: null,
+        };
+      }
+    } catch (err) {
+      console.error(`Monnify dynamic account failed for order ${order.id}, falling back to bank details: ${err.message}`);
+    }
   }
   const useProviderPaystack = paymentConfig?.provider ? paymentConfig.provider === 'paystack' : process.env.PAYMENT_PROVIDER === 'paystack';
   if (useProviderPaystack && process.env.PAYMENT_SECRET_KEY) {
