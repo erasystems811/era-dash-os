@@ -1536,10 +1536,14 @@ export const UPSELL_GROUPS = [
   { key: 'snack', keywords: ['snack', 'small chop', 'appetiser', 'appetizer', 'starter'], label: 'a snack' },
 ];
 
-// Chidera, 2026-09-24: "max 3 upsells" -- with 'side' added, UPSELL_GROUPS
-// itself now has 4 possible categories; a single order is never offered
-// more than this many at once regardless of how many it's actually
-// missing.
+// Chidera, 2026-09-24: "could be 3 or 2 upsells... or 1" -- confirmed, on
+// correction, this means up to this many SEQUENTIAL offers per order
+// (drink, then a side, then a snack -- one category at a time, not all
+// combined into one list): "no you got upsell wronggg...you dont make it
+// obvious, you said want to complete your oeder like that is a pre
+// requiste, the former would you like to add a drink is very okay just
+// that it was to enable multi selesct and all and after theyve added
+// drink then ask again would you like to add one of our special sides."
 const MAX_UPSELL_PICKS = 3;
 
 export function categoryMatchesGroup(category, keywords) {
@@ -1559,47 +1563,27 @@ function catalogueOptions(menu, keywords) {
   return menu.filter((p) => categoryMatchesGroup(p.category, keywords));
 }
 
-// Chidera, 2026-09-24: "upsell is anything that match what they ordered...
-// could be 3 or 2 upsells... or 1, as long as it match, but for upsell the
-// bot aim is to push customer to buy more." One representative product per
-// category the order doesn't already have.
-function pickUpsellOptions(menu, orderedCategories) {
-  const picks = [];
-  const matchedGroups = [];
+// Next upsell offer worth making, if any -- one whole category at a time
+// (every real product in it, not just a representative one), already-
+// ordered categories and already-offered-this-order categories both
+// excluded, capped at MAX_UPSELL_PICKS sequential offers total. Naturally
+// returns null once every real cross-sell opportunity is either satisfied,
+// already declined, or the cap's been reached.
+async function nextUpsellGroup(order, orderItems) {
+  if (!orderItems.length) return null;
+  const offered = order.upsell_offered || [];
+  if (offered.length >= MAX_UPSELL_PICKS) return null;
+  const menu = await resolveMenu(order.branch_id);
+  const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
   for (const group of UPSELL_GROUPS) {
-    if (picks.length >= MAX_UPSELL_PICKS) break;
+    if (offered.includes(group.key)) continue; // already asked about this one this order
     const options = catalogueOptions(menu, group.keywords);
     if (!options.length) continue;
     const orderHasIt = orderedCategories.some((c) => categoryMatchesGroup(c, group.keywords));
     if (orderHasIt) continue;
-    picks.push(options[0]);
-    matchedGroups.push(group);
+    return { ...group, options };
   }
-  return { picks, matchedGroups };
-}
-
-// Next upsell offer worth making, if any -- already-ordered categories and
-// already-offered-this-order categories are both excluded, so this
-// naturally returns null once every real cross-sell opportunity is either
-// satisfied or already declined.
-async function nextUpsellGroup(order, orderItems) {
-  if (!orderItems.length) return null;
-  // Chidera, 2026-09-20: "only upsell once" -- one OFFER per order, total
-  // (accepted or declined), still true here -- what changed 2026-09-24 is
-  // that single offer now covers every unmet category at once (drink AND
-  // protein AND snack, whichever the order is actually missing) instead of
-  // stopping at just the first one found.
-  const offered = order.upsell_offered || [];
-  if (offered.length) return null;
-  const menu = await resolveMenu(order.branch_id);
-  const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
-  const { picks, matchedGroups } = pickUpsellOptions(menu, orderedCategories);
-  if (!picks.length) return null;
-  return {
-    key: matchedGroups.map((g) => g.key).join('+'),
-    label: matchedGroups.map((g) => g.label).join(', '),
-    options: picks,
-  };
+  return null;
 }
 
 // The upsell offer as a real WhatsApp List Message (tap to add) instead of
@@ -1624,11 +1608,8 @@ async function nextUpsellGroup(order, orderItems) {
 // would normally reach it needs a live Anthropic key this environment
 // doesn't have (extractOrderModifications, called before any state-based
 // routing for an order past collect_info).
-// Single group ("a drink") reads fine capitalised as its own section
-// title ("Drink"); combined groups read awkwardly as a comma list, so
-// that case gets a generic, still-inviting title instead.
 function upsellSectionTitle(upsell) {
-  return upsell.options.length > 1 ? 'Add-ons' : upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1);
+  return upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1);
 }
 
 export async function sendUpsellList(customer, upsell, prefix = '') {
@@ -1639,16 +1620,13 @@ export async function sendUpsellList(customer, upsell, prefix = '') {
     description: `NGN ${Number(p.price).toLocaleString()}`,
   }));
   rows.push({ id: 'upsell::skip', title: 'No thanks', description: 'Skip' });
-  // Chidera, 2026-09-24: "for upsell the bot aim is to push customer to
-  // buy more" -- one item now (single group, "Would you like to add a
-  // drink?") reads fine with upsell.label as-is; more than one (combined
-  // categories) reads awkwardly as a comma list ("add a protein, a
-  // drink?"), so that case gets its own more natural, more enticing line.
-  const bodyText = (
-    upsell.options.length > 1
-      ? `${prefix}Want to complete your order? Add any of these:`
-      : `${prefix}Would you like to add ${upsell.label}?`
-  ).trim();
+  // Chidera, 2026-09-24 (correction): "the former would you like to add a
+  // drink is very okay just that it was to enable multi selesct and all."
+  // Reverted to the plain single-category ask -- the earlier "combined
+  // categories" wording was a solution to a problem this design no longer
+  // has (each offer is one category again, sequential, not several
+  // combined into one confusing list).
+  const bodyText = `${prefix}Would you like to add ${upsell.label}?`.trim();
   // website: same row ids as WhatsApp's list message (upsell::<id>,
   // upsell::skip) -- a tap on the chat page posts the row id to
   // POST /:token/tap, which calls handleUpsellListTap exactly as the real
@@ -1803,6 +1781,25 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
     return;
   }
 
+  // Chidera, 2026-09-24: "after i said no thanks and later on i wanted to
+  // add, the bot was not acknowledging my new selection." handleUpsellListTap/
+  // handleUpsellMultiTap can now add an item via a tap on an OLDER,
+  // already-answered upsell bubble even after the order's moved past
+  // collect_info (confirm_order, confirm_payment, ...) -- the forward
+  // transition chain below only has one real starting point
+  // (collect_info -> check_availability -> calculate_price -> confirm_order,
+  // per the state machine's own allowed moves), so attempting it from any
+  // later state throws. Recompute and acknowledge instead, same
+  // "modification at a later stage" shape applyOrderModifications already
+  // uses elsewhere -- no transition needed, the order was already past
+  // this point.
+  if (order.engine_state !== 'collect_info') {
+    const { total } = await summariseOrder(order);
+    await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
+    await reply(customer, `${prefix}New total: NGN ${total}.`.trim(), 'upsell_late_add');
+    return;
+  }
+
   await transitionOrder(order, 'check_availability');
   await transitionOrder(order, 'calculate_price');
   const { itemLines, total, deliveryFee } = await summariseOrder(order);
@@ -1907,14 +1904,9 @@ export async function handlePendingUpsell(customer, order, text) {
   });
   const wantsOne = await botEngine.extractField(wantsOneField, text, { askJson });
   if (wantsOne === true) {
-    // pending_upsell_category may now name more than one group at once
-    // (e.g. 'drink+protein', see nextUpsellGroup) -- the full catalogue
-    // across every one of them, not just the single representative pick
-    // each originally offered, since they've now said yes and are
-    // actually choosing.
-    const groupKeys = (order.pending_upsell_category || '').split('+');
+    const group = UPSELL_GROUPS.find((g) => g.key === order.pending_upsell_category);
     const menu = await resolveMenu(order.branch_id);
-    const options = UPSELL_GROUPS.filter((g) => groupKeys.includes(g.key)).flatMap((g) => catalogueOptions(menu, g.keywords));
+    const options = group ? catalogueOptions(menu, group.keywords) : [];
     // pending_upsell_category deliberately left set -- their next message
     // is still the answer to this same offer, not a fresh one.
     await reply(customer, `Great, which one would you like? We have: ${options.map((o) => o.name).join(', ')}.`, 'upsell_clarify');
@@ -1937,13 +1929,22 @@ export async function handlePendingUpsell(customer, order, text) {
 export async function handleUpsellListTap({ phoneNumber, channelId, rowId, channel = 'whatsapp', branchId, customer: presetCustomer }) {
   const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
   const order = await resolveCustomerOrder(customer);
-  // A stale tap on an old list (the offer's already been answered another
-  // way, or the order's moved on/gone) -- nothing to do, and nothing to
-  // clear that isn't already cleared.
-  if (!order || !order.pending_upsell_category) return;
+  // Chidera, 2026-09-24: "after i said no thanks and later on i wanted to
+  // add, the bot was not acknowledging my new selection, a person can
+  // alsways select and itll be added." Real bug: pending_upsell_category
+  // gets cleared the instant ANY offer is answered (skip or pick), so
+  // tapping an item on an OLDER, already-answered bubble later -- a
+  // completely legitimate change of mind -- used to require it still be
+  // set, and silently did nothing once it wasn't. A tap carries a real,
+  // unambiguous product id regardless of whether it's still the CURRENT
+  // offer -- only a genuinely gone order (none at all, or already
+  // completed/cancelled) is a real no-op.
+  if (!order || ['completed', 'cancelled'].includes(order.status)) return;
 
-  order.pending_upsell_category = null;
-  await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+  if (order.pending_upsell_category) {
+    order.pending_upsell_category = null;
+    await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+  }
 
   const picked = rowId.slice('upsell::'.length);
   if (picked === 'skip') {
@@ -1987,10 +1988,16 @@ export async function handleUpsellListTap({ phoneNumber, channelId, rowId, chann
 // the time the route calls this.
 export async function handleUpsellMultiTap({ customer, picks }) {
   const order = await resolveCustomerOrder(customer);
-  if (!order || !order.pending_upsell_category) return;
+  // Same fix as handleUpsellListTap above -- a real product pick must not
+  // silently no-op just because this isn't the CURRENT pending offer
+  // anymore (e.g. picking from an older bubble after already declining a
+  // later one).
+  if (!order || ['completed', 'cancelled'].includes(order.status)) return;
 
-  order.pending_upsell_category = null;
-  await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+  if (order.pending_upsell_category) {
+    order.pending_upsell_category = null;
+    await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+  }
 
   const added = [];
   for (const pick of picks) {
