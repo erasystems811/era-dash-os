@@ -1393,6 +1393,16 @@ label {
      bold and generously sized, not as small-and-refined the way it might
      on a proper invoice (documents.js's own PDF, a different medium
      printed on real paper and held, not scanned in a hurry). */
+  /* 2026-09-24, real live report: "on my ipad im still seeing 2 pages"
+     -- the fixed 400mm @page height above is a Chrome-specific fix;
+     iOS/AirPrint often ignores a webpage's own @page size entirely and
+     paginates against the PRINTER'S OWN registered paper length instead
+     (commonly a fixed Letter/A4-ish length for a generic AirPrint
+     bridge), no matter what this CSS says. The reliable fix there is
+     making the CONTENT itself shorter, not the page taller -- margins/
+     padding below tightened without touching the font sizes that were
+     just deliberately made bigger, so a normal order comfortably clears
+     one real page length on any platform. */
   .printDocket .docketBrand {
     text-align: center;
     font-size: 13px;
@@ -1400,7 +1410,7 @@ label {
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: #444;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
   }
   .printDocket .docketTable {
     text-align: center;
@@ -1413,16 +1423,16 @@ label {
     text-align: center;
     font-size: 13px;
     color: #555;
-    margin-top: 5px;
-    margin-bottom: 16px;
+    margin-top: 4px;
+    margin-bottom: 10px;
   }
   .printDocket hr {
     border: none;
     border-top: 2px solid #000;
-    margin: 0 0 16px;
+    margin: 0 0 10px;
   }
   .printDocket .docketGroup {
-    margin-bottom: 14px;
+    margin-bottom: 8px;
   }
   .printDocket .docketCategory {
     font-size: 13px;
@@ -1431,13 +1441,13 @@ label {
     text-transform: uppercase;
     color: #444;
     border-bottom: 1px solid #ccc;
-    padding-bottom: 4px;
-    margin-bottom: 8px;
+    padding-bottom: 3px;
+    margin-bottom: 5px;
   }
   .printDocket .docketItem {
     display: flex;
     gap: 10px;
-    padding: 6px 0;
+    padding: 4px 0;
     align-items: baseline;
   }
   .printDocket .docketQty {
@@ -1477,8 +1487,8 @@ label {
     text-align: center;
     border-top: 1.5px dashed #000;
     border-bottom: 1.5px dashed #000;
-    padding: 6px 0;
-    margin: 10px 0 12px;
+    padding: 4px 0;
+    margin: 6px 0 8px;
   }
 }
 
