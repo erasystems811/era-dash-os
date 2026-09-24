@@ -691,9 +691,13 @@ async function ebosBusinessStatus(client) {
     crmEnabled: Boolean(crmConfig?.enabled),
     // Chidera, 2026-09-17: "not every restaurant needs it, let it be a
     // toogle on or off capability" -- its own field, not just CRM's.
-    // Defaults true (matches the migration's own default) so a business
-    // that never touches this toggle keeps today's behavior.
-    birthdayPromptEnabled: crmConfig?.birthday_prompt_enabled !== false,
+    // 2026-09-24: "that birthday question should be a capability
+    // separate from crm, not every client wants it" -- the customer-
+    // facing gate (routes/menu-page.js) no longer inherits CRM's own
+    // default-true assumption, now requiring an explicit true; this
+    // checkbox's own default has to match that exactly, or it would show
+    // "on" for a business the real prompt is actually off for.
+    birthdayPromptEnabled: crmConfig?.birthday_prompt_enabled === true,
     posSyncEnabled: Boolean(posSyncConfig?.enabled),
     posSyncConnected: Boolean(posSyncConfig?.hasWebhookCredentials),
     // Already on the registry (add-payment.mjs sets it, same field the

@@ -200,7 +200,25 @@ router.get('/:token', async (req, res) => {
       deliveryQuotePath: `/m/${req.params.token}/delivery-quote`,
       deliveryMode: deliveryConfig.mode,
       deliveryZones,
-      showBirthdayPrompt: Boolean(crmRows.rows[0]?.enabled) && crmRows.rows[0]?.birthday_prompt_enabled !== false && !customer.birthday,
+      // Chidera, 2026-09-24: "that birthday question should be a
+      // capability separate from crm, not every client wants it" -- the
+      // panel's own two checkboxes (crm-mode, birthday-prompt-mode) were
+      // already independent API calls (0047_birthday_prompt_toggle.sql's
+      // whole point), but this gate still required CRM's own `enabled`
+      // flag on top, so a business with birthday explicitly ON but CRM
+      // OFF never actually got it -- the one place that mattered still
+      // treated them as coupled. Requires an EXPLICIT true now (=== true,
+      // not !== false) rather than inheriting CRM's own default-true
+      // assumption -- a business nobody has configured this toggle for
+      // yet correctly defaults to off, not on by implication.
+      // showNamePrompt has the exact same coupling bug, deliberately left
+      // alone here -- unlike birthday, there's no panel checkbox for it
+      // at all yet, so flipping its default to require explicit true
+      // would silently turn it off for any business relying on the
+      // column's implicit default, with no UI anywhere to turn it back
+      // on. Worth the same fix once that toggle exists; not bundling an
+      // unrequested behavior change with this one.
+      showBirthdayPrompt: crmRows.rows[0]?.birthday_prompt_enabled === true && !customer.birthday,
       showNamePrompt: Boolean(crmRows.rows[0]?.enabled) && crmRows.rows[0]?.name_prompt_enabled !== false && !customer.name,
       businessName: branding.business_name || '',
       subtitle: 'Pick what you would like, then review your order.',
