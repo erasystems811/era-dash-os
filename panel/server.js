@@ -2315,6 +2315,19 @@ loadHistoryAndMonths().then(loadBusinessIntelligence).catch((err) => {
   console.error('Failed to load month history:', err);
   loadBusinessIntelligence();
 });
+
+// Chidera, 2026-09-24: "my dashboard is not updating live" -- this only
+// ever loaded once, on page open, same shape Orders.jsx's own Today
+// stats had before its own 2026-09-24 fix (same complaint, same
+// reasoning) -- a real order/upsell/complaint landing elsewhere never
+// changed what was on screen unless someone manually hit Refresh. 30s,
+// not 15s like Orders.jsx -- this aggregates several businesses at once
+// (several real HTTP calls each tick), a heavier poll than one
+// business's own stats card. Only the currently-selected window's
+// numbers re-fetch here, not the month list itself -- re-running
+// loadHistoryAndMonths on a timer would reset whichever month she's
+// looking at mid-read, which a silent background refresh must never do.
+setInterval(loadBusinessIntelligence, 30000);
 </script>
 </body>
 </html>`;
