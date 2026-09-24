@@ -2157,8 +2157,20 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       // sendPaymentInstructions (sendPaymentLinkButton), no special-casing.
       const url = await initializeMonnifyTransaction({ order, customer, amount });
       if (url) {
+        // Chidera, real live report right after the checkout-link switch:
+        // "that dynamic monify account is showing me as invalid and
+        // unavailable" -- confirmed live (opened the actual link Monnify
+        // sent back): the checkout session itself had genuinely expired,
+        // a real, expected time limit on Monnify's own end (same shape
+        // the old account flow had, just never surfaced to the customer
+        // for THIS flow). Nothing was broken -- a fresh order/nudge
+        // already gets a brand new link automatically (sendPaymentInstructions
+        // calls buildPayLine fresh every time it runs) -- the gap was
+        // purely that nobody ever told the customer the link was time-
+        // limited in the first place, so an old one going stale read as
+        // "broken" instead of "just ask again."
         return {
-          payLine: `Please pay NGN ${amountLabel} using the button below.\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
+          payLine: `Please pay NGN ${amountLabel} using the button below.\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof. If the link's been open a while and stops working, just message me and I'll send a fresh one.`,
           needsHandover: false,
           paymentUrl: url,
         };
