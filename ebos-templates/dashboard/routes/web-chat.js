@@ -189,11 +189,11 @@ router.get('/:token/messages', async (req, res) => {
   // is correctly treated as already-seen.
   const { rows } = await pool.query(
     since
-      ? `select id, direction, sender, body, interactive, created_at from message
+      ? `select id, direction, sender, body, interactive, trigger, created_at from message
          where customer_id = $1 and channel = 'website'
            and date_trunc('milliseconds', created_at) > date_trunc('milliseconds', $2::timestamptz)
          order by created_at asc`
-      : `select id, direction, sender, body, interactive, created_at from message
+      : `select id, direction, sender, body, interactive, trigger, created_at from message
          where customer_id = $1 and channel = 'website' order by created_at asc`,
     since ? [customer.id, since] : [customer.id]
   );

@@ -34,13 +34,20 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   :root{--bg:#0b141a;--header:#1f2c34;--bubble-in:#202c33;--bubble-out:#005c4b;--text:#e9edef;--text2:#8696a0;--accent:#00a884;--divider:rgba(255,255,255,.09);--input:#2a3942}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%;overflow:hidden;font-family:Inter,-apple-system,sans-serif;color:var(--text);background:#000}
-  #app{display:flex;flex-direction:column;height:100%}
+  #app{display:flex;flex-direction:column;height:100%;position:relative}
   header{flex:none;background:var(--header);color:var(--text);padding:10px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(255,255,255,.05)}
   header .back{flex:none;color:var(--accent);font-size:26px;line-height:1;padding:0 2px}
   .avatar{width:36px;height:36px;border-radius:50%;background:var(--accent);flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:#fff;${avatarStyle}}
   header .name{font-size:16px;font-weight:600}
   header .status{font-size:12.5px;color:var(--text2)}
   #scroll{flex:1;overflow-y:auto;padding:14px 10px;background-color:var(--bg);background-image:radial-gradient(rgba(255,255,255,.035) 1px, transparent 1px);background-size:22px 22px}
+  /* Chidera, 2026-09-24: "let the webchat notification of received pop as
+     a banner... paystack leaves it loading there without making it clear
+     when it has actually been confirmed." A real, hard-to-miss banner
+     (not just a chat bubble) that slides in over the top of the page --
+     visible even switching back from the Paystack tab mid-scroll. */
+  #banner{position:absolute;top:0;left:0;right:0;z-index:30;background:var(--accent);color:#04120d;font-weight:700;font-size:14.5px;padding:13px 16px;display:flex;align-items:center;gap:8px;box-shadow:0 2px 10px rgba(0,0,0,.35);transform:translateY(-110%);transition:transform .35s ease}
+  #banner.show{transform:translateY(0)}
   .daterow{text-align:center;margin:12px 0}
   .datepill{display:inline-block;background:#182229;color:var(--text2);font-size:12px;font-weight:600;padding:5px 12px;border-radius:8px}
   .row{display:flex;margin:2px 0}
@@ -109,6 +116,7 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
 </style></head>
 <body>
 <div id="app">
+  <div id="banner"><span>&#10003;</span><span id="bannerText">Payment confirmed!</span></div>
   <header>
     <div class="back">&#8249;</div>
     <div class="avatar">${escapeHtml((businessName || '?').slice(0, 1).toUpperCase())}</div>
@@ -328,6 +336,21 @@ function hideTyping() {
   if (row) row.remove();
 }
 
+// Chidera, 2026-09-24: "let the webchat notification of received pop as a
+// banner so customer can know their payment has been confirmed cause
+// sometimes paystack leaves it loading there." flow.js's completePayment
+// tags its two customer-facing replies 'payment_confirmed' specifically so
+// this can be told apart from any other bot message. Auto-dismisses on its
+// own -- no dismiss button needed for a purely informational banner.
+let bannerTimer = null;
+function showBanner(text) {
+  const banner = document.getElementById('banner');
+  document.getElementById('bannerText').textContent = text;
+  banner.classList.add('show');
+  if (bannerTimer) clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(function () { banner.classList.remove('show'); }, 6000);
+}
+
 // Picks up anything NOT triggered by this tab's own action -- a payment
 // confirmed by Paystack's webhook, "order ready" if that ever lands here,
 // a staff reply. Same lightweight polling idiom the existing dine-in/POS
@@ -351,6 +374,9 @@ async function poll() {
         HISTORY = HISTORY.concat(rows);
         lastCursor = rows[rows.length - 1].created_at;
         renderAll();
+        if (rows.some(function (m) { return m.trigger === 'payment_confirmed'; })) {
+          showBanner('Payment confirmed!');
+        }
       };
       // Chidera, 2026-09-24: "add the typing sign but it should type for 2
       // seconds, so they know a new text has dropped." Only for a real bot

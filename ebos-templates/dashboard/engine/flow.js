@@ -3385,7 +3385,14 @@ export async function completePayment(orderId) {
     // but the tracking link is available immediately and is the thing
     // actually worth sending.
     const trackingLine = delivery.trackingUrl ? ` Track it here: ${delivery.trackingUrl}` : '';
-    await reply(customer, `Payment received. Your order is being prepared for delivery.${riderLine}${trackingLine}`);
+    // Chidera, 2026-09-24: "let the webchat notification of received pop
+    // as a banner so customer can know their payment has been confirmed
+    // cause sometimes paystack leaves it loading there." A distinct
+    // trigger (not the generic bot_flow_step default) so the chat page's
+    // own poll() can recognise THIS specific message and show a banner,
+    // not just a bubble easy to miss while they're still tabbed over to
+    // Paystack's own checkout.
+    await reply(customer, `Payment received. Your order is being prepared for delivery.${riderLine}${trackingLine}`, 'payment_confirmed');
   } else {
     const { rows: bizRows } = await pool.query('select address, phone_number from business limit 1');
     const biz = bizRows[0] || {};
@@ -3393,7 +3400,8 @@ export async function completePayment(orderId) {
     const b = branchRows[0] || {};
     await reply(
       customer,
-      `Payment received, I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
+      `Payment received, I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`,
+      'payment_confirmed'
     );
   }
 
