@@ -1981,35 +1981,60 @@ function myDashboardPage() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>My Dashboard — ERA Dash OS</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <style>
+  /* Chidera, 2026-09-24: "my dashboard looks blank and dormant, make it
+     era blue and fuctional... design it the way the client crm is
+     designed but in an era standard colouring" -- this page lives in
+     panel/server.js (the ERA-operator control panel, plain server-
+     rendered HTML), a different app from the per-business React
+     dashboard Crm.jsx belongs to (ebos-templates/dashboard/client) --
+     never got that dashboard's own navy/gold design pass at all, hence
+     "generic admin page" instead of "an ERA product." These are the
+     exact same tokens that dashboard's own index.css defines (--accent
+     navy, --gold, glass-card shadow/blur/radius) -- not a new palette,
+     the one already established everywhere else.
+  */
   * { box-sizing: border-box; overflow-wrap: break-word; word-break: break-word; min-width: 0; }
   html, body { overflow-x: hidden; max-width: 100vw; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     max-width: 1300px; margin: 2rem auto; padding: 0 1rem;
-    background: #f6f7f9; color: #1c1f26;
+    background: #edf0f4; color: #12161c;
   }
-  a { color: #2f6feb; }
-  h1 { font-size: 22px; margin-bottom: 4px; }
-  h3 { font-size: 15px; font-weight: 700; color: #444; margin: 28px 0 10px; text-transform: uppercase; letter-spacing: 0.03em; }
-  table { border-collapse: collapse; width: 100%; margin: 0 0 1rem; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,0.06); }
-  td, th { border-bottom: 1px solid #ecedf1; padding: 9px 12px; text-align: left; font-size: 14px; }
-  th { background: #fafbfc; font-weight: 600; color: #555; }
+  a { color: #1b2a4a; font-weight: 600; }
+  h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; letter-spacing: -0.01em; }
+  h3 { font-size: 13px; font-weight: 700; color: #1b2a4a; margin: 30px 0 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+  table { border-collapse: collapse; width: 100%; margin: 0 0 1.2rem; background: rgba(255,255,255,0.78); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255,255,255,0.7); border-radius: 16px; overflow: hidden; box-shadow: 0px 1px 0px rgba(18,22,28,0.07), 0px 10px 24px -6px rgba(18,22,28,0.18); }
+  td, th { border-bottom: 1px solid #dce1e8; padding: 10px 14px; text-align: left; font-size: 14px; }
+  th { background: rgba(27,42,74,0.05); font-weight: 600; color: #1b2a4a; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.03em; }
   tr:last-child td { border-bottom: none; }
   .muted { color: #6b7280; font-size: 13px; }
-  select, button { padding: 7px 10px; border-radius: 7px; border: 1px solid #d5d8dd; background: #fff; font-size: 14px; }
-  button { cursor: pointer; }
-  button:hover { background: #f2f3f5; }
-  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 1rem 0; }
-  .card { background: #fff; border-radius: 10px; padding: 14px 18px; min-width: 170px; box-shadow: 0 1px 2px rgba(16,24,40,0.06); }
-  .card .big { font-size: 28px; font-weight: 700; }
-  .card .lbl { color: #6b7280; font-size: 12.5px; margin-top: 2px; }
-  .chart-card { background: #fff; border-radius: 10px; padding: 16px 18px; margin-bottom: 1rem; box-shadow: 0 1px 2px rgba(16,24,40,0.06); }
+  select, button { padding: 8px 12px; border-radius: 10px; border: 1px solid #dce1e8; background: #fff; font-size: 14px; font-family: inherit; color: #12161c; }
+  button { cursor: pointer; font-weight: 600; }
+  button:hover { background: #f4f6f9; }
+  .cards { display: flex; gap: 14px; flex-wrap: wrap; margin: 1rem 0; }
+  .card {
+    background: rgba(255,255,255,0.78); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,0.7); border-radius: 16px; padding: 16px 20px; min-width: 190px;
+    box-shadow: 0px 1px 0px rgba(18,22,28,0.07), 0px 10px 24px -6px rgba(18,22,28,0.18);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .card-icon { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  .card .big { font-size: 28px; font-weight: 700; color: #12161c; }
+  .card .lbl { color: #6b7280; font-size: 12.5px; }
+  .chart-card {
+    background: rgba(255,255,255,0.78); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,0.7); border-radius: 16px; padding: 18px 20px; margin-bottom: 1.2rem;
+    box-shadow: 0px 1px 0px rgba(18,22,28,0.07), 0px 10px 24px -6px rgba(18,22,28,0.18);
+  }
   .chart-wrap { position: relative; }
-  .bar { background: #eee; border-radius: 4px; height: 10px; width: 100%; overflow: hidden; }
-  .bar-fill { height: 100%; background: #2e7d32; }
-  .bar-fill.warn { background: #e65100; }
-  .bar-fill.danger { background: #c62828; }
+  .bar { background: #e4e8ee; border-radius: 4px; height: 10px; width: 100%; overflow: hidden; }
+  .bar-fill { height: 100%; background: #2e7d5b; }
+  .bar-fill.warn { background: #b4700f; }
+  .bar-fill.danger { background: #d8452f; }
   @media (max-width: 860px) {
     body { margin: 1rem auto; padding: 0 12px; font-size: 15px; }
     table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
@@ -2104,9 +2129,27 @@ async function loadBusinessIntelligence() {
 
     const o = bi.overall;
     document.getElementById('biOverallCards').innerHTML =
-      '<div class="card"><div class="big">' + pct(o.upsellSuccessRate) + '</div><div class="lbl">Upsell success (' + o.upsellAccepted + ' of ' + o.upsellOffered + ' offered)</div></div>' +
-      '<div class="card"><div class="big">' + pct(o.complaintRate) + '</div><div class="lbl">Complaint rate (' + o.complaints + ' of ' + o.activeCustomers + ' active customers)</div></div>' +
-      '<div class="card"><div class="big">' + pct(o.abandonedRate) + '</div><div class="lbl">Abandoned rate (' + o.abandonedOrders + ' of ' + o.totalOrders + ' orders)</div></div>';
+      '<div class="card">' +
+        '<div class="card-icon" style="background:rgba(27,42,74,0.09);color:#1b2a4a;">' +
+          '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>' +
+        '</div>' +
+        '<div class="lbl">Upsell success</div><div class="big">' + pct(o.upsellSuccessRate) + '</div>' +
+        '<div class="muted">' + o.upsellAccepted + ' of ' + o.upsellOffered + ' offered</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-icon" style="background:rgba(216,69,47,0.11);color:#d8452f;">' +
+          '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>' +
+        '</div>' +
+        '<div class="lbl">Complaint rate</div><div class="big">' + pct(o.complaintRate) + '</div>' +
+        '<div class="muted">' + o.complaints + ' of ' + o.activeCustomers + ' active customers</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-icon" style="background:rgba(184,112,15,0.12);color:#b4700f;">' +
+          '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>' +
+        '</div>' +
+        '<div class="lbl">Abandoned rate</div><div class="big">' + pct(o.abandonedRate) + '</div>' +
+        '<div class="muted">' + o.abandonedOrders + ' of ' + o.totalOrders + ' orders</div>' +
+      '</div>';
 
     // "I want to see charts, graph, pie, etc." (Chidera, 2026-09-24) --
     // upsell accepted/missed as a pie is the one number here that's
