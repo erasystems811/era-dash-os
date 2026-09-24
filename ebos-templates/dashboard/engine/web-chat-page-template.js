@@ -40,6 +40,11 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   .avatar{width:36px;height:36px;border-radius:50%;background:var(--accent);flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:#fff;${avatarStyle}}
   header .name{font-size:16px;font-weight:600}
   header .status{font-size:12.5px;color:var(--text2)}
+  /* Chidera, 2026-09-24: "under the restaurant name, under should have an
+     imprint smaller writing Powered by ERA Systems for my branding." A
+     deliberately tiny, muted imprint -- ERA's own attribution, never
+     competing with the business's own name/status above it. */
+  header .powered-by{font-size:10px;color:var(--text2);opacity:.55;letter-spacing:.3px;margin-top:1px}
   #scroll{flex:1;overflow-y:auto;padding:14px 10px;background-color:var(--bg);background-image:radial-gradient(rgba(255,255,255,.035) 1px, transparent 1px);background-size:22px 22px}
   /* Chidera, 2026-09-24: "let the webchat notification of received pop as
      a banner... paystack leaves it loading there without making it clear
@@ -138,7 +143,7 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   <header>
     <div class="back">&#8249;</div>
     <div class="avatar">${escapeHtml((businessName || '?').slice(0, 1).toUpperCase())}</div>
-    <div><div class="name">${escapeHtml(businessName || 'Order')}</div><div class="status">online</div></div>
+    <div><div class="name">${escapeHtml(businessName || 'Order')}</div><div class="status">online</div><div class="powered-by">Powered by ERA Systems</div></div>
   </header>
   <div id="scroll"></div>
   <div id="composer">

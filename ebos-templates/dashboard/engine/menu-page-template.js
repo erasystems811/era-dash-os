@@ -110,6 +110,11 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
   .mtop.photo{padding:38px 16px 12px;min-height:120px;display:flex;flex-direction:column;justify-content:flex-end}
   .mtop .nm{font-family:"Fraunces",serif;font-size:19px;font-weight:700;line-height:1}
   .mtop .mt{font-size:11.5px;color:#B3A597;margin-top:3px}
+  /* Chidera, 2026-09-24: "under the restaurant name, under should have an
+     imprint smaller writing Powered by ERA Systems for my branding." A
+     deliberately tiny, dimmer imprint -- ERA's own attribution, never
+     competing with the business's own name/subtitle above it. */
+  .mtop .pb{font-size:9.5px;color:#B3A597;opacity:.6;letter-spacing:.3px;margin-top:2px}
   .scroll{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain}
   .cats{position:sticky;top:0;background:#fff;display:flex;gap:7px;padding:11px 14px;overflow-x:auto;border-bottom:1px solid var(--line);z-index:3;-webkit-overflow-scrolling:touch}
   .cats::-webkit-scrollbar{display:none}
@@ -170,7 +175,7 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
   .primaryBtn{width:100%;padding:14px;border-radius:10px;border:0;background:var(--ink);color:#fff;font-family:inherit;font-size:15.5px;font-weight:600;touch-action:manipulation}
 </style></head>
 <body>
-<div class="mtop${coverPhotoVersion ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div></div>
+<div class="mtop${coverPhotoVersion ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div><div class="pb">Powered by ERA Systems</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
   <div id="sec" class="sec"></div>
