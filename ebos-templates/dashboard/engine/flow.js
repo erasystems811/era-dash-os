@@ -106,6 +106,26 @@ async function logMessage({ customerId, direction, channel, sender, body, trigge
   if (direction === 'outbound' && channel === 'whatsapp') {
     await pool.query(`insert into whatsapp_send_log default values`);
   }
+  // Chidera, 2026-09-25: "for my dashboard the upsell and all, even though
+  // a conversation is deleted it should keep calculating that, it shouldnt
+  // delete or reduce the rate." Same reasoning as whatsapp_send_log above,
+  // generalized -- see business_metrics_log's own migration comment
+  // (0064) for why order/upsell/abandoned metrics are logged by a
+  // database trigger instead of here, while this one (a customer's first
+  // inbound message of the calendar month) is decided in exactly this one
+  // place, so it just logs directly.
+  if (direction === 'inbound') {
+    const { rows: monthRows } = await pool.query(
+      `select count(*) as count from message where customer_id = $1 and direction = 'inbound'
+         and date_trunc('month', created_at) = date_trunc('month', now())`,
+      [customerId]
+    );
+    if (Number(monthRows[0].count) === 1) await logMetric('active_customer');
+  }
+}
+
+async function logMetric(metric) {
+  await pool.query(`insert into business_metrics_log (metric) values ($1)`, [metric]);
 }
 
 // Instagram's send response carries the new message's own id (message_id).
@@ -4276,6 +4296,10 @@ async function handlePendingBatch(customer, text) {
   }
   if (intent === 'complaint') {
     await handover(customer, 'Customer message classified as a complaint');
+    // See business_metrics_log's own migration (0064) -- permanent, so a
+    // later conversation delete can't retroactively un-count this month's
+    // complaint rate.
+    await logMetric('complaint');
     return;
   }
   if (intent === 'greeting') {

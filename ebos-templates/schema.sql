@@ -984,6 +984,68 @@ create table if not exists whatsapp_send_log (
 );
 create index if not exists whatsapp_send_log_created_at_idx on whatsapp_send_log (created_at);
 
+-- migrations/0064_business_metrics_log.sql -- Chidera, 2026-09-25: "for my
+-- dashboard the upsell and all, even though a conversation is deleted it
+-- should keep calculating that, it shouldnt delete or reduce the rate."
+-- Same shape as whatsapp_send_log above, generalized to every other My
+-- Dashboard stat -- see that migration's own comment for the full story
+-- and why order/upsell/abandoned metrics are logged by a trigger on
+-- "order" itself instead of a JS call site.
+create table if not exists business_metrics_log (
+  id uuid primary key default gen_random_uuid(),
+  metric text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists business_metrics_log_metric_created_at_idx on business_metrics_log (metric, created_at);
+
+create or replace function log_order_metrics() returns trigger as $$
+declare
+  offered_key text;
+  matched boolean;
+begin
+  if tg_op = 'INSERT' then
+    insert into business_metrics_log (metric, created_at) values ('order_total', new.created_at);
+    return new;
+  end if;
+
+  if new.status = 'completed' and old.status is distinct from 'completed' then
+    if new.upsell_offered is not null and array_length(new.upsell_offered, 1) > 0 then
+      insert into business_metrics_log (metric, created_at) values ('upsell_offered', new.created_at);
+      offered_key := new.upsell_offered[array_upper(new.upsell_offered, 1)];
+      select exists (
+        select 1 from order_item oi
+        join product p on p.id = oi.product_id
+        where oi.order_id = new.id
+          and (
+            (offered_key = 'drink' and (p.category ilike '%drink%' or p.category ilike '%beverage%' or p.category ilike '%juice%' or p.category ilike '%water%'))
+            or (offered_key = 'protein' and (p.category ilike '%protein%' or p.category ilike '%meat%'))
+            or (offered_key = 'snack' and (p.category ilike '%snack%' or p.category ilike '%small chop%' or p.category ilike '%appetiser%' or p.category ilike '%appetizer%' or p.category ilike '%starter%'))
+          )
+      ) into matched;
+      if matched then
+        insert into business_metrics_log (metric, created_at) values ('upsell_accepted', new.created_at);
+      end if;
+    end if;
+  end if;
+
+  if new.status = 'cancelled' and old.status is distinct from 'cancelled' then
+    if not exists (
+      select 1 from message where customer_id = new.customer_id and direction = 'inbound'
+        and created_at > new.updated_at - interval '1 hour' and created_at <= new.updated_at
+    ) then
+      insert into business_metrics_log (metric, created_at) values ('order_abandoned', new.created_at);
+    end if;
+  end if;
+
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists order_metrics_trigger on "order";
+create trigger order_metrics_trigger
+  after insert or update of status on "order"
+  for each row execute function log_order_metrics();
+
 create table if not exists generated_document (
   id uuid primary key default gen_random_uuid(),
   type text not null check (type in ('invoice', 'receipt')),

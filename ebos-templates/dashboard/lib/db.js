@@ -33,6 +33,14 @@ async function createTestPool() {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
   const db = new PGlite({ extensions: { pgcrypto } });
+  // Real production Postgres (docker-compose.yml.template's postgres
+  // service) has no TZ override, so it runs UTC -- PGlite's own default
+  // session timezone otherwise follows the host machine's local zone
+  // (found live, 2026-09-25: a dev machine set to Africa/Lagos made every
+  // date_trunc('month', ...) bucket land in the wrong month here while
+  // being correct in real production), which made local test runs an
+  // unreliable check of month-bucketed queries. Pinned to match production.
+  await db.exec(`set timezone = 'UTC';`);
   const schema = readFileSync(path.join(__dirname, '..', '..', 'schema.sql'), 'utf8');
   await db.exec(schema);
   return {

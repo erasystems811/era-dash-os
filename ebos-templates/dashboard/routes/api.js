@@ -319,11 +319,9 @@ router.get('/monitor/messaging-cost', requireEraAdmin, async (req, res) => {
 // rate... basically all these things that help me study the customers
 // response to the automation". ERA-admin-only, same trust boundary as
 // monitor/summary -- this is Chidera's own cross-business read, not
-// something a business owner's own dashboard exposes. Reuses
-// computeUpsellStats (a hoisted function declaration further down this
-// file, built for customers/stats) rather than a second copy of that
-// match-and-count logic. Must stay above router.use(requireStaffApi)
-// below -- see the comment on pos-sync-config for why.
+// something a business owner's own dashboard exposes. Must stay above
+// router.use(requireStaffApi) below -- see the comment on pos-sync-config
+// for why.
 // Chidera, 2026-09-24: "when i say each month i dont mean last 30 or 90
 // days, i should be able to search a certain month and see the live data
 // that month provided" -- was rolling-window only (?days=N). ?month=YYYY-MM
@@ -333,61 +331,58 @@ router.get('/monitor/messaging-cost', requireEraAdmin, async (req, res) => {
 // all means all-time, not a default 30-day window -- "all my business
 // activity" being the honest default a dashboard titled "My Dashboard"
 // should open on, not an arbitrary recent slice of it.
+// Chidera, 2026-09-25: "for my dashboard the upsell and all, even though a
+// conversation is deleted it should keep calculating that, it shouldnt
+// delete or reduce the rate" -- every number below used to be computed
+// LIVE off "order"/customers/message, all of which DELETE /customers/:id
+// hard-deletes. Reads business_metrics_log instead (see its own migration,
+// 0064_business_metrics_log.sql, for the full story and why it can never
+// shrink from a later conversation delete) -- no more computeUpsellStats
+// (that helper stays as-is for /customers/stats below, a genuinely
+// different, per-business-owner view this fix was never asked to touch).
 router.get('/business-intelligence', requireEraAdmin, async (req, res) => {
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : null;
   const days = req.query.days ? Math.min(Number(req.query.days), 365) : null;
-  const dateWhereSql = month ? `and date_trunc('month', o.created_at) = $1::date` : days ? `and o.created_at >= now() - $1::interval` : '';
+  // $1 is always the metric name (metricCount below) -- the date condition
+  // itself has to reference $2, not $1, to leave that slot free. Relies on
+  // the DB session running UTC (real production's postgres service has no
+  // TZ override, so it does -- lib/db.js's test pool now pins the same for
+  // local PGlite runs, see its own comment for why that had to be fixed
+  // separately).
+  const metricsDateSql = month ? `and date_trunc('month', created_at) = $2::date` : days ? `and created_at >= now() - $2::interval` : '';
   const dateParams = month ? [`${month}-01`] : days ? [`${days} days`] : [];
-  // The three queries below don't share computeUpsellStats' own `o` alias
-  // (customers/message aren't joined to "order" the same way), so each
-  // needs its own copy of the same date condition, scoped to whichever
-  // column that query's own date fact actually lives on.
-  const customerDateSql = month ? `and date_trunc('month', handover_at) = $1::date` : days ? `and handover_at >= now() - $1::interval` : '';
-  const messageDateSql = month ? `and date_trunc('month', created_at) = $1::date` : days ? `and created_at >= now() - $1::interval` : '';
-  const orderDateSql = month ? `and date_trunc('month', created_at) = $1::date` : days ? `and created_at >= now() - $1::interval` : '';
-  const orderDateSqlAliased = month ? `and date_trunc('month', o.created_at) = $1::date` : days ? `and o.created_at >= now() - $1::interval` : '';
 
-  const [upsell, { rows: complaintRows }, { rows: activeCustomerRows }, { rows: abandonedRows }, { rows: totalOrderRows }] = await Promise.all([
-    computeUpsellStats(dateWhereSql, dateParams),
-    // Complaint rate: the exact handover_reason string handleInboundMessage
-    // sets when Claude classifies a message as a complaint (see
-    // handleInboundMessage's own `intent === 'complaint'` branch) --
-    // deliberately not a LIKE match on "complaint" anywhere in the reason,
-    // since a handover a STAFF member typed a free-text reason for could
-    // coincidentally contain that word without being one.
-    pool.query(`select count(*) as count from customers where handover_reason = 'Customer message classified as a complaint' ${customerDateSql}`, dateParams),
-    pool.query(`select count(distinct customer_id) as count from message where direction = 'inbound' ${messageDateSql}`, dateParams),
+  const metricCount = async (metric) => {
+    const { rows } = await pool.query(`select count(*) as count from business_metrics_log where metric = $1 ${metricsDateSql}`, [metric, ...dateParams]);
+    return Number(rows[0].count);
+  };
+
+  const [upsellOffered, upsellAccepted, complaints, activeCustomers, abandonedOrders, totalOrders] = await Promise.all([
+    metricCount('upsell_offered'),
+    metricCount('upsell_accepted'),
+    // Complaint rate: logged (engine/flow.js) at the exact point
+    // handleInboundMessage classifies a message as a complaint --
+    // deliberately not a LIKE match on "complaint" anywhere in a
+    // free-text handover reason, since a staff member's own typed reason
+    // could coincidentally contain that word without being one.
+    metricCount('complaint'),
+    metricCount('active_customer'),
     // Abandoned chat rate: there's no dedicated "why was this cancelled"
-    // column yet (closeStaleOrders' own timeout-sweep and a customer
-    // explicitly saying no both just land on status='cancelled') -- this is
-    // an honest proxy, not exact: a cancelled order whose customer sent
-    // nothing in the hour immediately before the order's own last update.
-    // An explicit cancel is customer-driven and near-instant (their own
-    // message is what causes the update); closeStaleOrders only ever fires
-    // long after the customer already went quiet, so the two shapes are
-    // genuinely distinguishable most of the time even without a real flag.
-    pool.query(
-      `select count(*) as count from "order" o
-       where o.status = 'cancelled' ${orderDateSqlAliased}
-         and not exists (
-           select 1 from message m
-           where m.customer_id = o.customer_id and m.direction = 'inbound'
-             and m.created_at > o.updated_at - interval '1 hour' and m.created_at <= o.updated_at
-         )`,
-      dateParams
-    ),
-    pool.query(`select count(*) as count from "order" where 1 = 1 ${orderDateSql}`, dateParams),
+    // column (closeStaleOrders' own timeout-sweep is the only thing that
+    // ever cancels an order now -- see its own comment) -- this is an
+    // honest proxy, not exact: a cancelled order whose customer sent
+    // nothing in the hour immediately before it went stale. Computed once,
+    // at cancellation time, by business_metrics_log's own trigger.
+    metricCount('order_abandoned'),
+    metricCount('order_total'),
   ]);
-
-  const activeCustomers = Number(activeCustomerRows[0].count);
-  const complaints = Number(complaintRows[0].count);
-  const abandonedOrders = Number(abandonedRows[0].count);
-  const totalOrders = Number(totalOrderRows[0].count);
 
   res.json({
     month,
     days,
-    ...upsell,
+    upsellOffered,
+    upsellAccepted,
+    upsellSuccessRate: upsellOffered > 0 ? Math.round((upsellAccepted / upsellOffered) * 1000) / 10 : null,
     complaints,
     activeCustomers,
     complaintRate: activeCustomers > 0 ? Math.round((complaints / activeCustomers) * 1000) / 10 : null,
@@ -401,93 +396,57 @@ router.get('/business-intelligence', requireEraAdmin, async (req, res) => {
 // data for and see all months in my /my-dashboard" -- the single-month
 // picker above answers "how did September look"; this answers "show me
 // the trend" -- one row per month, not one call per month picked by hand.
-// Upsell can't be a plain SQL group-by like the other three (it needs the
-// same per-order category match computeUpsellStats does in JS, just
-// grouped by month instead of filtered to one window), so this fetches
-// every qualifying order in range once and buckets it here.
+// One grouped query against business_metrics_log instead of five separate
+// live ones plus JS bucketing for upsell -- the per-order category match
+// that used to require is now already baked into each logged row (see
+// 0064_business_metrics_log.sql's trigger), so this just counts.
 router.get('/business-intelligence/history', requireEraAdmin, async (req, res) => {
   const monthsBack = Math.min(Number(req.query.months) || 12, 24);
-  const rangeParams = [`${monthsBack} months`];
 
-  const [{ rows: upsellRows }, { rows: complaintRows }, { rows: activeCustomerRows }, { rows: abandonedRows }, { rows: totalOrderRows }] = await Promise.all([
-    pool.query(
-      `select o.upsell_offered, date_trunc('month', o.created_at) as month,
-         coalesce(array_agg(distinct p.category) filter (where p.category is not null), '{}') as item_categories
-       from "order" o
-       left join order_item oi on oi.order_id = o.id
-       left join product p on p.id = oi.product_id
-       where o.status = 'completed' and o.upsell_offered != '{}'
-         and o.created_at >= date_trunc('month', now()) - $1::interval
-       group by o.id, o.upsell_offered, month`,
-      rangeParams
-    ),
-    pool.query(
-      `select date_trunc('month', handover_at) as month, count(*) as count from customers
-       where handover_reason = 'Customer message classified as a complaint' and handover_at >= date_trunc('month', now()) - $1::interval
-       group by month`,
-      rangeParams
-    ),
-    pool.query(
-      `select date_trunc('month', created_at) as month, count(distinct customer_id) as count from message
-       where direction = 'inbound' and created_at >= date_trunc('month', now()) - $1::interval
-       group by month`,
-      rangeParams
-    ),
-    pool.query(
-      `select date_trunc('month', o.created_at) as month, count(*) as count from "order" o
-       where o.status = 'cancelled' and o.created_at >= date_trunc('month', now()) - $1::interval
-         and not exists (
-           select 1 from message m
-           where m.customer_id = o.customer_id and m.direction = 'inbound'
-             and m.created_at > o.updated_at - interval '1 hour' and m.created_at <= o.updated_at
-         )
-       group by month`,
-      rangeParams
-    ),
-    pool.query(
-      `select date_trunc('month', created_at) as month, count(*) as count from "order"
-       where created_at >= date_trunc('month', now()) - $1::interval
-       group by month`,
-      rangeParams
-    ),
-  ]);
+  const { rows } = await pool.query(
+    `select metric, date_trunc('month', created_at) as month, count(*) as count
+     from business_metrics_log
+     where created_at >= date_trunc('month', now()) - make_interval(months => $1)
+     group by metric, month`,
+    [monthsBack]
+  );
 
   const monthKey = (d) => new Date(d).toISOString().slice(0, 7);
-  const upsellByMonth = {};
-  for (const row of upsellRows) {
+  const byMetric = {};
+  for (const row of rows) {
     const key = monthKey(row.month);
-    if (!upsellByMonth[key]) upsellByMonth[key] = { offered: 0, accepted: 0 };
-    upsellByMonth[key].offered++;
-    const lastKey = row.upsell_offered[row.upsell_offered.length - 1];
-    const group = UPSELL_GROUPS.find((g) => g.key === lastKey);
-    if (group && row.item_categories.some((c) => categoryMatchesGroup(c, group.keywords))) upsellByMonth[key].accepted++;
+    if (!byMetric[row.metric]) byMetric[row.metric] = {};
+    byMetric[row.metric][key] = Number(row.count);
   }
-  const toMap = (rows) => Object.fromEntries(rows.map((r) => [monthKey(r.month), Number(r.count)]));
-  const complaintsByMonth = toMap(complaintRows);
-  const activeByMonth = toMap(activeCustomerRows);
-  const abandonedByMonth = toMap(abandonedRows);
-  const totalByMonth = toMap(totalOrderRows);
 
+  // UTC methods throughout -- has to line up exactly with the query's own
+  // "at time zone 'UTC'" truncation above, or a month label built from
+  // local wall-clock time can point at the wrong bucket whenever the
+  // process's own timezone isn't UTC (production containers have no TZ
+  // set, so this is a no-op there, but sandbox/test-metrics-survive-delete.mjs
+  // caught it immediately against local PGlite/Node, which aren't UTC on
+  // this dev machine).
   const months = [];
   const d = new Date();
-  d.setDate(1);
+  d.setUTCDate(1);
   for (let i = 0; i < monthsBack; i++) {
-    months.unshift(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-    d.setMonth(d.getMonth() - 1);
+    months.unshift(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+    d.setUTCMonth(d.getUTCMonth() - 1);
   }
 
   res.json(
     months.map((m) => {
-      const u = upsellByMonth[m] || { offered: 0, accepted: 0 };
-      const complaints = complaintsByMonth[m] || 0;
-      const activeCustomers = activeByMonth[m] || 0;
-      const abandonedOrders = abandonedByMonth[m] || 0;
-      const totalOrders = totalByMonth[m] || 0;
+      const upsellOffered = byMetric.upsell_offered?.[m] || 0;
+      const upsellAccepted = byMetric.upsell_accepted?.[m] || 0;
+      const complaints = byMetric.complaint?.[m] || 0;
+      const activeCustomers = byMetric.active_customer?.[m] || 0;
+      const abandonedOrders = byMetric.order_abandoned?.[m] || 0;
+      const totalOrders = byMetric.order_total?.[m] || 0;
       return {
         month: m,
-        upsellOffered: u.offered,
-        upsellAccepted: u.accepted,
-        upsellSuccessRate: u.offered > 0 ? Math.round((u.accepted / u.offered) * 1000) / 10 : null,
+        upsellOffered,
+        upsellAccepted,
+        upsellSuccessRate: upsellOffered > 0 ? Math.round((upsellAccepted / upsellOffered) * 1000) / 10 : null,
         complaints,
         activeCustomers,
         complaintRate: activeCustomers > 0 ? Math.round((complaints / activeCustomers) * 1000) / 10 : null,
