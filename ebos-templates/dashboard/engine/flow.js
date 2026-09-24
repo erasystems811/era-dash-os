@@ -3127,7 +3127,20 @@ export async function completePayment(orderId) {
   // staff's own call as they physically prepare/dispatch it, not
   // something the bot decides -- payment succeeding is not the same fact
   // as food being ready.
-  await pool.query(`update "order" set status = 'preparation' where id = $1`, [order.id]);
+  // Chidera, 2026-09-24: "the today dashboard is not really calculating
+  // collected" -- real bug, found tracing it: this function (every
+  // AUTOMATED payment webhook -- Paystack, Monnify, OPay, Moniepoint POS --
+  // routes here) has been "the moment payment is confirmed" since it was
+  // written (see this function's own comment above), but never actually
+  // set payment_status on the order itself. Only the STAFF-facing manual
+  // "Confirm payment received" click (routes/api.js) ever did. Every real,
+  // automated payment was moving the order forward correctly (kanban,
+  // delivery, customer message) while silently leaving payment_status at
+  // its original pending value -- so /orders/stats/today's own "collected"
+  // sum (which filters on payment_status in ('confirmed','accepted'))
+  // never counted a single automated payment, only manually-confirmed
+  // proof-of-payment orders. Same value ('confirmed') the manual path uses.
+  await pool.query(`update "order" set status = 'preparation', payment_status = 'confirmed' where id = $1`, [order.id]);
   await transitionOrder(order, 'fulfilment');
 
   if (order.fulfilment_type === 'delivery') {

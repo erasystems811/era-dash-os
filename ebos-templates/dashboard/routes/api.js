@@ -1056,37 +1056,27 @@ router.post('/orders', requireFullAccessApi, requireEditorApi, async (req, res) 
 // "specific route before :id" convention stays consistent everywhere in
 // this file, after the bulk-import bug that convention exists to prevent.
 router.get('/orders/stats/today', async (req, res) => {
-  const [{ rows: totals }, { rows: answered }, { rows: busiest }] = await Promise.all([
-    // Collected/Average count only orders both placed AND already paid --
-    // there's no dedicated "paid at" timestamp on `order` (updated_at gets
-    // bumped by unrelated activity, like getOpenOrder's staleness touch),
-    // so this is the closest honest proxy: today's placed orders that have
-    // since been paid, not strictly "paid today". Good enough for a
-    // same-day summary card, not meant as an accounting close.
+  const [{ rows: totals }, { rows: busiest }] = await Promise.all([
+    // Collected/Outstanding/Average count only orders both placed AND
+    // already paid -- there's no dedicated "paid at" timestamp on `order`
+    // (updated_at gets bumped by unrelated activity, like getOpenOrder's
+    // staleness touch), so this is the closest honest proxy: today's
+    // placed orders that have since been paid, not strictly "paid today".
+    // Good enough for a same-day summary card, not meant as an accounting
+    // close.
+    // Chidera, 2026-09-24: "there should be an outstanding" -- total is
+    // every today order regardless of payment status; outstanding is
+    // computed below as total minus collected (never counts a cancelled
+    // order's full value as still-owed forever, since a cancelled order's
+    // own total should be excluded from what's actually still expected --
+    // see the where clause below).
     pool.query(
-      `select count(*) as orders, coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as collected
+      `select count(*) as orders,
+              coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as collected,
+              coalesce(sum(total) filter (where status != 'cancelled'), 0) as total_value
        from "order" where created_at >= date_trunc('day', now()) and ($1::uuid is null or branch_id = $1)
          and ($2::text is null or ($2 = 'online' and channel != 'dinein') or ($2 = 'in_house' and channel = 'dinein'))`,
       [req.branchId, req.workArea]
-    ),
-    // "Answered in": for every bot/staff reply sent today, how long since
-    // that same customer's most recent prior inbound message -- i.e. how
-    // long the customer actually waited for that reply. Capped at 1 hour
-    // so a reply to a customer who went quiet for days (picked back up
-    // much later) doesn't skew the average into meaninglessness.
-    // Not branch-filtered -- message has no branch_id (not every message
-    // ties to one order, so there's no clean column to add it to), so this
-    // one stat stays business-wide even inside a single-branch scope view.
-    pool.query(
-      `select avg(extract(epoch from (m.created_at - prior.created_at))) as avg_seconds
-       from message m
-       join lateral (
-         select created_at from message ic
-         where ic.customer_id = m.customer_id and ic.direction = 'inbound' and ic.created_at < m.created_at
-         order by ic.created_at desc limit 1
-       ) prior on true
-       where m.direction = 'outbound' and m.sender in ('bot', 'staff') and m.created_at >= date_trunc('day', now())
-         and m.created_at - prior.created_at < interval '1 hour'`
     ),
     pool.query(
       `select date_trunc('hour', created_at) as hour, count(*) as count
@@ -1099,13 +1089,13 @@ router.get('/orders/stats/today', async (req, res) => {
   const t = totals[0];
   const orders = Number(t.orders);
   const collected = Number(t.collected);
+  const outstanding = Math.max(0, Number(t.total_value) - collected);
   const average = orders > 0 ? Math.round(collected / orders) : 0;
-  const answeredSeconds = answered[0]?.avg_seconds != null ? Math.round(Number(answered[0].avg_seconds)) : null;
   const busiestHour = busiest[0]
     ? { start: busiest[0].hour, count: Number(busiest[0].count) }
     : null;
 
-  res.json({ orders, collected, average, answeredSeconds, busiestHour });
+  res.json({ orders, collected, outstanding, average, busiestHour });
 });
 
 router.get('/orders/:id', async (req, res) => {

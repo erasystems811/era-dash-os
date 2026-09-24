@@ -22,12 +22,6 @@ function naira(amount) {
   return `₦${Number(amount).toLocaleString()}`;
 }
 
-function answeredInText(seconds) {
-  if (seconds == null) return '–';
-  if (seconds < 60) return `${seconds} sec`;
-  return `${Math.round(seconds / 60)} min`;
-}
-
 function busiestHourText(hour) {
   if (!hour) return '–';
   const start = new Date(hour.start);
@@ -527,12 +521,12 @@ export default function Orders() {
               <strong className="mono">{naira(today.collected)}</strong>
             </div>
             <div className="fig">
-              <span>Average</span>
-              <strong className="mono">{naira(today.average)}</strong>
+              <span>Outstanding</span>
+              <strong className="mono">{naira(today.outstanding)}</strong>
             </div>
             <div className="fig">
-              <span>Answered in</span>
-              <strong className="mono">{answeredInText(today.answeredSeconds)}</strong>
+              <span>Average order</span>
+              <strong className="mono">{naira(today.average)}</strong>
             </div>
             <div className="fig wide">
               <span>Busiest hour</span>
