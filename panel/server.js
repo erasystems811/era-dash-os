@@ -1980,18 +1980,32 @@ function myDashboardPage() {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>My Dashboard — ERA Dash OS</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <style>
   * { box-sizing: border-box; overflow-wrap: break-word; word-break: break-word; min-width: 0; }
   html, body { overflow-x: hidden; max-width: 100vw; }
-  body { font-family: sans-serif; max-width: 1300px; margin: 2rem auto; padding: 0 1rem; }
-  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
-  td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 14px; }
-  .muted { color: #666; font-size: 13px; }
-  select, button { padding: 6px; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    max-width: 1300px; margin: 2rem auto; padding: 0 1rem;
+    background: #f6f7f9; color: #1c1f26;
+  }
+  a { color: #2f6feb; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  h3 { font-size: 15px; font-weight: 700; color: #444; margin: 28px 0 10px; text-transform: uppercase; letter-spacing: 0.03em; }
+  table { border-collapse: collapse; width: 100%; margin: 0 0 1rem; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,0.06); }
+  td, th { border-bottom: 1px solid #ecedf1; padding: 9px 12px; text-align: left; font-size: 14px; }
+  th { background: #fafbfc; font-weight: 600; color: #555; }
+  tr:last-child td { border-bottom: none; }
+  .muted { color: #6b7280; font-size: 13px; }
+  select, button { padding: 7px 10px; border-radius: 7px; border: 1px solid #d5d8dd; background: #fff; font-size: 14px; }
+  button { cursor: pointer; }
+  button:hover { background: #f2f3f5; }
   .cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 1rem 0; }
-  .card { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; min-width: 160px; }
-  .card .big { font-size: 26px; font-weight: bold; }
-  .card .lbl { color: #666; font-size: 13px; }
+  .card { background: #fff; border-radius: 10px; padding: 14px 18px; min-width: 170px; box-shadow: 0 1px 2px rgba(16,24,40,0.06); }
+  .card .big { font-size: 28px; font-weight: 700; }
+  .card .lbl { color: #6b7280; font-size: 12.5px; margin-top: 2px; }
+  .chart-card { background: #fff; border-radius: 10px; padding: 16px 18px; margin-bottom: 1rem; box-shadow: 0 1px 2px rgba(16,24,40,0.06); }
+  .chart-wrap { position: relative; }
   .bar { background: #eee; border-radius: 4px; height: 10px; width: 100%; overflow: hidden; }
   .bar-fill { height: 100%; background: #2e7d32; }
   .bar-fill.warn { background: #e65100; }
@@ -2020,7 +2034,14 @@ function myDashboardPage() {
   <h3>Overall (every business combined)</h3>
   <div class="cards" id="biOverallCards"><div class="muted">Loading...</div></div>
 
+  <div class="chart-card">
+    <div class="chart-wrap" style="height:260px;"><canvas id="biPieChart"></canvas></div>
+  </div>
+
   <h3>Per business</h3>
+  <div class="chart-card">
+    <div class="chart-wrap" style="height:320px;"><canvas id="biBarChart"></canvas></div>
+  </div>
   <table>
     <tr><th>Business</th><th>Upsell success</th><th>Complaint rate</th><th>Abandoned rate</th><th>Orders</th></tr>
     <tbody id="biRows"><tr><td colspan="5">Loading...</td></tr></tbody>
@@ -2028,6 +2049,9 @@ function myDashboardPage() {
 
   <h3>WhatsApp messages this month (1000 free, then billable)</h3>
   <p class="muted">Meta's own free allowance -- once a business crosses this, every further outbound message costs real money (~NGN14 each as of Oct 2026 pricing).</p>
+  <div class="chart-card">
+    <div class="chart-wrap" style="height:280px;"><canvas id="biMsgChart"></canvas></div>
+  </div>
   <table>
     <tr><th>Business</th><th>Messages sent</th><th>Of 1000 free</th><th></th></tr>
     <tbody id="biMessageRows"><tr><td colspan="4">Loading...</td></tr></tbody>
@@ -2058,6 +2082,13 @@ function pct(value) {
   return value == null ? '&ndash;' : value + '%';
 }
 
+// One shared instance per canvas -- Chart.js throws "Canvas already in
+// use" if a previous chart on the same element is never destroyed before
+// the next .render() (Window/Refresh/days change all call this again).
+let pieChart = null;
+let barChart = null;
+let msgChart = null;
+
 async function loadBusinessIntelligence() {
   const statusEl = document.getElementById('biStatus');
   const days = document.getElementById('biDays').value;
@@ -2077,6 +2108,44 @@ async function loadBusinessIntelligence() {
       '<div class="card"><div class="big">' + pct(o.complaintRate) + '</div><div class="lbl">Complaint rate (' + o.complaints + ' of ' + o.activeCustomers + ' active customers)</div></div>' +
       '<div class="card"><div class="big">' + pct(o.abandonedRate) + '</div><div class="lbl">Abandoned rate (' + o.abandonedOrders + ' of ' + o.totalOrders + ' orders)</div></div>';
 
+    // "I want to see charts, graph, pie, etc." (Chidera, 2026-09-24) --
+    // upsell accepted/missed as a pie is the one number here that's
+    // naturally a whole made of two parts; complaint/abandoned are rates
+    // against a different base each (active customers, total orders) so
+    // they don't belong in the same pie without misrepresenting it.
+    const upsellMissed = Math.max(0, (o.upsellOffered || 0) - (o.upsellAccepted || 0));
+    if (pieChart) pieChart.destroy();
+    pieChart = new Chart(document.getElementById('biPieChart'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Upsell accepted', 'Upsell offered but missed'],
+        datasets: [{ data: [o.upsellAccepted || 0, upsellMissed], backgroundColor: ['#2e7d32', '#e0e2e7'] }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { title: { display: true, text: 'Upsell offers: accepted vs missed (all businesses)', font: { size: 13 } }, legend: { position: 'bottom' } },
+      },
+    });
+
+    const okBusinesses = bi.businesses.filter((b) => !b.error);
+    if (barChart) barChart.destroy();
+    barChart = new Chart(document.getElementById('biBarChart'), {
+      type: 'bar',
+      data: {
+        labels: okBusinesses.map((b) => b.displayName),
+        datasets: [
+          { label: 'Upsell success %', data: okBusinesses.map((b) => b.upsellSuccessRate ?? 0), backgroundColor: '#2f6feb' },
+          { label: 'Complaint rate %', data: okBusinesses.map((b) => b.complaintRate ?? 0), backgroundColor: '#c62828' },
+          { label: 'Abandoned rate %', data: okBusinesses.map((b) => b.abandonedRate ?? 0), backgroundColor: '#e65100' },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true, ticks: { callback: (v) => v + '%' } } },
+        plugins: { title: { display: true, text: 'Upsell / complaint / abandoned rate, per business', font: { size: 13 } }, legend: { position: 'bottom' } },
+      },
+    });
+
     document.getElementById('biRows').innerHTML = bi.businesses.map((b) => {
       if (b.error) return '<tr><td>' + escBi(b.displayName) + '</td><td colspan="4">Error: ' + escBi(b.error) + '</td></tr>';
       return '<tr>' +
@@ -2087,6 +2156,28 @@ async function loadBusinessIntelligence() {
         '<td>' + b.totalOrders + '</td>' +
         '</tr>';
     }).join('') || '<tr><td colspan="5">No EBOS businesses yet.</td></tr>';
+
+    const okCost = cost.filter((c) => !c.error);
+    const barColors = okCost.map((c) => {
+      const ratio = Math.min(1, (c.outboundWhatsapp || 0) / (c.freeAllowance || 1000));
+      return ratio >= 0.9 ? '#c62828' : ratio >= 0.7 ? '#e65100' : '#2e7d32';
+    });
+    if (msgChart) msgChart.destroy();
+    msgChart = new Chart(document.getElementById('biMsgChart'), {
+      type: 'bar',
+      data: {
+        labels: okCost.map((c) => c.displayName),
+        datasets: [{ label: 'WhatsApp messages sent this month', data: okCost.map((c) => c.outboundWhatsapp || 0), backgroundColor: barColors }],
+      },
+      options: {
+        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+        plugins: {
+          title: { display: true, text: 'WhatsApp messages sent this month (green < 70% of free allowance, orange < 90%, red at/over)', font: { size: 13 } },
+          legend: { display: false },
+        },
+        scales: { x: { beginAtZero: true } },
+      },
+    });
 
     document.getElementById('biMessageRows').innerHTML = cost.map((c) => {
       if (c.error) return '<tr><td>' + escBi(c.displayName) + '</td><td colspan="3">Error: ' + escBi(c.error) + '</td></tr>';
