@@ -1501,4 +1501,15 @@ body.printing-docket .printDocket {
   padding: 4px 0;
   margin: 6px 0 8px;
 }
+/* Chidera, 2026-09-24: "yeah add it to the docket too" -- same subtle
+   mark documents.js's invoice footer already has (.era-mark there), same
+   restraint here -- small, muted, last thing on the ticket, never
+   competing with the actual order content a kitchen needs to read fast. */
+.printDocket .docketEraMark {
+  text-align: center;
+  font-size: 9px;
+  color: #888;
+  letter-spacing: 0.04em;
+  margin-top: 10px;
+}
 

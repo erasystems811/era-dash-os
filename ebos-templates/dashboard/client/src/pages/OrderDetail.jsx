@@ -433,6 +433,7 @@ export default function OrderDetail() {
             ))}
           </>
         )}
+        <div className="docketEraMark">Powered by ERA Systems</div>
       </div>
     </div>
   );
