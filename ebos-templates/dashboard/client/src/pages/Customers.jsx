@@ -7,9 +7,18 @@ function formatMoney(n) {
   return `NGN ${Number(n || 0).toLocaleString()}`;
 }
 
+// Chidera, 2026-09-24: "birthday is showing as invalid date." Root cause,
+// confirmed live: customers.birthday is a Postgres `date` column, which
+// pg's default driver hands back as a real JS Date object, not a plain
+// string -- res.json() then serialises it as a FULL ISO timestamp
+// ("2026-09-21T00:00:00.000Z"), not "2026-09-21". Splitting that on '-'
+// grabbed "21T00:00:00.000Z" as the day, Number()'d it to NaN, and built
+// an Invalid Date. Slicing to the first 10 characters first handles both
+// shapes -- a plain date string is already 10 characters, so this is a
+// no-op for it either way.
 function formatBirthday(d) {
   if (!d) return '';
-  const [y, m, day] = d.split('-');
+  const [y, m, day] = String(d).slice(0, 10).split('-');
   const date = new Date(Number(y), Number(m) - 1, Number(day));
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
