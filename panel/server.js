@@ -2048,7 +2048,7 @@ function myDashboardPage() {
   <div style="margin:6px 0;">
     <label style="display:inline;">Window: </label>
     <select id="biMonth" style="width:auto;display:inline;" onchange="loadBusinessIntelligence()"></select>
-    <button type="button" style="margin:0 0 0 8px;" onclick="loadBusinessIntelligence()">Refresh</button>
+    <button type="button" style="margin:0 0 0 8px;" onclick="loadHistoryAndMonths().then(loadBusinessIntelligence)">Refresh</button>
     <span id="biStatus" class="muted" style="margin-left:8px;"></span>
   </div>
 
@@ -2066,6 +2066,13 @@ function myDashboardPage() {
   <table>
     <tr><th>Business</th><th>Upsell success</th><th>Complaint rate</th><th>Abandoned rate</th><th>Orders</th></tr>
     <tbody id="biRows"><tr><td colspan="5">Loading...</td></tr></tbody>
+  </table>
+
+  <h3>Month by month (every business combined)</h3>
+  <p class="muted">Only months the bot actually has data for -- not a fixed 12-month range.</p>
+  <table>
+    <tr><th>Month</th><th>Upsell success</th><th>Complaint rate</th><th>Abandoned rate</th><th>Orders</th></tr>
+    <tbody id="biHistoryRows"><tr><td colspan="5">Loading...</td></tr></tbody>
   </table>
 
   <h3>WhatsApp messages this month (1000 free, then billable)</h3>
@@ -2103,26 +2110,45 @@ function pct(value) {
   return value == null ? '&ndash;' : value + '%';
 }
 
+function monthLabel(m) {
+  const [y, mo] = m.split('-').map(Number);
+  return new Date(y, mo - 1, 1).toLocaleString('en-GB', { month: 'long', year: 'numeric' });
+}
+
 // Chidera, 2026-09-24: "when i say each month i dont mean last 30 or 90
 // days, i should be able to search a certain month and see the live data
-// that month provided" -- was a fixed 7/30/90-day rolling window, same
-// month picker Finance.jsx already has (All time + the last 12 real
-// calendar months), for the same reason: "last 30 days" drifts every day
-// and never lines up with how anyone actually reviews a month's numbers.
-function populateMonthSelect() {
+// that month provided" -- was a fixed 7/30/90-day rolling window.
+// Follow-up, same day: "currently there shouldnt be months the bot has no
+// data on only month the bot has data on, why am i seeing 2025 was this
+// existing then?" -- the first version blindly listed the last 12
+// calendar months regardless of whether the bot existed yet. Now driven
+// by the same history fetch the trend table below uses: only a month
+// with at least one real order in it (any business) gets listed, "All
+// time" always included since that's never empty as long as anything
+// exists at all.
+let historyData = [];
+async function loadHistoryAndMonths() {
+  historyData = await fetch('/api/ebos/business-intelligence-history?months=24').then((r) => r.json());
+  const realMonths = historyData.filter((h) => h.totalOrders > 0);
+
   const sel = document.getElementById('biMonth');
   const opts = ['<option value="">All time</option>'];
-  const d = new Date();
-  d.setDate(1);
-  for (let i = 0; i < 12; i++) {
-    const value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
-    const label = d.toLocaleString('en-GB', { month: 'long', year: 'numeric' });
-    opts.push('<option value="' + value + '">' + label + '</option>');
-    d.setMonth(d.getMonth() - 1);
+  for (const h of realMonths.slice().reverse()) {
+    opts.push('<option value="' + h.month + '">' + monthLabel(h.month) + '</option>');
   }
   sel.innerHTML = opts.join('');
+
+  document.getElementById('biHistoryRows').innerHTML =
+    realMonths.map((h) =>
+      '<tr>' +
+        '<td>' + monthLabel(h.month) + '</td>' +
+        '<td>' + pct(h.upsellSuccessRate) + ' (' + h.upsellAccepted + '/' + h.upsellOffered + ')</td>' +
+        '<td>' + pct(h.complaintRate) + ' (' + h.complaints + ')</td>' +
+        '<td>' + pct(h.abandonedRate) + ' (' + h.abandonedOrders + ')</td>' +
+        '<td>' + h.totalOrders + '</td>' +
+      '</tr>'
+    ).join('') || '<tr><td colspan="5">No months with real data yet.</td></tr>';
 }
-populateMonthSelect();
 
 // One shared instance per canvas -- Chart.js throws "Canvas already in
 // use" if a previous chart on the same element is never destroyed before
@@ -2285,7 +2311,10 @@ async function loadBusinessIntelligence() {
   }
 }
 
-loadBusinessIntelligence();
+loadHistoryAndMonths().then(loadBusinessIntelligence).catch((err) => {
+  console.error('Failed to load month history:', err);
+  loadBusinessIntelligence();
+});
 </script>
 </body>
 </html>`;
@@ -2406,6 +2435,53 @@ app.get('/api/ebos/business-intelligence', async (req, res) => {
     abandonedRate: totalOrders > 0 ? Math.round((abandonedOrders / totalOrders) * 1000) / 10 : null,
   };
   res.json({ overall, businesses: results });
+});
+
+// Chidera, 2026-09-24: "being able to search a month that the system has
+// data for and see all months in my /my-dashboard" -- the trend view: one
+// row per month, every business combined, instead of picking one month at
+// a time. Pulls each business's own new GET /api/business-intelligence/history
+// (already grouped by month there) and sums across businesses per month --
+// every business's history array covers the exact same 12 months in the
+// same order (both ends compute "the last N calendar months from now"),
+// so summing by array index is safe without re-matching on the month string.
+app.get('/api/ebos/business-intelligence-history', async (req, res) => {
+  const months = Math.min(Number(req.query.months) || 12, 24);
+  const ebosClients = getEbosClients(loadRegistry());
+  const perBusiness = await Promise.all(
+    ebosClients.map(async (c) => {
+      try {
+        return { client: c.name, history: await callBusinessApi(c, `/api/business-intelligence/history?months=${months}`) };
+      } catch (err) {
+        return { client: c.name, history: null, error: err.message };
+      }
+    })
+  );
+  const ok = perBusiness.filter((b) => b.history);
+  const monthKeys = ok.length ? ok[0].history.map((h) => h.month) : [];
+  const combined = monthKeys.map((month, i) => {
+    const rows = ok.map((b) => b.history[i]);
+    const sum = (key) => rows.reduce((total, r) => total + (r[key] || 0), 0);
+    const upsellOffered = sum('upsellOffered');
+    const upsellAccepted = sum('upsellAccepted');
+    const activeCustomers = sum('activeCustomers');
+    const complaints = sum('complaints');
+    const totalOrders = sum('totalOrders');
+    const abandonedOrders = sum('abandonedOrders');
+    return {
+      month,
+      upsellOffered,
+      upsellAccepted,
+      upsellSuccessRate: upsellOffered > 0 ? Math.round((upsellAccepted / upsellOffered) * 1000) / 10 : null,
+      complaints,
+      activeCustomers,
+      complaintRate: activeCustomers > 0 ? Math.round((complaints / activeCustomers) * 1000) / 10 : null,
+      abandonedOrders,
+      totalOrders,
+      abandonedRate: totalOrders > 0 ? Math.round((abandonedOrders / totalOrders) * 1000) / 10 : null,
+    };
+  });
+  res.json(combined);
 });
 
 // Bot Monitoring's raw-content half -- merges every business's recent

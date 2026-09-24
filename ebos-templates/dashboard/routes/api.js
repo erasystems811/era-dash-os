@@ -397,6 +397,108 @@ router.get('/business-intelligence', requireEraAdmin, async (req, res) => {
   });
 });
 
+// Chidera, 2026-09-24: "being able to search a month that the system has
+// data for and see all months in my /my-dashboard" -- the single-month
+// picker above answers "how did September look"; this answers "show me
+// the trend" -- one row per month, not one call per month picked by hand.
+// Upsell can't be a plain SQL group-by like the other three (it needs the
+// same per-order category match computeUpsellStats does in JS, just
+// grouped by month instead of filtered to one window), so this fetches
+// every qualifying order in range once and buckets it here.
+router.get('/business-intelligence/history', requireEraAdmin, async (req, res) => {
+  const monthsBack = Math.min(Number(req.query.months) || 12, 24);
+  const rangeParams = [`${monthsBack} months`];
+
+  const [{ rows: upsellRows }, { rows: complaintRows }, { rows: activeCustomerRows }, { rows: abandonedRows }, { rows: totalOrderRows }] = await Promise.all([
+    pool.query(
+      `select o.upsell_offered, date_trunc('month', o.created_at) as month,
+         coalesce(array_agg(distinct p.category) filter (where p.category is not null), '{}') as item_categories
+       from "order" o
+       left join order_item oi on oi.order_id = o.id
+       left join product p on p.id = oi.product_id
+       where o.status = 'completed' and o.upsell_offered != '{}'
+         and o.created_at >= date_trunc('month', now()) - $1::interval
+       group by o.id, o.upsell_offered, month`,
+      rangeParams
+    ),
+    pool.query(
+      `select date_trunc('month', handover_at) as month, count(*) as count from customers
+       where handover_reason = 'Customer message classified as a complaint' and handover_at >= date_trunc('month', now()) - $1::interval
+       group by month`,
+      rangeParams
+    ),
+    pool.query(
+      `select date_trunc('month', created_at) as month, count(distinct customer_id) as count from message
+       where direction = 'inbound' and created_at >= date_trunc('month', now()) - $1::interval
+       group by month`,
+      rangeParams
+    ),
+    pool.query(
+      `select date_trunc('month', o.created_at) as month, count(*) as count from "order" o
+       where o.status = 'cancelled' and o.created_at >= date_trunc('month', now()) - $1::interval
+         and not exists (
+           select 1 from message m
+           where m.customer_id = o.customer_id and m.direction = 'inbound'
+             and m.created_at > o.updated_at - interval '1 hour' and m.created_at <= o.updated_at
+         )
+       group by month`,
+      rangeParams
+    ),
+    pool.query(
+      `select date_trunc('month', created_at) as month, count(*) as count from "order"
+       where created_at >= date_trunc('month', now()) - $1::interval
+       group by month`,
+      rangeParams
+    ),
+  ]);
+
+  const monthKey = (d) => new Date(d).toISOString().slice(0, 7);
+  const upsellByMonth = {};
+  for (const row of upsellRows) {
+    const key = monthKey(row.month);
+    if (!upsellByMonth[key]) upsellByMonth[key] = { offered: 0, accepted: 0 };
+    upsellByMonth[key].offered++;
+    const lastKey = row.upsell_offered[row.upsell_offered.length - 1];
+    const group = UPSELL_GROUPS.find((g) => g.key === lastKey);
+    if (group && row.item_categories.some((c) => categoryMatchesGroup(c, group.keywords))) upsellByMonth[key].accepted++;
+  }
+  const toMap = (rows) => Object.fromEntries(rows.map((r) => [monthKey(r.month), Number(r.count)]));
+  const complaintsByMonth = toMap(complaintRows);
+  const activeByMonth = toMap(activeCustomerRows);
+  const abandonedByMonth = toMap(abandonedRows);
+  const totalByMonth = toMap(totalOrderRows);
+
+  const months = [];
+  const d = new Date();
+  d.setDate(1);
+  for (let i = 0; i < monthsBack; i++) {
+    months.unshift(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+    d.setMonth(d.getMonth() - 1);
+  }
+
+  res.json(
+    months.map((m) => {
+      const u = upsellByMonth[m] || { offered: 0, accepted: 0 };
+      const complaints = complaintsByMonth[m] || 0;
+      const activeCustomers = activeByMonth[m] || 0;
+      const abandonedOrders = abandonedByMonth[m] || 0;
+      const totalOrders = totalByMonth[m] || 0;
+      return {
+        month: m,
+        upsellOffered: u.offered,
+        upsellAccepted: u.accepted,
+        upsellSuccessRate: u.offered > 0 ? Math.round((u.accepted / u.offered) * 1000) / 10 : null,
+        complaints,
+        activeCustomers,
+        complaintRate: activeCustomers > 0 ? Math.round((complaints / activeCustomers) * 1000) / 10 : null,
+        abandonedOrders,
+        totalOrders,
+        abandonedRate: totalOrders > 0 ? Math.round((abandonedOrders / totalOrders) * 1000) / 10 : null,
+      };
+    })
+  );
+});
+
 // Raw-content half of the same panel -- deliberately not gated behind any
 // "flag" logic. The point Chidera asked for is to actually watch real
 // conversations across every business from one place, not wait for the
