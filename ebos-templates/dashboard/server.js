@@ -26,7 +26,7 @@ import { router as paystackWebhook } from './engine/webhook-paystack.js';
 import { router as moniepointWebhook } from './engine/webhook-moniepoint.js';
 import { router as monnifyWebhook } from './engine/webhook-monnify.js';
 import { router as opayWebhook } from './engine/webhook-opay.js';
-import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications } from './engine/flow.js';
+import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications, refreshExpiringPaymentLinks } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -200,6 +200,15 @@ app.listen(port, () => {
   setInterval(() => {
     sweepOfferEscalation().catch((err) => console.error('sweepOfferEscalation failed:', err));
   }, 15_000);
+  // Chidera, real live report: "that dynamic monify account is showing
+  // me as invalid and unavailable"... "i cant text you, it should be
+  // auto regenerated" -- see refreshExpiringPaymentLinks' own comment for
+  // the full story. 2 minutes, not closeStaleOrders' hourly tick -- the
+  // whole point is catching a link before its ~25-minute estimated
+  // window runs out, which a coarser check would miss most of the time.
+  setInterval(() => {
+    refreshExpiringPaymentLinks().catch((err) => console.error('refreshExpiringPaymentLinks failed:', err));
+  }, 2 * 60 * 1000);
   // "Let them know immediately they open" (Chidera, 2026-09-16) -- a minute
   // is frequent enough that nobody notices the delay, and the sweep itself
   // is a no-op read whenever no branch has both opening_hours set and a

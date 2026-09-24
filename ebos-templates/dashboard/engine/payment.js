@@ -109,7 +109,17 @@ export async function initializeOrderPaymentPaystackTransaction({ orderPayment, 
 export async function initializeMonnifyTransaction({ order, customer, amount }) {
   const result = await callMonnifyCheckoutLink({ customer, amount, referencePrefix: order.reference });
   if (!result) return null;
-  await pool.query('update "order" set payment_reference = $1, payment_link_url = $2 where id = $3', [result.paymentReference, result.checkoutUrl, order.id]);
+  // monnify_account_expires_at -- reused from the old dynamic-account
+  // flow's own column (never dropped), now driving engine/flow.js's
+  // refreshExpiringPaymentLinks sweep instead of a customer-facing
+  // countdown. See callMonnifyCheckoutLink's own comment for where the
+  // 25-minute estimate comes from.
+  await pool.query('update "order" set payment_reference = $1, payment_link_url = $2, monnify_account_expires_at = $3 where id = $4', [
+    result.paymentReference,
+    result.checkoutUrl,
+    result.expiresAt,
+    order.id,
+  ]);
   return result.checkoutUrl;
 }
 

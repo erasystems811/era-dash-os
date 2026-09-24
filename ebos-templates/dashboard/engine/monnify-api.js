@@ -88,7 +88,22 @@ export async function callMonnifyCheckoutLink({ customer, amount, referencePrefi
   const checkoutUrl = initData?.responseBody?.checkoutUrl;
   if (!checkoutUrl) throw new Error('Monnify init-transaction succeeded but returned no checkoutUrl.');
 
-  return { paymentReference, checkoutUrl };
+  // Chidera, real live report: "that dynamic monify account is showing me
+  // as invalid and unavailable" -- confirmed live, the checkout session
+  // itself had genuinely expired (real, on Monnify's own end). Follow-up:
+  // "i cant text you, it should be auto regenerated" -- also confirmed
+  // live that Monnify's own "Try again" button on an expired session just
+  // loops back to the same dead transaction, no self-service fix exists
+  // on their end either. init-transaction's own response doesn't return a
+  // precise expiry for the CHECKOUT PAGE the way the old bank-transfer/
+  // init-payment call did for its account (accountDurationSeconds, 2400s
+  // max) -- 25 minutes is a conservative estimate inside that documented
+  // ceiling, not a guess pulled from nowhere. engine/flow.js's new
+  // refreshExpiringPaymentLinks sweep reads this back to proactively
+  // regenerate a fresh link before the customer would ever hit "expired"
+  // at all, no message from them required.
+  const expiresAt = new Date(Date.now() + 25 * 60 * 1000);
+  return { paymentReference, checkoutUrl, expiresAt };
 }
 
 // Header name and algorithm confirmed directly against Monnify's own docs:

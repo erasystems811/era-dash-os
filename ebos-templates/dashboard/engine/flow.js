@@ -506,6 +506,46 @@ async function wasSentFeedbackRequestFor(orderId) {
 // 'cancelled' terminal state rather than adding a new one -- everywhere
 // that already excludes cancelled orders (getOpenOrder, the panel's order
 // list, etc.) handles this correctly with no other change needed.
+// Chidera, real live report: "that dynamic monify account is showing me
+// as invalid and unavailable" -- confirmed live: the checkout session
+// Monnify sent back had genuinely expired, a real time limit on their own
+// end. Follow-up: "i cant text you, it should be auto regenerated" --
+// also confirmed live that Monnify's own "Try again" button on an expired
+// session doesn't actually work either, it just loops back to the same
+// dead transaction. The only real fix is OUR OWN system issuing a
+// genuinely new one, proactively, before the customer would ever see
+// "expired" at all.
+// monnify_account_expires_at naturally self-limits how often any one
+// order re-matches here: sendPaymentInstructions below regenerates a
+// fresh ~25-minute link (monnify-api.js's callMonnifyCheckoutLink) every
+// time it runs, which pushes this same order's own expires_at back out
+// past the lead window immediately -- so a customer who's still mid-
+// checkout never sees "expired," and one who's genuinely gone quiet just
+// keeps getting a fresh link roughly every 20 minutes until
+// closeStaleOrders' own 24h sweep below eventually cancels the order
+// outright.
+const MONNIFY_LINK_REFRESH_LEAD_MINUTES = 5;
+export async function refreshExpiringPaymentLinks() {
+  const { rows: orders } = await pool.query(
+    `select * from "order"
+     where engine_state = 'confirm_payment'
+       and payment_status not in ('confirmed', 'accepted')
+       and monnify_account_expires_at is not null
+       and monnify_account_expires_at < now() + make_interval(mins => $1)`,
+    [MONNIFY_LINK_REFRESH_LEAD_MINUTES]
+  );
+  for (const order of orders) {
+    try {
+      const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+      const customer = custRows[0];
+      if (customer) await sendPaymentInstructions(customer, order);
+    } catch (err) {
+      console.error(`Failed to refresh expiring Monnify link for order ${order.id}:`, err.message);
+    }
+  }
+  if (orders.length) console.log(`Refreshed ${orders.length} expiring Monnify payment link(s).`);
+}
+
 const STALE_ORDER_HOURS = 24;
 export async function closeStaleOrders() {
   const { rowCount } = await pool.query(
@@ -2161,16 +2201,18 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
         // "that dynamic monify account is showing me as invalid and
         // unavailable" -- confirmed live (opened the actual link Monnify
         // sent back): the checkout session itself had genuinely expired,
-        // a real, expected time limit on Monnify's own end (same shape
-        // the old account flow had, just never surfaced to the customer
-        // for THIS flow). Nothing was broken -- a fresh order/nudge
-        // already gets a brand new link automatically (sendPaymentInstructions
-        // calls buildPayLine fresh every time it runs) -- the gap was
-        // purely that nobody ever told the customer the link was time-
-        // limited in the first place, so an old one going stale read as
-        // "broken" instead of "just ask again."
+        // a real, expected time limit on Monnify's own end. Follow-up:
+        // "i cant text you, it should be auto regenerated" -- also
+        // confirmed live that Monnify's own "Try again" button on an
+        // expired session doesn't work either, just loops back to the
+        // same dead transaction. Fixed properly now:
+        // refreshExpiringPaymentLinks (this file, called from server.js
+        // every 2 minutes) proactively regenerates a fresh link before
+        // the customer would ever see "expired" at all -- no reply from
+        // them needed, so this text doesn't need to explain a manual
+        // workaround that no longer exists.
         return {
-          payLine: `Please pay NGN ${amountLabel} using the button below.\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof. If the link's been open a while and stops working, just message me and I'll send a fresh one.`,
+          payLine: `Please pay NGN ${amountLabel} using the button below.\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
           needsHandover: false,
           paymentUrl: url,
         };
