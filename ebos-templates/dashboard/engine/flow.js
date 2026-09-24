@@ -4576,11 +4576,20 @@ export async function handlePendingBatch(customer, text) {
   if (ackType === 'ack') {
     const openOrder = await resolveCustomerOrder(customer);
     if (!openOrder) return;
-  } else if (ackType === 'thanks') {
-    await reply(customer, `You're welcome!`, 'thanks_ack');
-    return;
-  } else if (ackType === 'decline') {
-    await reply(customer, `Okay!`, 'decline_ack');
+  } else if (ackType === 'thanks' || ackType === 'decline') {
+    // Chidera, 2026-09-24: "any outbound text should redirect customer to
+    // the web chat" -- even a plain "You're welcome!"/"Okay!" counts.
+    // Website customers (already free, already on the page) keep the
+    // instant real reply; a real WhatsApp customer gets the same
+    // redirect-once-then-silent gate as everything else below.
+    if (customer.channel === 'whatsapp') {
+      if (await needsChatRedirect(customer)) {
+        await sendStartOrderLink(customer);
+        await markChatRedirectSent(customer.id);
+      }
+      return;
+    }
+    await reply(customer, ackType === 'thanks' ? `You're welcome!` : `Okay!`, `${ackType}_ack`);
     return;
   }
 
@@ -4619,43 +4628,31 @@ export async function handlePendingBatch(customer, text) {
 
   const order = await resolveCustomerOrder(customer);
 
-  if (order) {
-    // Chidera, 2026-09-23: "if a customer message they send them the link
-    // again with chat here so they can keep chatting there... thats the
-    // only 3rd acceptable text that can go through normal route." A real
-    // WhatsApp text for an order already in progress used to go straight
-    // to detectWantsHuman/dispatch() below, which can both burn a real AI
-    // call AND reply with anything (a clarifying question, a price
-    // confirmation, an upsell offer, ...) -- unbounded real message count
-    // for anyone who drifts back to WhatsApp mid-order instead of using
-    // the free chat page. Redirected to the SAME chat page instead
-    // (ensureMenuToken is the same persistent token, so it's their actual
-    // history, not a fresh one) -- one short real message, same shape as
-    // the very first contact, no AI call needed at all. The chat page's
-    // own free-text pipeline still runs this same detectWantsHuman check
-    // (handleWebChatMessage -> handlePendingBatch, this exact function),
-    // so a genuine "I need a person" is never lost, just free to ask
-    // there instead of costing a real message here.
-    // Scoped narrowly on purpose: only a real WhatsApp text (not one
-    // relayed FROM the chat page itself -- handleWebChatMessage sets
-    // customer.channel = 'website' before calling in here, and that path
-    // must keep working exactly as before), and never for a dine-in order
-    // (guests there belong on their table's own page, /t, not /wa --
-    // dine-in was never in scope for this feature).
-    if (customer.channel === 'whatsapp' && order.channel !== 'dinein') {
-      // Chidera, 2026-09-24: "bot must not answer every reply customer
-      // makes on bare chat, just resend them the place to text once if
-      // they text bare and if they text bare again, leave it stay
-      // silent." This used to fire on every single bare-WhatsApp text
-      // while an order was active -- a real send every time, exactly the
-      // "unbounded real message count" the comment above already warned
-      // about, just for this specific redirect instead of the AI path.
-      if (await needsChatRedirect(customer)) {
-        await sendStartOrderLink(customer);
-        await markChatRedirectSent(customer.id);
-      }
-      return;
+  // Chidera, 2026-09-24: "in general, any outbound text should redirect
+  // customer to the web chat and if customer text on bare again only 1 re
+  // ping after that bot only responds in web chat not bare chat." Was
+  // scoped narrowly to "only once an order's already in progress" (2026-
+  // 09-23) -- now applies to ANY real WhatsApp text, greeting or not,
+  // order or not. classifyIntent/dispatch/handleGreeting/handleEnquiry
+  // never even run for a whatsapp customer anymore; the entire rest of
+  // this engine (everything below this point) is website-only now,
+  // reached exclusively through handleWebChatMessage. Two carve-outs,
+  // both pre-existing and unchanged: text relayed FROM the chat page
+  // itself (handleWebChatMessage sets customer.channel = 'website' before
+  // calling in here) and dine-in (guests there belong on their table's
+  // own page, /t, not /wa -- dine-in was never in scope for this
+  // feature). A genuine "I need a person" typed on the free chat page
+  // still reaches detectWantsHuman/handover below exactly as before --
+  // nothing is lost, just deferred to the free surface.
+  if (customer.channel === 'whatsapp' && order?.channel !== 'dinein') {
+    if (await needsChatRedirect(customer)) {
+      await sendStartOrderLink(customer);
+      await markChatRedirectSent(customer.id);
     }
+    return;
+  }
+
+  if (order) {
     if (await detectWantsHuman(text)) {
       await handover(customer, 'Customer asked for a person');
       return;
