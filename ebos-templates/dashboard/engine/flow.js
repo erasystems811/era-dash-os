@@ -1471,29 +1471,46 @@ function catalogueOptions(menu, keywords) {
   return menu.filter((p) => categoryMatchesGroup(p.category, keywords));
 }
 
-// Next upsell group worth asking about, if any -- already-ordered
-// categories and already-offered-this-order categories are both excluded,
-// so this naturally returns null once every real cross-sell opportunity is
-// either satisfied or already declined.
-async function nextUpsellGroup(order, orderItems) {
-  if (!orderItems.length) return null;
-  // Chidera, 2026-09-20: "only upsell once" -- this used to track each
-  // group (drink/protein/snack) separately, so a single order could get
-  // offered a drink, then later a protein, then later a snack, up to
-  // three separate upsell messages. One upsell offer per order, total,
-  // regardless of category -- any prior offer at all (accepted or
-  // declined) means none of this runs again for this order.
-  const offered = order.upsell_offered || [];
-  if (offered.length) return null;
-  const menu = await resolveMenu(order.branch_id);
-  const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
+// Chidera, 2026-09-24: "upsell is anything that match what they ordered...
+// could be 3 or 2 upsells... or 1, as long as it match, but for upsell the
+// bot aim is to push customer to buy more." One representative product per
+// category the order doesn't already have.
+function pickUpsellOptions(menu, orderedCategories) {
+  const picks = [];
+  const matchedGroups = [];
   for (const group of UPSELL_GROUPS) {
     const options = catalogueOptions(menu, group.keywords);
     if (!options.length) continue;
     const orderHasIt = orderedCategories.some((c) => categoryMatchesGroup(c, group.keywords));
-    if (!orderHasIt) return { ...group, options };
+    if (orderHasIt) continue;
+    picks.push(options[0]);
+    matchedGroups.push(group);
   }
-  return null;
+  return { picks, matchedGroups };
+}
+
+// Next upsell offer worth making, if any -- already-ordered categories and
+// already-offered-this-order categories are both excluded, so this
+// naturally returns null once every real cross-sell opportunity is either
+// satisfied or already declined.
+async function nextUpsellGroup(order, orderItems) {
+  if (!orderItems.length) return null;
+  // Chidera, 2026-09-20: "only upsell once" -- one OFFER per order, total
+  // (accepted or declined), still true here -- what changed 2026-09-24 is
+  // that single offer now covers every unmet category at once (drink AND
+  // protein AND snack, whichever the order is actually missing) instead of
+  // stopping at just the first one found.
+  const offered = order.upsell_offered || [];
+  if (offered.length) return null;
+  const menu = await resolveMenu(order.branch_id);
+  const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
+  const { picks, matchedGroups } = pickUpsellOptions(menu, orderedCategories);
+  if (!picks.length) return null;
+  return {
+    key: matchedGroups.map((g) => g.key).join('+'),
+    label: matchedGroups.map((g) => g.label).join(', '),
+    options: picks,
+  };
 }
 
 // The upsell offer as a real WhatsApp List Message (tap to add) instead of
@@ -1518,6 +1535,13 @@ async function nextUpsellGroup(order, orderItems) {
 // would normally reach it needs a live Anthropic key this environment
 // doesn't have (extractOrderModifications, called before any state-based
 // routing for an order past collect_info).
+// Single group ("a drink") reads fine capitalised as its own section
+// title ("Drink"); combined groups read awkwardly as a comma list, so
+// that case gets a generic, still-inviting title instead.
+function upsellSectionTitle(upsell) {
+  return upsell.options.length > 1 ? 'Add-ons' : upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1);
+}
+
 export async function sendUpsellList(customer, upsell, prefix = '') {
   if (customer.channel !== 'whatsapp' && customer.channel !== 'website') return false;
   const rows = upsell.options.slice(0, 8).map((p) => ({
@@ -1525,8 +1549,17 @@ export async function sendUpsellList(customer, upsell, prefix = '') {
     title: p.name.slice(0, 24),
     description: `NGN ${Number(p.price).toLocaleString()}`,
   }));
-  rows.push({ id: 'upsell::skip', title: 'No thanks', description: `Skip ${upsell.label}` });
-  const bodyText = `${prefix}Would you like to add ${upsell.label}?`.trim();
+  rows.push({ id: 'upsell::skip', title: 'No thanks', description: 'Skip' });
+  // Chidera, 2026-09-24: "for upsell the bot aim is to push customer to
+  // buy more" -- one item now (single group, "Would you like to add a
+  // drink?") reads fine with upsell.label as-is; more than one (combined
+  // categories) reads awkwardly as a comma list ("add a protein, a
+  // drink?"), so that case gets its own more natural, more enticing line.
+  const bodyText = (
+    upsell.options.length > 1
+      ? `${prefix}Want to complete your order? Add any of these:`
+      : `${prefix}Would you like to add ${upsell.label}?`
+  ).trim();
   // website: same row ids as WhatsApp's list message (upsell::<id>,
   // upsell::skip) -- a tap on the chat page posts the row id to
   // POST /:token/tap, which calls handleUpsellListTap exactly as the real
@@ -1539,7 +1572,7 @@ export async function sendUpsellList(customer, upsell, prefix = '') {
       sender: 'bot',
       body: `${bodyText} We have: ${upsell.options.map((o) => o.name).join(', ')}.`,
       trigger: 'upsell_offered_list',
-      interactive: { type: 'list', buttonText: 'Choose', sectionTitle: upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1), rows },
+      interactive: { type: 'list', buttonText: 'Choose', sectionTitle: upsellSectionTitle(upsell), rows },
     });
     return true;
   }
@@ -1560,7 +1593,7 @@ export async function sendUpsellList(customer, upsell, prefix = '') {
     await sendListMessage(recipientFor(customer), {
       bodyText,
       buttonText: 'Choose',
-      sectionTitle: upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1),
+      sectionTitle: upsellSectionTitle(upsell),
       rows,
     }, credentials);
   } catch (err) {
@@ -1785,9 +1818,14 @@ export async function handlePendingUpsell(customer, order, text) {
   });
   const wantsOne = await botEngine.extractField(wantsOneField, text, { askJson });
   if (wantsOne === true) {
-    const group = UPSELL_GROUPS.find((g) => g.key === order.pending_upsell_category);
+    // pending_upsell_category may now name more than one group at once
+    // (e.g. 'drink+protein', see nextUpsellGroup) -- the full catalogue
+    // across every one of them, not just the single representative pick
+    // each originally offered, since they've now said yes and are
+    // actually choosing.
+    const groupKeys = (order.pending_upsell_category || '').split('+');
     const menu = await resolveMenu(order.branch_id);
-    const options = group ? catalogueOptions(menu, group.keywords) : [];
+    const options = UPSELL_GROUPS.filter((g) => groupKeys.includes(g.key)).flatMap((g) => catalogueOptions(menu, g.keywords));
     // pending_upsell_category deliberately left set -- their next message
     // is still the answer to this same offer, not a fresh one.
     await reply(customer, `Great, which one would you like? We have: ${options.map((o) => o.name).join(', ')}.`, 'upsell_clarify');

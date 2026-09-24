@@ -1853,11 +1853,16 @@ async function computeUpsellStats(dateWhereSql, dateParams) {
     // Only one offer per order going forward (Chidera, 2026-09-20: "only
     // upsell once"), but upsell_offered is still an array for older orders
     // from before that -- the last entry is the one that was actually
-    // left standing when the order completed.
+    // left standing when the order completed. That entry can itself now
+    // name more than one group at once (e.g. 'drink+protein', Chidera
+    // 2026-09-24's "could be 3 or 2 upsells... push customer to buy
+    // more") -- accepted if the final order picked up ANY of the
+    // categories that single combined offer covered, not just an exact
+    // one-group match.
     const key = row.upsell_offered[row.upsell_offered.length - 1];
-    const group = UPSELL_GROUPS.find((g) => g.key === key);
-    if (!group) continue;
-    if (row.item_categories.some((c) => categoryMatchesGroup(c, group.keywords))) accepted++;
+    const groups = UPSELL_GROUPS.filter((g) => key.split('+').includes(g.key));
+    if (!groups.length) continue;
+    if (groups.some((g) => row.item_categories.some((c) => categoryMatchesGroup(c, g.keywords)))) accepted++;
   }
   const offered = rows.length;
   return {

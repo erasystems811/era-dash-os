@@ -66,19 +66,28 @@ async function main() {
   const customer = await flow.findOrCreateCustomer({ phoneNumber, channel: 'whatsapp' });
   assert(await countOutbound(pool, customer.id, 'whatsapp') === 1, 'exactly one real WhatsApp message sent for the first contact');
   const greetingMsg = await latestOutbound(pool, customer.id, 'whatsapp');
-  assert(/tap below to place your order/i.test(greetingMsg.body), 'the real WhatsApp message is the short greeting + CTA');
+  assert(/tap below to get started/i.test(greetingMsg.body), 'the real WhatsApp message is the short greeting + CTA');
   assert(!/what would you like to order/i.test(greetingMsg.body), 'the FULL welcome text is NOT in the real WhatsApp message (moved to the chat page)');
 
-  // === 2. GET /wa/:token -- the first bubble carries the FULL welcome + a "See menu" link out to /m/:token ===
+  // === 2. GET /wa/:token -- Chidera, 2026-09-24: the first bubble is now a
+  // deterministic choice ("Place an order" / "Give feedback"), not the
+  // full welcome text up front. Tapping "Place an order" is what reveals
+  // the FULL welcome + a "See menu" link out to /m/:token. ===
   const { rows: custRows } = await pool.query('select menu_token from customers where id = $1', [customer.id]);
   const token = custRows[0].menu_token;
   assert(Boolean(token), 'the real WhatsApp CTA already generated this customer a menu_token');
 
   const pageRes = await fetch(`${BASE}/wa/${token}`);
   assert(pageRes.status === 200, 'the chat page itself loads');
+  const choiceBubble = await latestOutbound(pool, customer.id, 'website');
+  assert(choiceBubble.trigger === 'first_choice', 'the first bubble is the deterministic order-vs-feedback choice, not the full welcome');
+
+  await fetch(`${BASE}/wa/${token}/tap`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ buttonId: 'wa_start_order' }),
+  });
   const firstBubble = await latestOutbound(pool, customer.id, 'website');
-  assert(/what would you like to order/i.test(firstBubble.body), 'the FULL welcome text now lives in the chat page’s own first bubble');
-  assert(firstBubble.interactive?.type === 'cta_url' && /\/m\//.test(firstBubble.interactive.url), 'the first bubble carries a real "See menu" link out to the existing shop page');
+  assert(/what would you like to order/i.test(firstBubble.body), 'tapping "Place an order" reveals the FULL welcome text');
+  assert(firstBubble.interactive?.type === 'cta_url' && /\/m\//.test(firstBubble.interactive.url), 'and it carries a real "See menu" link out to the existing shop page');
 
   // routes/web-chat.js flips this in memory (never the real DB row) before
   // calling into any flow.js function -- steps below call several of
