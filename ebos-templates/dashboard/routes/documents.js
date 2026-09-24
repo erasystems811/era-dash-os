@@ -123,6 +123,7 @@ function documentPage({ title, business, customer, order, items }) {
   .box .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; margin-bottom: 8px; }
   .pay-btn { display: inline-block; margin-top: 10px; background: ${brand}; color: ${onBrand}; text-decoration: none; padding: 9px 16px; border-radius: 999px; font-weight: 600; font-size: 13.5px; }
   .footer { text-align: center; color: var(--mid); font-size: 12px; margin-top: 32px; }
+  .era-mark { text-align: center; color: var(--mid); font-size: 10.5px; letter-spacing: 0.03em; margin-top: 8px; opacity: 0.65; }
 </style></head>
 <body>
   <div class="header">
@@ -166,6 +167,7 @@ function documentPage({ title, business, customer, order, items }) {
   </div>
 
   <div class="footer">${esc(business.name)} &middot; ${esc(business.address || '')} &middot; ${esc(business.phone_number || '')}</div>
+  <div class="era-mark">Powered by ERA Systems</div>
 </body></html>`;
 }
 
