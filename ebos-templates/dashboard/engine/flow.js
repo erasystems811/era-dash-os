@@ -2228,7 +2228,19 @@ async function sendPaymentLinkButton(customer, paymentUrl, bodyText) {
       body: `${bodyText}\n[payment link sent: ${paymentUrl}]`,
       trigger: 'payment_link',
       processed: true,
-      interactive: { type: 'cta_url', buttonText: 'Pay now', url: paymentUrl },
+      // Chidera, 2026-09-24: "when i tap pay now and enter that paystack
+      // stuff there is no back button to go back to web chat only the one
+      // that goes back to the main chat." Paystack's checkout is a real
+      // third-party page we don't control -- no button we add there can
+      // get a customer "back to web chat" while they're on it, and a
+      // WhatsApp in-app browser's own back chevron always returns to the
+      // WhatsApp thread, not page history. Opening it in a NEW tab (unlike
+      // "See menu"/"View invoice", which deliberately stay same-tab for
+      // their own intentional round-trip back to this page) keeps THIS
+      // chat tab genuinely still open behind it -- switching tabs (or just
+      // closing the Paystack one once done) gets them back, something a
+      // same-tab navigation into another domain can never guarantee.
+      interactive: { type: 'cta_url', buttonText: 'Pay now', url: paymentUrl, newTab: true },
     });
     return;
   }

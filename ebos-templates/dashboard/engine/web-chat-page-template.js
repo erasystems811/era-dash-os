@@ -156,7 +156,12 @@ function renderActions(interactive) {
     return '<div class="actions"><button type="button" class="actionrow" data-open-list="1"><span class="icon">&#9776;</span>' + esc(interactive.buttonText || 'Choose') + '</button></div>';
   }
   if (interactive.type === 'cta_url') {
-    return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '"><span class="icon">&#8663;</span>' + esc(interactive.buttonText || 'Open') + '</a><span class="linkcaption">Tap to open</span></div>';
+    // newTab (e.g. Paystack's "Pay now") -- a genuinely external page we
+    // don't control, opened in its own tab so THIS chat tab stays open
+    // behind it. "See menu"/other in-app links stay same-tab on purpose
+    // (their own page already navigates back here once done).
+    var linkAttrs = interactive.newTab ? ' target="_blank" rel="noopener"' : '';
+    return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '"' + linkAttrs + '><span class="icon">&#8663;</span>' + esc(interactive.buttonText || 'Open') + '</a><span class="linkcaption">' + (interactive.newTab ? 'Opens in a new tab -- come back here after' : 'Tap to open') + '</span></div>';
   }
   if (interactive.type === 'document') {
     return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '" target="_blank" rel="noopener"><span class="icon">&#128196;</span>' + esc(interactive.filename || 'View document') + '</a><span class="linkcaption">Tap to view</span></div>';
