@@ -54,6 +54,30 @@ async function subscribeToPush() {
   }
 }
 
+// Chidera, 2026-09-24: "every rider must tap allow for notification and
+// location if not they can accept any ride or use the platform" -- location
+// was deliberately non-blocking before this (useLocationReporting's own
+// comment: never stop a rider working just because one position read
+// failed, since that happens routinely -- weak signal, a slow GPS fix).
+// That reasoning still holds for a single failed READING once on duty; it
+// never applied to the RIDER'S OWN CHOICE to block location outright, which
+// this checks for up front, the same denied/unsupported split
+// subscribeToPush already uses for notifications: `denied` (they tapped
+// Block) is the one thing a rider can actually go fix right then, and is
+// exactly what going on duty with no way to ever find their real position
+// should refuse over; `unsupported` (no geolocation API on this browser at
+// all) is a device fact outside their control and must never block them.
+function requestLocationPermission() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve({ ok: false, reason: 'unsupported' });
+    navigator.geolocation.getCurrentPosition(
+      () => resolve({ ok: true }),
+      (err) => resolve({ ok: false, reason: err.code === err.PERMISSION_DENIED ? 'denied' : 'unsupported' }),
+      { enableHighAccuracy: false, timeout: 10_000 }
+    );
+  });
+}
+
 // Posts the rider's own position on whatever interval the caller picks --
 // 15s during an active delivery, 60s on-duty idle, and simply not called
 // at all off duty (spec B3/B6: the rider pays for his own data and can't
@@ -490,6 +514,15 @@ function Duty({ rider, initialActive, onLoggedOut }) {
       if (!pushResult.ok && pushResult.reason === 'denied') {
         setBusy(false);
         setError("Turn on notifications for this app in your phone settings first -- otherwise you won't hear new delivery offers.");
+        return;
+      }
+      // Same prerequisite as notifications, now also for location --
+      // Chidera, 2026-09-24: "every rider must tap allow for notification
+      // and location if not they can accept any ride or use the platform".
+      const locationResult = await requestLocationPermission();
+      if (!locationResult.ok && locationResult.reason === 'denied') {
+        setBusy(false);
+        setError('Turn on location for this app in your phone settings first -- staff and customers need to see where you are during a delivery.');
         return;
       }
     }
