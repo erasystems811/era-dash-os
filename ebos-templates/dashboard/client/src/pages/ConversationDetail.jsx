@@ -20,7 +20,20 @@ export default function ConversationDetail() {
   function load() {
     api.get(`/conversations/${id}`).then(setData);
   }
-  useEffect(load, [id]);
+  // Chidera, 2026-09-24: "when a staff text it update live on conversation
+  // but when a customer reply it doesnt automatically show up until page is
+  // refreshed" -- staff's own messages only ever looked "live" because
+  // send()/takeOver()/returnToBot() below each call load() themselves right
+  // after posting. An inbound customer reply arrives over the WhatsApp
+  // webhook straight into the database with nothing pushing it to an
+  // already-open browser tab, so without a poll it just sits there until
+  // someone manually reloads. Same order of magnitude as InHouse.jsx's own
+  // queue poll (15s) -- a staff chat doesn't need push-grade latency.
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, [id]);
 
   // Staff opening a thread care about the newest message, not the oldest --
   // without this the scrollable .thread div (index.css) starts at its

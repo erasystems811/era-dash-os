@@ -50,7 +50,14 @@ function AllConversations() {
   const [starting, setStarting] = useState(false);
 
   useEffect(() => {
-    api.get('/conversations').then(setConversations);
+    const load = () => api.get('/conversations').then(setConversations);
+    load();
+    // Same reasoning as ConversationDetail.jsx's own poll -- an inbound
+    // customer message never pushes to an already-open tab on its own, so
+    // this list's "Last message" column would otherwise go stale until a
+    // manual reload too.
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
   }, []);
 
   async function startConversation() {
@@ -247,7 +254,12 @@ function ActiveConversations() {
   const [conversations, setConversations] = useState(null);
 
   useEffect(() => {
-    api.get('/conversations').then(setConversations);
+    const load = () => api.get('/conversations').then(setConversations);
+    load();
+    // Same reasoning as ConversationDetail.jsx's own poll -- an inbound
+    // customer message never pushes to an already-open tab on its own.
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
   }, []);
 
   if (!conversations) return <Loading />;
