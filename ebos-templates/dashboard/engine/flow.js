@@ -4986,6 +4986,18 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
         await reply(customer, `${bodyText}\n\n${dineinUrl}`, 'menu_shown');
         return true;
       }
+      // Chidera, 2026-09-25: real report -- "No, change it" was sending 2
+      // responses. Root cause: this dine-in branch only special-cased
+      // Instagram, so a website customer fell straight through to the real
+      // sendWhatsAppCtaUrl below (a genuine WhatsApp push) AND THEN the
+      // logMessage marker row right after it got picked up by the web
+      // chat page's own polling and rendered as a second, separate bubble
+      // -- one real WhatsApp message plus one web-chat bubble for the same
+      // tap. Same fix shape as the online branch below.
+      if (customer.channel === 'website') {
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger: 'menu_shown', processed: true, interactive: { type: 'cta_url', buttonText: buttonTitle, url: dineinUrl } });
+        return true;
+      }
       const dineinCredentials = await getWhatsAppCredentials(customer.branch_id);
       try {
         await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonTitle, dineinUrl, dineinCredentials, headerImageUrl || (await businessCoverPhotoUrl()));
@@ -5081,28 +5093,16 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
   // getOpenOrder) so a non-owner dine-in guest's own "No, change it" tap
   // still resolves to their real shared table order, same JV-report fix.
   const order = await resolveCustomerOrder(customer);
-  let tableToken = null;
-  if (order?.channel === 'dinein' && order.table_id) {
-    const { rows } = await pool.query('select qr_token from restaurant_table where id = $1', [order.table_id]);
-    tableToken = rows[0]?.qr_token || null;
-  }
-  if (tableToken && process.env.PUBLIC_URL) {
-    // ?g= -- Chidera, 2026-09-20: same empty-cart class of bug as
-    // finishItemsCollection's own "Finish my order" link (see
-    // sendWebMenuLink's comment) -- this link predates the joint dine-in
-    // guest-identity mechanism (Stage 1) and never carried this guest's
-    // own token, so a non-owner guest tapping "No, change it" landed on
-    // the table's shared page resolved back to the ORIGINAL scanner
-    // (resolveActingCustomer's own fallback), seeing that guest's basket
-    // instead of their own.
-    const guestToken = await ensureMenuToken(customer);
-    const url = `${process.env.PUBLIC_URL}/t/${tableToken}?g=${guestToken}`;
-    const credentials = await getWhatsAppCredentials(customer.branch_id);
-    await sendWhatsAppCtaUrl(recipientFor(customer), message, 'Tap here to see menu', url, credentials);
-    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'order_confirm_no', processed: true });
-    return;
-  }
-  const shown = await sendWebMenuLink(customer, message, 'Tap here to see menu');
+  // Chidera, 2026-09-25: this used to hand-roll its own dine-in real-
+  // WhatsApp-CTA send here (duplicating sendWebMenuLink's own dine-in
+  // branch, ?g=guestToken and all) instead of just calling it -- which is
+  // exactly how it ended up with the SAME channel-unaware bug
+  // (sendWebMenuLink's dine-in branch, fixed above) separately: a website
+  // customer's "No, change it" leaked a real WhatsApp push. Passing
+  // `order` through lets sendWebMenuLink resolve the dine-in URL itself
+  // (it already does this, guestToken and all), one implementation, one
+  // fix covers both.
+  const shown = await sendWebMenuLink(customer, message, 'Tap here to see menu', null, null, order);
   if (!shown) await reply(customer, message, 'order_confirm_no');
 }
 
