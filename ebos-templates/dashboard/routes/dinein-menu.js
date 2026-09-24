@@ -529,6 +529,11 @@ router.get('/:qrToken', async (req, res) => {
     renderMenuPage({
       reviewPath: `/t/${req.params.qrToken}/review${qs()}`,
       pollPath: session ? `/t/${req.params.qrToken}/menu.json${qs()}` : null,
+      // Chidera, 2026-09-24: "the web menu should have a back to chat that
+      // takes back to web chat." Same isViaWebChat gate /review's own
+      // channel flip already uses -- only real when this guest actually
+      // has a chat thread to go back to.
+      webChatPath: actingCustomer && isViaWebChat(actingCustomer) ? `/wa/${guestToken}` : null,
       businessName: table.business_name,
       subtitle: `Table ${table.label} · ${table.branch_name}`,
       coverPhotoVersion: table.cover_photo_version,

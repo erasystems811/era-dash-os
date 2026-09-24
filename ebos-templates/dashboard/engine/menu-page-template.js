@@ -115,6 +115,13 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
      deliberately tiny, dimmer imprint -- ERA's own attribution, never
      competing with the business's own name/subtitle above it. */
   .mtop .pb{font-size:9.5px;color:#B3A597;opacity:.6;letter-spacing:.3px;margin-top:2px}
+  /* Chidera, 2026-09-24: "the web menu should have a back to chat that
+     takes back to web chat." Only rendered when there's actually a real
+     chat to go back to (webChatPath, same gate the post-submit
+     auto-redirect below already uses) -- a customer who reached this page
+     some other way (a fresh WhatsApp CTA, Instagram) sees nothing extra. */
+  .back-to-chat{display:inline-flex;align-items:center;gap:2px;color:#B3A597;font-size:12.5px;text-decoration:none;margin-bottom:6px}
+  .back-to-chat:active{opacity:.7}
   .scroll{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain}
   .cats{position:sticky;top:0;background:#fff;display:flex;gap:7px;padding:11px 14px;overflow-x:auto;border-bottom:1px solid var(--line);z-index:3;-webkit-overflow-scrolling:touch}
   .cats::-webkit-scrollbar{display:none}
@@ -175,7 +182,7 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
   .primaryBtn{width:100%;padding:14px;border-radius:10px;border:0;background:var(--ink);color:#fff;font-family:inherit;font-size:15.5px;font-weight:600;touch-action:manipulation}
 </style></head>
 <body>
-<div class="mtop${coverPhotoVersion ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div><div class="pb">Powered by ERA Systems</div></div>
+<div class="mtop${coverPhotoVersion ? ' photo' : ''}" style="${headerStyle}">${webChatPath ? `<a class="back-to-chat" href="${escapeHtml(webChatPath)}">&#8249; Back to chat</a>` : ''}<div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div><div class="pb">Powered by ERA Systems</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
   <div id="sec" class="sec"></div>
