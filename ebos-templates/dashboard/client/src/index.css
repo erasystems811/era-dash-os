@@ -1352,8 +1352,7 @@ label {
      paper and actually sit well on the docket paper" -- a real margin
      instead of the browser's own often-huge default page margin, which
      otherwise pushes a narrow docket column oddly far from the edge on a
-     normal A4/Letter sheet. Font sizes below (13-26px) are already sized
-     to read clearly on their own regardless of paper.
+     normal A4/Letter sheet.
      2026-09-24: "that docket the name of the printer is x-printer" --
      the real kitchen printer is an Xprinter thermal receipt printer, an
      80mm roll (the common width for these -- confirm and adjust to 58mm
@@ -1376,84 +1375,92 @@ label {
     max-width: 74mm;
     margin: 0 auto;
   }
+  /* Chidera, 2026-09-24, real live report against the actual Xprinter:
+     "the text on docket paper is too small o, i though we said we will
+     make ours look premuim and high class." Every size below bumped up a
+     full step -- kitchen staff read this at a glance in a moving kitchen,
+     not up close at a desk, and "premium" on a receipt printer reads as
+     bold and generously sized, not as small-and-refined the way it might
+     on a proper invoice (documents.js's own PDF, a different medium
+     printed on real paper and held, not scanned in a hurry). */
   .printDocket .docketBrand {
     text-align: center;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: #444;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
   }
   .printDocket .docketTable {
     text-align: center;
-    font-size: 26px;
+    font-size: 34px;
     font-weight: 700;
     letter-spacing: 0.01em;
     line-height: 1.1;
   }
   .printDocket .docketMeta {
     text-align: center;
-    font-size: 11.5px;
+    font-size: 13px;
     color: #555;
-    margin-top: 4px;
-    margin-bottom: 14px;
+    margin-top: 5px;
+    margin-bottom: 16px;
   }
   .printDocket hr {
     border: none;
-    border-top: 1.5px solid #000;
-    margin: 0 0 14px;
+    border-top: 2px solid #000;
+    margin: 0 0 16px;
   }
   .printDocket .docketGroup {
-    margin-bottom: 12px;
+    margin-bottom: 14px;
   }
   .printDocket .docketCategory {
-    font-size: 10.5px;
+    font-size: 13px;
     font-weight: 700;
-    letter-spacing: 0.12em;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
     color: #444;
     border-bottom: 1px solid #ccc;
-    padding-bottom: 3px;
-    margin-bottom: 6px;
+    padding-bottom: 4px;
+    margin-bottom: 8px;
   }
   .printDocket .docketItem {
     display: flex;
     gap: 10px;
-    padding: 5px 0;
+    padding: 6px 0;
     align-items: baseline;
   }
   .printDocket .docketQty {
     flex-shrink: 0;
-    width: 30px;
+    width: 34px;
     font-weight: 700;
-    font-size: 15px;
+    font-size: 20px;
     font-variant-numeric: tabular-nums;
   }
   .printDocket .docketName {
     flex: 1;
-    font-size: 15px;
-    font-weight: 500;
+    font-size: 20px;
+    font-weight: 600;
     line-height: 1.3;
   }
   .printDocket .docketNew {
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.06em;
-    border: 1px solid #000;
+    border: 1.5px solid #000;
     border-radius: 3px;
-    padding: 1px 4px;
+    padding: 2px 5px;
     margin-left: 4px;
     vertical-align: middle;
   }
   .printDocket .docketNote {
-    font-size: 12px;
+    font-size: 14px;
     font-style: italic;
     color: #444;
-    margin-top: 2px;
+    margin-top: 3px;
   }
   .printDocket .docketAddonHead {
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
