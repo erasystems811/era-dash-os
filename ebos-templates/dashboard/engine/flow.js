@@ -1055,7 +1055,16 @@ async function sendStartOrderLink(customer) {
   // hey, what would you like to do? with 2 buttons." The chat page this
   // links to now asks first (order vs feedback) instead of assuming
   // ordering -- the real WhatsApp CTA shouldn't presuppose that either.
-  const shortGreeting = customer.name ? `Hello ${customer.name}! Tap below to get started.` : `Hello! Tap below to get started.`;
+  // Chidera, 2026-09-24: "that first text should still have the welcome
+  // to <restaurant name>, tap below to get started" -- a bare "Hello!"
+  // read as too generic/anonymous for the one real message every customer
+  // actually sees; the business's own name belongs in it even though the
+  // rest of the welcome moved to the free chat bubble.
+  const { rows: bizRows } = await pool.query('select name from business limit 1');
+  const bizName = bizRows[0]?.name || 'us';
+  const shortGreeting = customer.name
+    ? `Welcome to ${bizName}, ${customer.name}! Tap below to get started.`
+    : `Welcome to ${bizName}! Tap below to get started.`;
   const token = await ensureMenuToken(customer);
   const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);

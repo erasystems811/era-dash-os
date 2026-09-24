@@ -66,8 +66,15 @@ async function main() {
   // ordinary greeting, unaffected. ===
   const orderer = await flow.findOrCreateCustomer({ phoneNumber: '2348012345002', channel: 'whatsapp' });
   const ordererToken = await flow.ensureMenuToken(orderer);
+  // Chidera, 2026-09-24: "instead of bot sending menu immediately, it
+  // should send a hey, what would you like to do?" -- the full
+  // order-framing welcome only shows once "Place an order" is tapped now
+  // (see test-web-chat-first-choice-and-complaint-form.mjs), not on this
+  // first bare visit; this only needs to confirm it's the GENERIC choice,
+  // not the complaint-specific one the ?ctx=complaint visit above got.
   const orderPageHtml = await (await fetch(`${BASE}/wa/${ordererToken}`)).text();
-  assert(/what would you like to order/i.test(orderPageHtml), 'the normal ordering flow\'s greeting is completely unchanged');
+  assert(/what would you like to do/i.test(orderPageHtml), 'the normal (non-complaint) entry point still gets the generic choice prompt');
+  assert(!/Sorry to hear that/i.test(orderPageHtml), 'and NOT the complaint-specific one this different customer never asked for');
 
   // === Once they actually type the real complaint (simulated directly via
   // handover(), the exact function that free-text turn would reach through

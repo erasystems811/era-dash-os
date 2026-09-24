@@ -170,6 +170,10 @@ const TAP_PATH = ${JSON.stringify(tapPath)};
 const POLL_PATH = ${JSON.stringify(pollPath)};
 let HISTORY = ${JSON.stringify(history)};
 let lastCursor = HISTORY.length ? HISTORY[HISTORY.length - 1].created_at : null;
+// Moved up from beside poll() below -- the initial-load fresh-batch reveal
+// (see splitFreshTrailingBatch further down) needs this flag too, and runs
+// before poll()'s own declaration is reached.
+let pendingTyping = false;
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 function fmtTime(iso) { const d = new Date(iso); return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
@@ -245,7 +249,47 @@ function renderAll() {
   scroll.innerHTML = html;
   scroll.scrollTop = scroll.scrollHeight;
 }
+
+// Chidera, 2026-09-24: "after i pick things from menu, i need to have that
+// pop in feeling of a new text coming in as a customer to know a new text
+// actually landed, if not upsell wont work cause ill think its the normal
+// chat." Landing back here right after submitting on /m or /t is a full
+// page load -- the freshest bot reply (the upsell offer, often exactly
+// what she means) would otherwise bake straight into history with none of
+// poll()'s own typing-dots treatment, since nothing "new" ever gets
+// fetched: it was already in HISTORY from the very first render. Held
+// back here and revealed the exact same way a live poll() arrival is, so
+// it never reads as just more of the same old chat.
+const FRESH_WINDOW_MS = 20000;
+let freshBatch = [];
+(function splitFreshTrailingBatch() {
+  const now = Date.now();
+  let i = HISTORY.length;
+  while (i > 0) {
+    const m = HISTORY[i - 1];
+    if (m.direction !== 'outbound' || now - new Date(m.created_at).getTime() > FRESH_WINDOW_MS) break;
+    i -= 1;
+  }
+  if (i < HISTORY.length) {
+    freshBatch = HISTORY.slice(i);
+    HISTORY = HISTORY.slice(0, i);
+  }
+})();
 renderAll();
+if (freshBatch.length) {
+  pendingTyping = true;
+  showTyping();
+  setTimeout(function () {
+    hideTyping();
+    HISTORY = HISTORY.concat(freshBatch);
+    lastCursor = freshBatch[freshBatch.length - 1].created_at;
+    renderAll();
+    if (freshBatch.some(function (m) { return m.trigger === 'payment_confirmed'; })) {
+      showBanner('Payment confirmed!');
+    }
+    pendingTyping = false;
+  }, 2000);
+}
 
 // The list-message bottom sheet -- WhatsApp's real "Choose" flow opens a
 // sheet with every real option. Chidera, 2026-09-24: "let them be able to
@@ -438,8 +482,7 @@ function showBanner(text) {
 // pendingTyping blocks a second poll tick from firing mid-delay -- since
 // lastCursor only advances once the delayed rows actually land, an
 // overlapping poll would otherwise refetch and re-queue the exact same
-// rows a second time.
-let pendingTyping = false;
+// rows a second time. (declared up top now, see its own comment there)
 async function poll() {
   if (pendingTyping) return;
   try {
