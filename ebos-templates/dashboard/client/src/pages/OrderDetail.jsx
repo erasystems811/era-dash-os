@@ -120,9 +120,24 @@ export default function OrderDetail() {
   // on-screen flash to the docket-only view is the trade-off, gone the
   // instant the print dialog closes (or after 5s if a browser never
   // fires afterprint at all).
+  // 2026-09-24, real live report: "on mobile it shows as colour" -- the
+  // class add and window.print() were both synchronous, back to back,
+  // with nothing forcing the browser to actually PAINT the new styles in
+  // between. Desktop Chrome happened to always repaint in time; several
+  // mobile browsers' print/share-sheet capture can run before that paint
+  // completes, capturing the page still mid-transition (old navy/gold
+  // colors still on screen for that one frame). Two nested
+  // requestAnimationFrame callbacks is the standard way to guarantee a
+  // real paint has happened before continuing -- the first rAF fires
+  // before the NEXT paint, the second fires after it, so by the time this
+  // one runs the class change is guaranteed visually applied.
   function printDocket() {
     document.body.classList.add('printing-docket');
-    window.print();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.print();
+      });
+    });
     const cleanup = () => document.body.classList.remove('printing-docket');
     window.addEventListener('afterprint', cleanup, { once: true });
     setTimeout(cleanup, 5000);
