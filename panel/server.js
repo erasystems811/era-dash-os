@@ -2047,11 +2047,7 @@ function myDashboardPage() {
   <p class="muted">Real customer-response signal across every EBOS business, not just uptime -- upsell success, complaint rate, abandoned chats, all yours to see whether your own tactics are actually landing. "Abandoned" is an honest proxy (a cancelled order the customer never replied to in the hour before it auto-closed), not an exact flag -- treat it as directionally real, not to the decimal.</p>
   <div style="margin:6px 0;">
     <label style="display:inline;">Window: </label>
-    <select id="biDays" style="width:auto;display:inline;" onchange="loadBusinessIntelligence()">
-      <option value="7">Last 7 days</option>
-      <option value="30" selected>Last 30 days</option>
-      <option value="90">Last 90 days</option>
-    </select>
+    <select id="biMonth" style="width:auto;display:inline;" onchange="loadBusinessIntelligence()"></select>
     <button type="button" style="margin:0 0 0 8px;" onclick="loadBusinessIntelligence()">Refresh</button>
     <span id="biStatus" class="muted" style="margin-left:8px;"></span>
   </div>
@@ -2107,20 +2103,42 @@ function pct(value) {
   return value == null ? '&ndash;' : value + '%';
 }
 
+// Chidera, 2026-09-24: "when i say each month i dont mean last 30 or 90
+// days, i should be able to search a certain month and see the live data
+// that month provided" -- was a fixed 7/30/90-day rolling window, same
+// month picker Finance.jsx already has (All time + the last 12 real
+// calendar months), for the same reason: "last 30 days" drifts every day
+// and never lines up with how anyone actually reviews a month's numbers.
+function populateMonthSelect() {
+  const sel = document.getElementById('biMonth');
+  const opts = ['<option value="">All time</option>'];
+  const d = new Date();
+  d.setDate(1);
+  for (let i = 0; i < 12; i++) {
+    const value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    const label = d.toLocaleString('en-GB', { month: 'long', year: 'numeric' });
+    opts.push('<option value="' + value + '">' + label + '</option>');
+    d.setMonth(d.getMonth() - 1);
+  }
+  sel.innerHTML = opts.join('');
+}
+populateMonthSelect();
+
 // One shared instance per canvas -- Chart.js throws "Canvas already in
 // use" if a previous chart on the same element is never destroyed before
-// the next .render() (Window/Refresh/days change all call this again).
+// the next .render() (Window/Refresh/month change all call this again).
 let pieChart = null;
 let barChart = null;
 let msgChart = null;
 
 async function loadBusinessIntelligence() {
   const statusEl = document.getElementById('biStatus');
-  const days = document.getElementById('biDays').value;
+  const month = document.getElementById('biMonth').value;
+  const qs = month ? '?month=' + month : '';
   statusEl.textContent = 'Loading...';
   try {
     const [biRes, costRes] = await Promise.all([
-      fetch('/api/ebos/business-intelligence?days=' + days),
+      fetch('/api/ebos/business-intelligence' + qs),
       fetch('/api/ebos/messaging-cost'),
     ]);
     const bi = await biRes.json();
@@ -2342,13 +2360,22 @@ app.get('/api/ebos/messaging-cost', async (req, res) => {
 // row here -- a business's own dashboard has no reason to know any other
 // business's numbers, so this combining only ever happens here, never on
 // their side.
+// Chidera, 2026-09-24: "when i say each month i dont mean last 30 or 90
+// days, i should be able to search a certain month and see the live data
+// that month provided" -- ?month=YYYY-MM takes priority when given (a
+// real calendar month, passed straight through to each business's own
+// /api/business-intelligence, which now understands it the same way
+// /finance/summary does); ?days=N stays as a fallback for anything not
+// yet updated to month, and no query at all means all-time.
 app.get('/api/ebos/business-intelligence', async (req, res) => {
-  const days = Number(req.query.days) || 30;
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : null;
+  const days = !month && req.query.days ? Number(req.query.days) : null;
+  const qs = month ? `?month=${month}` : days ? `?days=${days}` : '';
   const ebosClients = getEbosClients(loadRegistry());
   const results = await Promise.all(
     ebosClients.map(async (c) => {
       try {
-        const data = await callBusinessApi(c, `/api/business-intelligence?days=${days}`);
+        const data = await callBusinessApi(c, `/api/business-intelligence${qs}`);
         return { client: c.name, displayName: c.displayName || c.name, ...data };
       } catch (err) {
         return { client: c.name, displayName: c.displayName || c.name, error: err.message };
@@ -2366,6 +2393,7 @@ app.get('/api/ebos/business-intelligence', async (req, res) => {
   const overall = {
     client: '__overall__',
     displayName: `All ${ok.length} business(es) combined`,
+    month,
     days,
     upsellOffered,
     upsellAccepted,

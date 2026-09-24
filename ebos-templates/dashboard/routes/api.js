@@ -324,27 +324,39 @@ router.get('/monitor/messaging-cost', requireEraAdmin, async (req, res) => {
 // file, built for customers/stats) rather than a second copy of that
 // match-and-count logic. Must stay above router.use(requireStaffApi)
 // below -- see the comment on pos-sync-config for why.
+// Chidera, 2026-09-24: "when i say each month i dont mean last 30 or 90
+// days, i should be able to search a certain month and see the live data
+// that month provided" -- was rolling-window only (?days=N). ?month=YYYY-MM
+// now takes priority when given (a real calendar month, date_trunc-scoped,
+// same shape /finance/summary already uses); days stays as the fallback
+// for any caller that hasn't been updated to month yet, and no query at
+// all means all-time, not a default 30-day window -- "all my business
+// activity" being the honest default a dashboard titled "My Dashboard"
+// should open on, not an arbitrary recent slice of it.
 router.get('/business-intelligence', requireEraAdmin, async (req, res) => {
-  const days = Math.min(Number(req.query.days) || 30, 365);
-  const interval = `${days} days`;
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : null;
+  const days = req.query.days ? Math.min(Number(req.query.days), 365) : null;
+  const dateWhereSql = month ? `and date_trunc('month', o.created_at) = $1::date` : days ? `and o.created_at >= now() - $1::interval` : '';
+  const dateParams = month ? [`${month}-01`] : days ? [`${days} days`] : [];
+  // The three queries below don't share computeUpsellStats' own `o` alias
+  // (customers/message aren't joined to "order" the same way), so each
+  // needs its own copy of the same date condition, scoped to whichever
+  // column that query's own date fact actually lives on.
+  const customerDateSql = month ? `and date_trunc('month', handover_at) = $1::date` : days ? `and handover_at >= now() - $1::interval` : '';
+  const messageDateSql = month ? `and date_trunc('month', created_at) = $1::date` : days ? `and created_at >= now() - $1::interval` : '';
+  const orderDateSql = month ? `and date_trunc('month', created_at) = $1::date` : days ? `and created_at >= now() - $1::interval` : '';
+  const orderDateSqlAliased = month ? `and date_trunc('month', o.created_at) = $1::date` : days ? `and o.created_at >= now() - $1::interval` : '';
 
   const [upsell, { rows: complaintRows }, { rows: activeCustomerRows }, { rows: abandonedRows }, { rows: totalOrderRows }] = await Promise.all([
-    computeUpsellStats('and o.created_at >= now() - $1::interval', [interval]),
+    computeUpsellStats(dateWhereSql, dateParams),
     // Complaint rate: the exact handover_reason string handleInboundMessage
     // sets when Claude classifies a message as a complaint (see
     // handleInboundMessage's own `intent === 'complaint'` branch) --
     // deliberately not a LIKE match on "complaint" anywhere in the reason,
     // since a handover a STAFF member typed a free-text reason for could
     // coincidentally contain that word without being one.
-    pool.query(
-      `select count(*) as count from customers
-       where handover_reason = 'Customer message classified as a complaint' and handover_at >= now() - $1::interval`,
-      [interval]
-    ),
-    pool.query(
-      `select count(distinct customer_id) as count from message where direction = 'inbound' and created_at >= now() - $1::interval`,
-      [interval]
-    ),
+    pool.query(`select count(*) as count from customers where handover_reason = 'Customer message classified as a complaint' ${customerDateSql}`, dateParams),
+    pool.query(`select count(distinct customer_id) as count from message where direction = 'inbound' ${messageDateSql}`, dateParams),
     // Abandoned chat rate: there's no dedicated "why was this cancelled"
     // column yet (closeStaleOrders' own timeout-sweep and a customer
     // explicitly saying no both just land on status='cancelled') -- this is
@@ -356,15 +368,15 @@ router.get('/business-intelligence', requireEraAdmin, async (req, res) => {
     // genuinely distinguishable most of the time even without a real flag.
     pool.query(
       `select count(*) as count from "order" o
-       where o.status = 'cancelled' and o.created_at >= now() - $1::interval
+       where o.status = 'cancelled' ${orderDateSqlAliased}
          and not exists (
            select 1 from message m
            where m.customer_id = o.customer_id and m.direction = 'inbound'
              and m.created_at > o.updated_at - interval '1 hour' and m.created_at <= o.updated_at
          )`,
-      [interval]
+      dateParams
     ),
-    pool.query(`select count(*) as count from "order" where created_at >= now() - $1::interval`, [interval]),
+    pool.query(`select count(*) as count from "order" where 1 = 1 ${orderDateSql}`, dateParams),
   ]);
 
   const activeCustomers = Number(activeCustomerRows[0].count);
@@ -373,6 +385,7 @@ router.get('/business-intelligence', requireEraAdmin, async (req, res) => {
   const totalOrders = Number(totalOrderRows[0].count);
 
   res.json({
+    month,
     days,
     ...upsell,
     complaints,
