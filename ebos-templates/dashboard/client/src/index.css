@@ -595,6 +595,28 @@ label {
   flex: 1;
 }
 
+/* Chidera, 2026-09-24: "this app should be highly mobile compatible... im
+   seeing confirm payment button when order is already in transit and that
+   stuff that the staff put reason to release delivery its not in mobile."
+   Both were a rigid inline `display:flex` row with no wrap -- fine on a
+   desktop-width card, but 2-3 real touch-target-sized buttons (or a text
+   input plus a button) side by side genuinely don't fit a phone screen and
+   were getting clipped/squeezed off it rather than dropping to a second
+   line. Unlike .form-row, children keep their own natural width (a button
+   row shouldn't stretch "Cancel order" to match "Mark as ready") -- wrap is
+   the only behavior this adds.
+   Order-of-actions note: a delivery/pickup order CAN reach in_transit while
+   payment_status isn't confirmed/accepted -- status-advance has no payment
+   gate (COD/pay-on-delivery is a real, intended flow) -- so seeing "Confirm
+   payment received" next to an in-transit order is correct when that
+   order's payment genuinely hasn't landed yet, not a stale-UI bug. The
+   Payment card's own condition (OrderDetail.jsx) already hides that button
+   the moment payment_status flips to confirmed/accepted, from any provider. */
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+}
+
 .empty-state {
   text-align: center;
   color: var(--text-muted);

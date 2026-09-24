@@ -127,7 +127,7 @@ export default function OrderDetail() {
             Engine state: {order.engine_state} &middot; Payment: <span className={`badge ${order.payment_status}`}>{order.payment_status}</span>
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="button-row" style={{ gap: 8 }}>
           <button className="secondary" onClick={() => window.print()} style={{ padding: '8px 14px' }}>
             Print docket
           </button>
@@ -270,9 +270,9 @@ export default function OrderDetail() {
                 paid.
               </p>
               {overrideError && <div className="error-banner">{overrideError}</div>}
-              <form onSubmit={releaseDelivery} style={{ display: 'flex', gap: 10 }}>
+              <form onSubmit={releaseDelivery} className="button-row" style={{ gap: 10 }}>
                 <input
-                  style={{ flex: 1 }}
+                  style={{ flex: 1, minWidth: 180 }}
                   placeholder="Reason (e.g. customer lost the code)"
                   value={overrideReason}
                   onChange={(e) => setOverrideReason(e.target.value)}
@@ -300,7 +300,7 @@ export default function OrderDetail() {
             <p className="hint" style={{ marginTop: 0 }}>
               Currently: <span className={`badge ${order.status}`}>{order.status}</span>
             </p>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="button-row" style={{ gap: 8 }}>
               {dineinUnserved && <button onClick={markServed}>Mark as served</button>}
               {next && <button onClick={() => advanceStatus(next.next)}>{next.label}</button>}
               {canCancelFrom(order) && (
