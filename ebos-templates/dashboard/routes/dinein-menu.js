@@ -534,6 +534,13 @@ router.get('/:qrToken', async (req, res) => {
       // channel flip already uses -- only real when this guest actually
       // has a chat thread to go back to.
       webChatPath: actingCustomer && isViaWebChat(actingCustomer) ? `/wa/${guestToken}` : null,
+      // Chidera, 2026-09-24, real report: "when i tapped place order, it
+      // took me back to bare chat not web chat." This route never passed
+      // `channel` at all (defaults to 'whatsapp' in renderMenuPage), so
+      // submitOrder()'s own post-submit redirect always fell through to
+      // its wa.me fallback -- same fix routes/menu-page.js's own GET
+      // route already has for the online flow, just missing here.
+      channel: actingCustomer && isViaWebChat(actingCustomer) ? 'website' : (actingCustomer?.channel || 'whatsapp'),
       businessName: table.business_name,
       subtitle: `Table ${table.label} · ${table.branch_name}`,
       coverPhotoVersion: table.cover_photo_version,
