@@ -220,30 +220,52 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
 // the customer already can't tell bot from staff apart by design, and a
 // human replying without explicitly claiming the thread first is exactly
 // how the bot would also try to answer the same message a moment later.
+// Chidera, 2026-09-24: "even any text going out to the customer, the
+// customer should get a one time we are trying to reach out to you tap
+// here to text, so they can enter the webchat or have the free
+// conversation not on bare chat that will be costing me, this also
+// reduce the amount of conversation they can hold at a cost." Scoped to
+// whatsapp specifically -- same "this is about WhatsApp's own
+// per-message cost" reasoning every other redirect in this file already
+// uses; Instagram/voice/an already-website customer keep the original
+// direct send below, unchanged.
+async function sendStaffReplyRedirect(customer, text, staffId) {
+  const token = await ensureMenuToken(customer);
+  await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
+
+  if (await needsChatRedirect(customer)) {
+    const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
+    const pingText = `We're trying to reach out to you.`;
+    let sendResult;
+    try {
+      const credentials = await getWhatsAppCredentials(customer.branch_id);
+      sendResult = await sendWhatsAppCtaUrl(recipientFor(customer), pingText, 'Tap here to text', chatUrl, credentials);
+    } catch (err) {
+      // Same 131047 (24h session window closed) fallback sendStaffReply's
+      // direct-send path already relies on -- the ping itself must not
+      // just fail silently either.
+      if (!/131047/.test(err.message)) throw err;
+      const credentials = await getWhatsAppCredentials(customer.branch_id);
+      const components = [{ type: 'body', parameters: [{ type: 'text', text: pingText }] }];
+      sendResult = await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
+    }
+    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'staff', body: pingText, trigger: 'staff_reply_ping', platformMessageId: platformMessageIdFrom(customer, sendResult) });
+    await markChatRedirectSent(customer.id);
+  }
+  await pool.query(
+    `update customers set handled_by = 'staff', handled_by_staff_id = coalesce($1, handled_by_staff_id), handover_at = coalesce(handover_at, now()) where id = $2`,
+    [staffId || null, customer.id]
+  );
+}
+
 export async function sendStaffReply(customerId, text, staffId) {
   const { rows } = await pool.query('select * from customers where id = $1', [customerId]);
   const customer = rows[0];
   if (!customer) throw new Error('Customer not found.');
 
-  let sendResult;
-  try {
-    sendResult = await botEngine.sendMessage({ trigger: 'explicit_type_command', to: recipientFor(customer), text, whatsappSend: await senderFor(customer) });
-  } catch (err) {
-    // Error 131047 is WhatsApp refusing a plain text send outside the 24h
-    // session window -- a stale conversation, or one that never started
-    // (Chidera's call, 2026-09-02: "normal messaging on normal chat", no
-    // separate "message a customer first" flow, and it must not just fail
-    // silently). Same reply box, same endpoint -- falls back to the
-    // approved business_outreach template with the exact text staff typed,
-    // automatically, instead of surfacing this as a dead end.
-    if (customer.channel === 'whatsapp' && /131047/.test(err.message)) {
-      const credentials = await getWhatsAppCredentials(customer.branch_id);
-      const components = [{ type: 'body', parameters: [{ type: 'text', text }] }];
-      sendResult = await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
-    } else {
-      throw err;
-    }
-  }
+  if (customer.channel === 'whatsapp') return sendStaffReplyRedirect(customer, text, staffId);
+
+  const sendResult = await botEngine.sendMessage({ trigger: 'explicit_type_command', to: recipientFor(customer), text, whatsappSend: await senderFor(customer) });
   await logMessage({
     customerId: customer.id,
     direction: 'outbound',
@@ -973,6 +995,34 @@ export async function buildGreetingContent(customer) {
     : `Hello! Welcome to ${businessName}, what would you like to order?`;
   const specialsCategory = await findSpecialsCategory(customer.branch_id);
   return { message, businessName, specialsCategory };
+}
+
+// Chidera, 2026-09-24: "even any text going out to the customer, the
+// customer should get a one time we are trying to reach out to you tap
+// here to text... bot must not answer every reply customer makes on bare
+// chat, just resend them the place to text once if they text bare and if
+// they text bare again, leave it stay silent." Shared by sendStaffReply
+// (a real staff-initiated message) and handlePendingBatch's own bare-
+// WhatsApp redirect (a customer texting real WhatsApp instead of the web
+// chat while an order's in progress) -- both need the exact same "was
+// this already sent, and have they actually come back to the chat since"
+// check, not two separate copies of the same timestamp logic.
+async function needsChatRedirect(customer) {
+  // Actively on the page right now (same 30-min freshness window
+  // completePayment already uses) -- they'll see a free bubble live via
+  // the page's own poll, no real ping needed at all regardless of history.
+  const activelyOnPage = customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(Date.now() - 30 * 60 * 1000);
+  if (activelyOnPage) return false;
+  if (!customer.chat_redirect_sent_at) return true;
+  // Pinged before, and genuinely visited the chat again since that ping
+  // (even if not "actively on it" right now) -- worth a fresh one next
+  // time they drift back to bare WhatsApp. Pinged before with no visit
+  // since at all -- already told them once, stay silent.
+  if (!customer.web_chat_active_at) return false;
+  return new Date(customer.web_chat_active_at) > new Date(customer.chat_redirect_sent_at);
+}
+async function markChatRedirectSent(customerId) {
+  await pool.query('update customers set chat_redirect_sent_at = now() where id = $1', [customerId]);
 }
 
 // Chidera, 2026-09-22: "meta will start charging 14 naira per message...
@@ -4593,7 +4643,17 @@ export async function handlePendingBatch(customer, text) {
     // (guests there belong on their table's own page, /t, not /wa --
     // dine-in was never in scope for this feature).
     if (customer.channel === 'whatsapp' && order.channel !== 'dinein') {
-      await sendStartOrderLink(customer);
+      // Chidera, 2026-09-24: "bot must not answer every reply customer
+      // makes on bare chat, just resend them the place to text once if
+      // they text bare and if they text bare again, leave it stay
+      // silent." This used to fire on every single bare-WhatsApp text
+      // while an order was active -- a real send every time, exactly the
+      // "unbounded real message count" the comment above already warned
+      // about, just for this specific redirect instead of the AI path.
+      if (await needsChatRedirect(customer)) {
+        await sendStartOrderLink(customer);
+        await markChatRedirectSent(customer.id);
+      }
       return;
     }
     if (await detectWantsHuman(text)) {

@@ -325,6 +325,12 @@ create unique index if not exists customers_menu_token_idx on customers (menu_to
 -- 'website' into customers.channel directly.
 alter table customers add column if not exists web_chat_active_at timestamptz;
 
+-- Chidera, 2026-09-24: "the customer should get a one time we are trying
+-- to reach out to you tap here to text... if they text bare again, leave
+-- it stay silent." Shared by sendStaffReply and handlePendingBatch's own
+-- bare-WhatsApp redirect -- see 0063_chat_redirect_sent_at.sql.
+alter table customers add column if not exists chat_redirect_sent_at timestamptz;
+
 create table if not exists product (
   id uuid primary key default gen_random_uuid(),
   name text not null,
