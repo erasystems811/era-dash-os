@@ -238,7 +238,7 @@ export default function DineIn() {
                     )}
                   </td>
                   {editable && (
-                    <td style={{ display: 'flex', gap: 8 }}>
+                    <td className="button-row" style={{ gap: 8 }}>
                       {t.has_open_session && (
                         <button className="secondary" onClick={() => closeTable(t.id)}>
                           Close table

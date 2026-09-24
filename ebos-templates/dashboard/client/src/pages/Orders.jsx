@@ -194,7 +194,7 @@ function NewOrderForm({ onCreated, onCancel }) {
           </p>
         )}
 
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="button-row" style={{ gap: 8 }}>
           <button type="submit" disabled={saving}>
             {saving ? 'Creating...' : 'Create order'}
           </button>

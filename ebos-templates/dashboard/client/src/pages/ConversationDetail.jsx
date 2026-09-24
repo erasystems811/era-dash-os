@@ -99,7 +99,7 @@ export default function ConversationDetail() {
             {customer.handover_reason ? ` — ${customer.handover_reason}` : ''}
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="button-row" style={{ gap: 8 }}>
           {canEdit(staff) && (
             <button className="danger secondary" onClick={deleteConversation} disabled={deleting}>
               {deleting ? 'Deleting...' : 'Delete conversation'}
