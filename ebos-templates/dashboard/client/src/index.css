@@ -1353,18 +1353,27 @@ label {
      instead of the browser's own often-huge default page margin, which
      otherwise pushes a narrow docket column oddly far from the edge on a
      normal A4/Letter sheet. Font sizes below (13-26px) are already sized
-     to read clearly on their own regardless of paper -- the one thing
-     genuinely specific to a real receipt-roll printer (58mm vs 80mm
-     paper width) needs the actual printer model to tune exactly, same as
-     the direct-to-thermal-printer integration itself. */
+     to read clearly on their own regardless of paper.
+     2026-09-24: "that docket the name of the printer is x-printer" --
+     the real kitchen printer is an Xprinter thermal receipt printer, an
+     80mm roll (the common width for these -- confirm and adjust to 58mm
+     if it turns out to be the narrower model). size: 80mm auto means the
+     PAGE ITSELF is the roll's real width, continuous length, instead of
+     an implicit A4/Letter page with the docket just sitting narrow inside
+     it -- this is what actually makes a thermal printer's own driver
+     print edge-to-edge on the roll instead of scaling oddly or cutting
+     off. 3mm margin, not 0 -- most thermal printer drivers already clip a
+     hairline off each edge; 0 margin risks losing the outermost pixels of
+     text right at the paper edge. */
   @page {
-    margin: 8mm;
+    size: 80mm auto;
+    margin: 3mm;
   }
   .printDocket {
     display: block;
     font-family: var(--font-body);
     color: #000;
-    max-width: 340px;
+    max-width: 74mm;
     margin: 0 auto;
   }
   .printDocket .docketBrand {
