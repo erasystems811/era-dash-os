@@ -66,7 +66,7 @@ function withDisplayBody(rows) {
 
 async function messageHistory(customerId) {
   const { rows } = await pool.query(
-    `select id, direction, sender, body, interactive, created_at from message
+    `select id, direction, sender, body, interactive, trigger, created_at from message
      where customer_id = $1 and channel = 'website'
      order by created_at asc`,
     [customerId]
@@ -96,7 +96,7 @@ router.get('/:token', async (req, res) => {
   // stale on purpose (prices/availability may have changed by then), this
   // only stops "I was still looking at it" from silently counting as
   // abandonment.
-  await getOpenOrder(customer.id);
+  const openOrder = await getOpenOrder(customer.id);
 
   let history = await messageHistory(customer.id);
   // First visit -- nothing logged on the website channel for this customer
@@ -132,6 +132,28 @@ router.get('/:token', async (req, res) => {
       await logWebsiteBubble({ customerId: customer.id, body, trigger: 'greeting', interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl } });
     }
     history = await messageHistory(customer.id);
+  } else if (!openOrder) {
+    // Chidera, 2026-09-24: "when i enter the web chat to place an order
+    // again it should still resend that menu for a new order to be
+    // placed." A returning customer whose last order already finished (or
+    // went stale) had no active order for getOpenOrder to find, but also
+    // nothing on the page nudging them to start again -- just old history
+    // with no obvious next step. Only sent once per "no open order"
+    // stretch (checked against the actual last row's trigger, not just
+    // "history isn't empty") -- reopening the same link again before
+    // they've typed or tapped anything doesn't resend it a second time.
+    const last = history[history.length - 1];
+    if (last?.trigger !== 'order_again_prompt') {
+      const menuToken = await ensureMenuToken(customer);
+      const menuUrl = `${process.env.PUBLIC_URL}/m/${menuToken}`;
+      await logWebsiteBubble({
+        customerId: customer.id,
+        body: `Welcome back! Tap below to place a new order.`,
+        trigger: 'order_again_prompt',
+        interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl },
+      });
+      history = await messageHistory(customer.id);
+    }
   }
 
   const branding = await resolveMenuBranding();
