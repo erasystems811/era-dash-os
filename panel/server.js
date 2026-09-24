@@ -774,6 +774,7 @@ function businessesSection(ebosClients) {
   </table>
 
   <p><a href="/monitoring">Open Bot Monitoring &rarr;</a> &mdash; the full live feed across every business, on its own page so this one stays fast as you add more businesses. "Code errors (1h)" above is still the quick at-a-glance number.</p>
+  <p><a href="/my-dashboard">Open My Dashboard &rarr;</a> &mdash; upsell success, complaint rate, abandoned chats, and WhatsApp message volume toward the 1000 free-tier limit, per business and combined.</p>
 
   <fieldset>
     <legend>Fix-bot (WhatsApp-triggered investigation agent)</legend>
@@ -1964,9 +1965,162 @@ scheduleAutoRefresh();
 </html>`;
 }
 
+// Chidera, 2026-09-24: "i want a personal dashboard for myself to monitor
+// all my ebos business and see if im really improving their business with
+// my tactics... i should be able to monitor bot text in each so i know
+// when its almost 1000". Her own cross-business read -- upsell/complaint/
+// abandoned rates (per business + everything combined) from the new
+// GET /api/ebos/business-intelligence, plus each business's real WhatsApp
+// message count against the 1000 free-tier allowance (already-built
+// /api/ebos/messaging-cost, just never front-and-center before).
+function myDashboardPage() {
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My Dashboard — ERA Dash OS</title>
+<style>
+  * { box-sizing: border-box; overflow-wrap: break-word; word-break: break-word; min-width: 0; }
+  html, body { overflow-x: hidden; max-width: 100vw; }
+  body { font-family: sans-serif; max-width: 1300px; margin: 2rem auto; padding: 0 1rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 14px; }
+  .muted { color: #666; font-size: 13px; }
+  select, button { padding: 6px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 1rem 0; }
+  .card { border: 1px solid #ccc; border-radius: 8px; padding: 12px 16px; min-width: 160px; }
+  .card .big { font-size: 26px; font-weight: bold; }
+  .card .lbl { color: #666; font-size: 13px; }
+  .bar { background: #eee; border-radius: 4px; height: 10px; width: 100%; overflow: hidden; }
+  .bar-fill { height: 100%; background: #2e7d32; }
+  .bar-fill.warn { background: #e65100; }
+  .bar-fill.danger { background: #c62828; }
+  @media (max-width: 860px) {
+    body { margin: 1rem auto; padding: 0 12px; font-size: 15px; }
+    table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+  }
+</style>
+</head>
+<body>
+  <p><a href="/">&larr; Back to ERA Dash OS</a></p>
+  <h1>My Dashboard</h1>
+  <p class="muted">Real customer-response signal across every EBOS business, not just uptime -- upsell success, complaint rate, abandoned chats, all yours to see whether your own tactics are actually landing. "Abandoned" is an honest proxy (a cancelled order the customer never replied to in the hour before it auto-closed), not an exact flag -- treat it as directionally real, not to the decimal.</p>
+  <div style="margin:6px 0;">
+    <label style="display:inline;">Window: </label>
+    <select id="biDays" style="width:auto;display:inline;" onchange="loadBusinessIntelligence()">
+      <option value="7">Last 7 days</option>
+      <option value="30" selected>Last 30 days</option>
+      <option value="90">Last 90 days</option>
+    </select>
+    <button type="button" style="margin:0 0 0 8px;" onclick="loadBusinessIntelligence()">Refresh</button>
+    <span id="biStatus" class="muted" style="margin-left:8px;"></span>
+  </div>
+
+  <h3>Overall (every business combined)</h3>
+  <div class="cards" id="biOverallCards"><div class="muted">Loading...</div></div>
+
+  <h3>Per business</h3>
+  <table>
+    <tr><th>Business</th><th>Upsell success</th><th>Complaint rate</th><th>Abandoned rate</th><th>Orders</th></tr>
+    <tbody id="biRows"><tr><td colspan="5">Loading...</td></tr></tbody>
+  </table>
+
+  <h3>WhatsApp messages this month (1000 free, then billable)</h3>
+  <p class="muted">Meta's own free allowance -- once a business crosses this, every further outbound message costs real money (~NGN14 each as of Oct 2026 pricing).</p>
+  <table>
+    <tr><th>Business</th><th>Messages sent</th><th>Of 1000 free</th><th></th></tr>
+    <tbody id="biMessageRows"><tr><td colspan="4">Loading...</td></tr></tbody>
+  </table>
+
+<script>
+const _eraNativeFetch = window.fetch.bind(window);
+window.fetch = async function (...args) {
+  const res = await _eraNativeFetch(...args);
+  if (res.status === 403) {
+    const clone = res.clone();
+    let data = null;
+    try { data = await clone.json(); } catch (e) { data = null; }
+    if (data && data.needs2fa) {
+      window.location.href = "/2fa?redirect=" + encodeURIComponent(window.location.pathname + window.location.search);
+    }
+  }
+  return res;
+};
+
+function escBi(value) {
+  const div = document.createElement('div');
+  div.textContent = value ?? '';
+  return div.innerHTML;
+}
+
+function pct(value) {
+  return value == null ? '&ndash;' : value + '%';
+}
+
+async function loadBusinessIntelligence() {
+  const statusEl = document.getElementById('biStatus');
+  const days = document.getElementById('biDays').value;
+  statusEl.textContent = 'Loading...';
+  try {
+    const [biRes, costRes] = await Promise.all([
+      fetch('/api/ebos/business-intelligence?days=' + days),
+      fetch('/api/ebos/messaging-cost'),
+    ]);
+    const bi = await biRes.json();
+    const cost = await costRes.json();
+    if (!biRes.ok) throw new Error(bi.error || 'failed to load');
+
+    const o = bi.overall;
+    document.getElementById('biOverallCards').innerHTML =
+      '<div class="card"><div class="big">' + pct(o.upsellSuccessRate) + '</div><div class="lbl">Upsell success (' + o.upsellAccepted + ' of ' + o.upsellOffered + ' offered)</div></div>' +
+      '<div class="card"><div class="big">' + pct(o.complaintRate) + '</div><div class="lbl">Complaint rate (' + o.complaints + ' of ' + o.activeCustomers + ' active customers)</div></div>' +
+      '<div class="card"><div class="big">' + pct(o.abandonedRate) + '</div><div class="lbl">Abandoned rate (' + o.abandonedOrders + ' of ' + o.totalOrders + ' orders)</div></div>';
+
+    document.getElementById('biRows').innerHTML = bi.businesses.map((b) => {
+      if (b.error) return '<tr><td>' + escBi(b.displayName) + '</td><td colspan="4">Error: ' + escBi(b.error) + '</td></tr>';
+      return '<tr>' +
+        '<td>' + escBi(b.displayName) + '</td>' +
+        '<td>' + pct(b.upsellSuccessRate) + ' (' + b.upsellAccepted + '/' + b.upsellOffered + ')</td>' +
+        '<td>' + pct(b.complaintRate) + ' (' + b.complaints + ')</td>' +
+        '<td>' + pct(b.abandonedRate) + ' (' + b.abandonedOrders + ')</td>' +
+        '<td>' + b.totalOrders + '</td>' +
+        '</tr>';
+    }).join('') || '<tr><td colspan="5">No EBOS businesses yet.</td></tr>';
+
+    document.getElementById('biMessageRows').innerHTML = cost.map((c) => {
+      if (c.error) return '<tr><td>' + escBi(c.displayName) + '</td><td colspan="3">Error: ' + escBi(c.error) + '</td></tr>';
+      const allowance = c.freeAllowance || 1000;
+      const used = c.outboundWhatsapp || 0;
+      const ratio = Math.min(1, used / allowance);
+      const barClass = ratio >= 0.9 ? 'danger' : ratio >= 0.7 ? 'warn' : '';
+      return '<tr>' +
+        '<td>' + escBi(c.displayName) + '</td>' +
+        '<td>' + used + '</td>' +
+        '<td>' + used + ' / ' + allowance + '</td>' +
+        '<td style="min-width:120px;"><div class="bar"><div class="bar-fill ' + barClass + '" style="width:' + (ratio * 100) + '%;"></div></div></td>' +
+        '</tr>';
+    }).join('') || '<tr><td colspan="4">No EBOS businesses yet.</td></tr>';
+
+    statusEl.textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+  }
+}
+
+loadBusinessIntelligence();
+</script>
+</body>
+</html>`;
+}
+
 app.get('/monitoring', (req, res) => {
   const ebosClients = getEbosClients(loadRegistry());
   res.send(monitoringPage(ebosClients));
+});
+
+app.get('/my-dashboard', (req, res) => {
+  res.send(myDashboardPage());
 });
 
 app.get('/', (req, res) => {
@@ -2017,7 +2171,54 @@ app.get('/api/ebos/messaging-cost', async (req, res) => {
     })
   );
   results.sort((a, b) => (b.projectedCostNaira || 0) - (a.projectedCostNaira || 0));
-  res.json(results);
+  return res.json(results);
+});
+
+// Chidera, 2026-09-24: "i want a personal dashboard for myself to monitor
+// all my ebos business and see if im really improving their business with
+// my tactics... upsell success rate... abandoned chat rate... complaint
+// rate". Pulls each business's own new GET /api/business-intelligence
+// (ebos-templates/dashboard/routes/api.js) in parallel, same pattern as
+// messaging-cost above, then adds the overall (every business combined)
+// row here -- a business's own dashboard has no reason to know any other
+// business's numbers, so this combining only ever happens here, never on
+// their side.
+app.get('/api/ebos/business-intelligence', async (req, res) => {
+  const days = Number(req.query.days) || 30;
+  const ebosClients = getEbosClients(loadRegistry());
+  const results = await Promise.all(
+    ebosClients.map(async (c) => {
+      try {
+        const data = await callBusinessApi(c, `/api/business-intelligence?days=${days}`);
+        return { client: c.name, displayName: c.displayName || c.name, ...data };
+      } catch (err) {
+        return { client: c.name, displayName: c.displayName || c.name, error: err.message };
+      }
+    })
+  );
+  const ok = results.filter((r) => !r.error);
+  const sum = (key) => ok.reduce((total, r) => total + (r[key] || 0), 0);
+  const upsellOffered = sum('upsellOffered');
+  const upsellAccepted = sum('upsellAccepted');
+  const activeCustomers = sum('activeCustomers');
+  const complaints = sum('complaints');
+  const totalOrders = sum('totalOrders');
+  const abandonedOrders = sum('abandonedOrders');
+  const overall = {
+    client: '__overall__',
+    displayName: `All ${ok.length} business(es) combined`,
+    days,
+    upsellOffered,
+    upsellAccepted,
+    upsellSuccessRate: upsellOffered > 0 ? Math.round((upsellAccepted / upsellOffered) * 1000) / 10 : null,
+    complaints,
+    activeCustomers,
+    complaintRate: activeCustomers > 0 ? Math.round((complaints / activeCustomers) * 1000) / 10 : null,
+    abandonedOrders,
+    totalOrders,
+    abandonedRate: totalOrders > 0 ? Math.round((abandonedOrders / totalOrders) * 1000) / 10 : null,
+  };
+  res.json({ overall, businesses: results });
 });
 
 // Bot Monitoring's raw-content half -- merges every business's recent

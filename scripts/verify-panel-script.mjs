@@ -83,30 +83,44 @@ async function main() {
   let serverErrOutput = '';
   child.stderr.on('data', (d) => (serverErrOutput += d.toString()));
 
+  // Chidera, 2026-09-24: was only ever checking "/" -- /monitoring and
+  // /my-dashboard are fully separate pages, each with their own <script>
+  // block copy-pasted from "/"'s own pattern (see myDashboardPage's own
+  // comment), so a mistake in either one's literal was never actually
+  // caught by this check. Every page with its own <script> block goes here
+  // now, not just the first one that ever needed this.
+  const PAGES_TO_CHECK = ['/', '/monitoring', '/my-dashboard'];
   try {
     await waitForServer(`http://127.0.0.1:${PORT}/healthz`);
-    const html = await fetch(`http://127.0.0.1:${PORT}/`).then((r) => r.text());
-
-    const match = html.match(/<script>([\s\S]*?)<\/script>/);
-    if (!match) throw new Error('No <script>...</script> block found in the rendered page -- page() structure changed, update this check.');
-    const scriptText = match[1];
-
-    // new Function() parses (but never executes) the code -- this is a
-    // pure syntax check, no DOM/window/document needed, and nothing here
-    // ever runs the panel's actual client-side logic.
-    try {
-      // eslint-disable-next-line no-new-func
-      new Function(scriptText);
-    } catch (err) {
-      console.error('FAILED: the rendered <script> block is not valid JavaScript.');
-      console.error(`  ${err.constructor.name}: ${err.message}`);
-      console.error('  This is exactly the bug class that broke every button on the panel on 2026-08-30 --');
-      console.error('  check for a single `\\\'` (should be `\\\\\'`) anywhere inside panel/server.js\'s page() template literal.');
+    let anyFailed = false;
+    for (const route of PAGES_TO_CHECK) {
+      const html = await fetch(`http://127.0.0.1:${PORT}${route}`).then((r) => r.text());
+      const match = html.match(/<script>([\s\S]*?)<\/script>/);
+      if (!match) {
+        console.error(`FAILED (${route}): no <script>...</script> block found in the rendered page.`);
+        anyFailed = true;
+        continue;
+      }
+      const scriptText = match[1];
+      // new Function() parses (but never executes) the code -- this is a
+      // pure syntax check, no DOM/window/document needed, and nothing here
+      // ever runs the panel's actual client-side logic.
+      try {
+        // eslint-disable-next-line no-new-func
+        new Function(scriptText);
+        console.log(`ok (${route}): rendered <script> block (${scriptText.length} chars) is valid JavaScript.`);
+      } catch (err) {
+        console.error(`FAILED (${route}): the rendered <script> block is not valid JavaScript.`);
+        console.error(`  ${err.constructor.name}: ${err.message}`);
+        console.error('  This is exactly the bug class that broke every button on the panel on 2026-08-30 --');
+        console.error('  check for a single `\\\'` (should be `\\\\\'`) anywhere inside that page\'s own template literal.');
+        anyFailed = true;
+      }
+    }
+    if (anyFailed) {
       process.exitCode = 1;
       return;
     }
-
-    console.log(`ok: rendered <script> block (${scriptText.length} chars) is valid JavaScript.`);
   } finally {
     child.kill();
     rmSync(tmp, { recursive: true, force: true });
