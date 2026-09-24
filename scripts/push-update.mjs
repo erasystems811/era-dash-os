@@ -74,6 +74,7 @@ function parseArgs(argv) {
     else if (arg === '--all-ebos') args.allEbos = true;
     else if (arg.startsWith('--branch=')) args.branch = arg.slice('--branch='.length);
     else if (arg === '--confirmed') args.confirmed = true;
+    else if (arg === '--override-branch') args.overrideBranch = true;
   }
   if (!args.client && !args.allEbos) {
     throw new Error('Usage: push-update.mjs --client=slug [--branch=name] | --all-ebos');
@@ -113,6 +114,25 @@ function git(args, cwd) {
 // different Claude session with no memory of this one) could silently
 // pick up the wrong branch. No manual "remember to switch back" step for
 // a human OR another session to forget.
+// Chidera's era-demo, 2026-09-24, real live incident (three times in one
+// day): a client can be BOTH "Chidera's own real business, always main" and
+// someone else's active --branch sandbox target at the same time, and
+// nothing here knew that. A plain `--client=X` push always deploys local
+// main regardless of what's actually running on the server -- so every
+// ordinary push silently stomped a feature branch someone else had
+// deliberately put there with `--branch=`, with no warning to either side.
+// lastPushedBranch (set by both paths below) is the fix: a plain push
+// refuses outright if the client's last push was a non-main branch, unless
+// you pass --override-branch acknowledging you're doing it on purpose.
+function checkBranchOverwrite(client, args) {
+  if (client.lastPushedBranch && client.lastPushedBranch !== 'main' && !args.overrideBranch) {
+    throw new Error(
+      `Refusing: ${client.name}'s last push was branch "${client.lastPushedBranch}", not main (someone is actively testing something there). ` +
+      `A plain push here would silently overwrite it. If you genuinely mean to put main back, pass --override-branch.`
+    );
+  }
+}
+
 async function pushBranchToSandboxClient(client, branch) {
   const originalBranch = git(['rev-parse', '--abbrev-ref', 'HEAD'], REPO_ROOT);
   const originalDirty = git(['status', '--porcelain'], REPO_ROOT);
@@ -231,10 +251,12 @@ async function main() {
     }
     console.log(`\n=== ${targets[0].name} (${targets[0].ip}) -- from branch "${args.branch}" ===`);
     await pushBranchToSandboxClient(targets[0], args.branch);
-    upsertClient(registry, { name: targets[0].name, lastPushedAt: new Date().toISOString() });
+    upsertClient(registry, { name: targets[0].name, lastPushedAt: new Date().toISOString(), lastPushedBranch: args.branch });
     saveRegistry(registry);
     return;
   }
+
+  for (const client of targets) checkBranchOverwrite(client, args);
 
   const results = [];
   for (const client of targets) {
@@ -243,7 +265,7 @@ async function main() {
 
   const now = new Date().toISOString();
   for (const r of results) {
-    if (r.ok) upsertClient(registry, { name: r.name, lastPushedAt: now });
+    if (r.ok) upsertClient(registry, { name: r.name, lastPushedAt: now, lastPushedBranch: 'main' });
   }
   saveRegistry(registry);
 
