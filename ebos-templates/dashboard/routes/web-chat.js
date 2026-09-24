@@ -21,6 +21,7 @@ import {
   handleWebChatMessage,
   handleWebChatMedia,
   handleUpsellListTap,
+  handleUpsellMultiTap,
   handleOrderConfirmNoTap,
   handleOrderConfirmYesTap,
   logWebsiteBubble,
@@ -273,7 +274,21 @@ router.post('/:token/tap', async (req, res) => {
   customer.channel = 'website';
   await touchWebChatActive(customer.id);
 
-  const { buttonId, title, rowId } = req.body || {};
+  const { buttonId, title, rowId, upsellPicks } = req.body || {};
+
+  // Chidera, 2026-09-24: "let them be able to pick multiple and also when
+  // they pick one let the + and - thing show so they can buy more than
+  // 1." Web-chat only -- the upsell list-sheet's own "Add selected"
+  // button, distinct from a plain single-row tap (rowId, below), which
+  // still covers "No thanks".
+  if (Array.isArray(upsellPicks)) {
+    const picks = upsellPicks
+      .filter((p) => p && typeof p.productId === 'string')
+      .map((p) => ({ productId: p.productId, quantity: Number(p.quantity) || 1 }));
+    if (!picks.length) return res.status(400).json({ error: 'Pick at least one item first.' });
+    await handleUpsellMultiTap({ customer, picks });
+    return res.json({ ok: true });
+  }
 
   if (rowId) {
     // Every list bubble sent on this channel is an upsell list today (see

@@ -1475,11 +1475,22 @@ async function askNextItemQuestion(orderId) {
 // keyword matching nextUpsellGroup itself uses to decide a category's
 // already satisfied -- one source of truth for what counts as a match,
 // not a second guess at the same keywords.
+// Chidera, 2026-09-24: "it could be a side too." Order matters here --
+// pickUpsellOptions below caps at MAX_UPSELL_PICKS, taking groups in this
+// list's own order, so drink/protein/side get priority over snack when a
+// business sells all four and an order is missing everything.
 export const UPSELL_GROUPS = [
   { key: 'drink', keywords: ['drink', 'beverage', 'juice', 'water'], label: 'a drink' },
   { key: 'protein', keywords: ['protein', 'meat'], label: 'a protein' },
+  { key: 'side', keywords: ['side', 'sides'], label: 'a side' },
   { key: 'snack', keywords: ['snack', 'small chop', 'appetiser', 'appetizer', 'starter'], label: 'a snack' },
 ];
+
+// Chidera, 2026-09-24: "max 3 upsells" -- with 'side' added, UPSELL_GROUPS
+// itself now has 4 possible categories; a single order is never offered
+// more than this many at once regardless of how many it's actually
+// missing.
+const MAX_UPSELL_PICKS = 3;
 
 export function categoryMatchesGroup(category, keywords) {
   if (!category) return false;
@@ -1506,6 +1517,7 @@ function pickUpsellOptions(menu, orderedCategories) {
   const picks = [];
   const matchedGroups = [];
   for (const group of UPSELL_GROUPS) {
+    if (picks.length >= MAX_UPSELL_PICKS) break;
     const options = catalogueOptions(menu, group.keywords);
     if (!options.length) continue;
     const orderHasIt = orderedCategories.some((c) => categoryMatchesGroup(c, group.keywords));
@@ -1910,6 +1922,43 @@ export async function handleUpsellListTap({ phoneNumber, channelId, rowId, chann
   // a real item gets added.
   await pool.query(`delete from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
   return finishItemsCollection(customer, order, `Added ${product.name}. `);
+}
+
+// Chidera, 2026-09-24: "let them be able to pick multiple and also when
+// they pick one let the + and - thing show so they can buy more than 1
+// ... since upsells are more than 1 dont take them back to the menu to
+// ask all those finish your order questions, just ask them in webchat
+// the peppered or not and all." Web-chat only -- WhatsApp's native List
+// Message has no multi-select or quantity control, so real WhatsApp
+// customers stay on handleUpsellListTap above (one tap, one item,
+// quantity 1, still redirects to the menu for its own questions -- that
+// stays unchanged, a real cost tradeoff for real WhatsApp specifically).
+// picks: [{ productId, quantity }], already deduplicated and non-empty by
+// the time the route calls this.
+export async function handleUpsellMultiTap({ customer, picks }) {
+  const order = await resolveCustomerOrder(customer);
+  if (!order || !order.pending_upsell_category) return;
+
+  order.pending_upsell_category = null;
+  await pool.query('update "order" set pending_upsell_category = null where id = $1', [order.id]);
+
+  const added = [];
+  for (const pick of picks) {
+    const product = await productForRowId(pick.productId);
+    if (!product) continue;
+    const quantity = Math.max(1, Math.min(20, Math.trunc(Number(pick.quantity)) || 1));
+    await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: `[tapped: ${quantity}x ${product.name}]`, processed: true });
+    await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, product.id, quantity, product.price, customer.id]);
+    added.push(`${quantity}x ${product.name}`);
+  }
+  // preferTextForQuestions: true -- "dont take them back to the menu...
+  // just ask them in webchat." Already on the free web chat page; a
+  // redirect out to /m/:token for one short question is a worse
+  // experience here than just asking it, same reasoning
+  // handlePendingItemQuestion's own text-originated callers already use.
+  if (!added.length) return finishItemsCollection(customer, order, '', { preferTextForQuestions: true });
+  await pool.query(`delete from order_payment where order_id = $1 and status = 'pending'`, [order.id]);
+  return finishItemsCollection(customer, order, `Added ${added.join(', ')}. `, { preferTextForQuestions: true });
 }
 
 // The reply to a question just asked by askNextItemQuestion above -- taken

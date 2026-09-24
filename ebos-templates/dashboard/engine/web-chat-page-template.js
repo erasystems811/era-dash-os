@@ -95,14 +95,25 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   #listSheetHead{flex:none;display:flex;align-items:center;justify-content:space-between;padding:16px 18px;font-weight:700;font-size:17px}
   #listSheetClose{background:none;border:none;color:var(--text);font-size:20px;cursor:pointer;padding:4px}
   #listSheetRows{flex:1;overflow-y:auto;padding:0 18px}
-  .sheetrow{display:flex;align-items:center;justify-content:space-between;width:100%;background:none;border:none;border-top:1px solid var(--divider);color:var(--text);font-family:inherit;text-align:left;padding:14px 0;cursor:pointer}
+  /* Chidera, 2026-09-24: "let them be able to pick multiple and also when
+     they pick one let the + and - thing show so they can buy more than
+     1." A row is now a plain wrapper (not itself the button -- a button
+     can't contain another button) around a toggle button (label+checkbox)
+     and, once selected, a sibling quantity stepper. */
+  .sheetrow{display:flex;align-items:center;justify-content:space-between;width:100%;border-top:1px solid var(--divider);padding:14px 0}
   .sheetrow:first-child{border-top:none}
-  .sheetrow > span:first-child{display:flex;flex-direction:column}
+  .sheetrow-toggle{display:flex;align-items:center;gap:10px;flex:1;min-width:0;background:none;border:none;color:var(--text);font-family:inherit;text-align:left;cursor:pointer;padding:0}
+  .sheetrow-toggle > span:last-child{display:flex;flex-direction:column;min-width:0}
   .sheetrow .label{font-size:15.5px}
   .sheetrow .desc{color:var(--text2);font-size:13px;margin-top:2px}
-  .sheetrow .check{color:var(--accent);font-size:18px;opacity:0}
-  .sheetrow.selected .check{opacity:1}
+  .sheetrow .check{color:var(--text2);font-size:17px;flex:none}
+  .sheetrow.selected .check{color:var(--accent)}
+  .sheetrow .qty{display:flex;align-items:center;gap:10px;flex:none;margin-left:10px}
+  .qtybtn{width:26px;height:26px;flex:none;border-radius:50%;border:1px solid var(--divider);background:#0f171c;color:var(--text);font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;font-family:inherit;padding:0}
+  .qtybtn:active{background:#182229}
+  .qtycount{min-width:16px;text-align:center;font-size:14.5px;font-weight:600}
   #listSheetSend{flex:none;margin:14px 18px;padding:13px;border:none;border-radius:24px;background:linear-gradient(180deg,#1fda63,#0abb5f);color:#062b1a;font-weight:700;font-size:15.5px;cursor:pointer}
+  #listSheetSend:disabled{opacity:.4;cursor:default}
   #composer{flex:none;display:flex;gap:6px;align-items:center;padding:8px 10px;background:var(--header)}
   .composer-icon{flex:none;width:26px;height:26px;border:none;background:none;color:var(--text2);font-size:21px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
   #inputWrap{flex:1;display:flex;align-items:center;background:var(--input);border-radius:22px;padding:0 6px 0 16px}
@@ -232,15 +243,18 @@ function renderAll() {
 renderAll();
 
 // The list-message bottom sheet -- WhatsApp's real "Choose" flow opens a
-// sheet with every real option, a single selection (defaults to the
-// first row, tap another to change it), and one Send button at the
-// bottom that submits whichever row is currently selected.
+// sheet with every real option. Chidera, 2026-09-24: "let them be able to
+// pick multiple and also when they pick one let the + and - thing show so
+// they can buy more than 1" -- selectedQuantities maps a row's own id to
+// however many of it they want (absent = not selected). "No thanks"
+// (upsell::skip) stays its own single immediate action, never part of the
+// multi-select set.
 let openListInteractive = null;
-let selectedRowId = null;
+let selectedQuantities = {};
 
 function openListSheet(interactive) {
   openListInteractive = interactive;
-  selectedRowId = (interactive.rows || [])[0] ? interactive.rows[0].id : null;
+  selectedQuantities = {};
   document.getElementById('listSheetTitle').textContent = interactive.sectionTitle || interactive.buttonText || 'Choose';
   renderListSheetRows();
   document.getElementById('listSheet').classList.add('open');
@@ -248,14 +262,50 @@ function openListSheet(interactive) {
 function renderListSheetRows() {
   const el = document.getElementById('listSheetRows');
   el.innerHTML = (openListInteractive.rows || []).map(function (r) {
-    const sel = r.id === selectedRowId;
-    return '<button type="button" class="sheetrow' + (sel ? ' selected' : '') + '" data-row-id="' + esc(r.id) + '"><span><span class="label">' + esc(r.title) + '</span>' + (r.description ? '<span class="desc">' + esc(r.description) + '</span>' : '') + '</span><span class="check">&#10003;</span></button>';
+    const desc = r.description ? '<span class="desc">' + esc(r.description) + '</span>' : '';
+    if (r.id === 'upsell::skip') {
+      return '<div class="sheetrow"><button type="button" class="sheetrow-toggle" data-skip-row="1"><span class="check">&#8250;</span><span><span class="label">' + esc(r.title) + '</span>' + desc + '</span></button></div>';
+    }
+    const qty = selectedQuantities[r.id];
+    const sel = qty != null;
+    const qtyControls = sel
+      ? '<span class="qty"><button type="button" class="qtybtn" data-qty-minus="' + esc(r.id) + '">&#8722;</button><span class="qtycount">' + qty + '</span><button type="button" class="qtybtn" data-qty-plus="' + esc(r.id) + '">&#43;</button></span>'
+      : '';
+    return '<div class="sheetrow' + (sel ? ' selected' : '') + '"><button type="button" class="sheetrow-toggle" data-row-id="' + esc(r.id) + '"><span class="check">' + (sel ? '&#9745;' : '&#9744;') + '</span><span><span class="label">' + esc(r.title) + '</span>' + desc + '</span></button>' + qtyControls + '</div>';
   }).join('');
+  const total = Object.keys(selectedQuantities).reduce(function (sum, id) { return sum + selectedQuantities[id]; }, 0);
+  const sendBtn = document.getElementById('listSheetSend');
+  sendBtn.textContent = total ? 'Add selected (' + total + ')' : 'Send';
+  sendBtn.disabled = total === 0;
 }
 document.getElementById('listSheetRows').addEventListener('click', function (e) {
-  const row = e.target.closest('.sheetrow');
-  if (!row) return;
-  selectedRowId = row.dataset.rowId;
+  const skipBtn = e.target.closest('[data-skip-row]');
+  if (skipBtn) {
+    document.getElementById('listSheet').classList.remove('open');
+    tap({ rowId: 'upsell::skip' });
+    return;
+  }
+  const minusBtn = e.target.closest('[data-qty-minus]');
+  if (minusBtn) {
+    const id = minusBtn.dataset.qtyMinus;
+    const cur = selectedQuantities[id] || 1;
+    if (cur <= 1) delete selectedQuantities[id];
+    else selectedQuantities[id] = cur - 1;
+    renderListSheetRows();
+    return;
+  }
+  const plusBtn = e.target.closest('[data-qty-plus]');
+  if (plusBtn) {
+    const id = plusBtn.dataset.qtyPlus;
+    selectedQuantities[id] = Math.min(20, (selectedQuantities[id] || 1) + 1);
+    renderListSheetRows();
+    return;
+  }
+  const toggle = e.target.closest('.sheetrow-toggle[data-row-id]');
+  if (!toggle) return;
+  const id = toggle.dataset.rowId;
+  if (selectedQuantities[id] != null) delete selectedQuantities[id];
+  else selectedQuantities[id] = 1;
   renderListSheetRows();
 });
 document.getElementById('listSheetClose').addEventListener('click', function () {
@@ -265,8 +315,12 @@ document.getElementById('listSheetBg').addEventListener('click', function () {
   document.getElementById('listSheet').classList.remove('open');
 });
 document.getElementById('listSheetSend').addEventListener('click', function () {
+  const picks = Object.keys(selectedQuantities).map(function (rowId) {
+    return { productId: rowId.slice('upsell::'.length), quantity: selectedQuantities[rowId] };
+  });
+  if (!picks.length) return;
   document.getElementById('listSheet').classList.remove('open');
-  if (selectedRowId) tap({ rowId: selectedRowId });
+  tap({ upsellPicks: picks });
 });
 
 document.getElementById('scroll').addEventListener('click', function (e) {
