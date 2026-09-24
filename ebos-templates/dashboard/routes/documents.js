@@ -133,8 +133,13 @@ function documentPage({ title, business, customer, order, items }) {
   .box .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; margin-bottom: 8px; }
   .pay-btn { display: inline-block; margin-top: 10px; background: ${brand}; color: ${onBrand}; text-decoration: none; padding: 9px 16px; border-radius: 999px; font-weight: 600; font-size: 13.5px; }
   .footer { text-align: center; color: var(--mid); font-size: 12px; margin-top: 32px; }
-  .back-link { display: inline-block; margin-bottom: 18px; color: var(--mid); text-decoration: none; font-size: 13.5px; }
-  .back-link:active { color: var(--ink); }
+  /* Chidera, 2026-09-24: "that back to chat in invoice is not visibly
+     obvious." Was plain small gray text, easy to miss above the header --
+     a real chip button now, same white-card-on-paper weight as .bill-to/
+     .box already use elsewhere on this page, so it actually reads as a
+     tappable control. */
+  .back-link { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 18px; background: #fff; border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-weight: 600; font-size: 13.5px; padding: 9px 16px 9px 12px; border-radius: 999px; }
+  .back-link:active { background: var(--paper); }
 </style></head>
 <body>
   ${

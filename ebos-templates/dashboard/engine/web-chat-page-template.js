@@ -80,6 +80,13 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   .linkbtn:active{background:#03946f}
   .linkbtn .icon{font-size:15px}
   .linkcaption{display:block;text-align:center;color:var(--text2);font-size:12px;margin-top:6px}
+  /* Chidera, 2026-09-24: "yes to confirm and no change should also look
+     like buttons" -- same filled-pill treatment as .linkbtn, but stacked
+     with a real gap (not touching) so multiple buttons in one bubble each
+     still read as their own separate control. */
+  .confirmbtns{padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px}
+  .confirmbtn{display:flex;align-items:center;justify-content:center;width:100%;background:var(--accent);border:none;border-radius:8px;color:#04120d;font-weight:700;font-size:14.5px;padding:11px 12px;cursor:pointer;font-family:inherit}
+  .confirmbtn:active{background:#03946f}
   /* List-message bottom sheet */
   #listSheet{position:fixed;inset:0;display:none;z-index:20}
   #listSheet.open{display:block}
@@ -165,12 +172,23 @@ function fmtDay(iso) {
 function renderActions(interactive) {
   if (!interactive) return '';
   if (interactive.type === 'buttons') {
-    return '<div class="actions">' + (interactive.buttons || []).map(function (b) {
-      return '<button type="button" class="actionrow" data-button-id="' + esc(b.id) + '" data-title="' + esc(b.title) + '"><span class="icon">&#8617;</span>' + esc(b.title) + '</button>';
+    // Chidera, 2026-09-24: "yes to confirm and no change should also look
+    // like buttons" -- these used to be the same flat, divider-separated
+    // list rows as the upsell "Choose" row below, which read as plain
+    // text rather than something tappable. Real pill buttons now, same
+    // filled/rounded treatment as the "Pay now"/"See menu" cta_url
+    // buttons, stacked with a real gap between them (not touching) so
+    // each one reads as its own distinct button.
+    return '<div class="confirmbtns">' + (interactive.buttons || []).map(function (b) {
+      return '<button type="button" class="confirmbtn" data-button-id="' + esc(b.id) + '" data-title="' + esc(b.title) + '">' + esc(b.title) + '</button>';
     }).join('') + '</div>';
   }
   if (interactive.type === 'list') {
-    return '<div class="actions"><button type="button" class="actionrow" data-open-list="1"><span class="icon">&#9776;</span>' + esc(interactive.buttonText || 'Choose') + '</button></div>';
+    // Chidera, 2026-09-24: "when you want to upsell on web chat, that
+    // choose, let there be a tap here text so its obvious its a button."
+    // Same "Tap to open" caption treatment the cta_url/document rows
+    // already got for the exact same reason.
+    return '<div class="actions"><button type="button" class="actionrow" data-open-list="1"><span class="icon">&#9776;</span>' + esc(interactive.buttonText || 'Choose') + '</button></div><span class="linkcaption">Tap here to see options</span>';
   }
   if (interactive.type === 'cta_url') {
     // newTab (e.g. Paystack's "Pay now") -- a genuinely external page we
@@ -267,7 +285,10 @@ document.getElementById('scroll').addEventListener('click', function (e) {
   }
   const btn = e.target.closest('button[data-button-id]');
   if (!btn) return;
-  btn.closest('.actions').querySelectorAll('.actionrow').forEach(function (b) { b.disabled = true; });
+  // .confirmbtns (Yes/No pill buttons) or the older .actions wrapper --
+  // whichever this button actually sits in, disable every button inside
+  // it so a double-tap can't fire twice while the reply is in flight.
+  btn.parentElement.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
   tap({ buttonId: btn.dataset.buttonId, title: btn.dataset.title });
 });
 
