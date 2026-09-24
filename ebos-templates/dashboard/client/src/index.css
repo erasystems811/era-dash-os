@@ -1356,16 +1356,26 @@ label {
      2026-09-24: "that docket the name of the printer is x-printer" --
      the real kitchen printer is an Xprinter thermal receipt printer, an
      80mm roll (the common width for these -- confirm and adjust to 58mm
-     if it turns out to be the narrower model). size: 80mm auto means the
-     PAGE ITSELF is the roll's real width, continuous length, instead of
-     an implicit A4/Letter page with the docket just sitting narrow inside
-     it -- this is what actually makes a thermal printer's own driver
-     print edge-to-edge on the roll instead of scaling oddly or cutting
-     off. 3mm margin, not 0 -- most thermal printer drivers already clip a
-     hairline off each edge; 0 margin risks losing the outermost pixels of
-     text right at the paper edge. */
+     if it turns out to be the narrower model). 3mm margin, not 0 -- most
+     thermal printer drivers already clip a hairline off each edge; 0
+     margin risks losing the outermost pixels of text right at the paper
+     edge.
+     2026-09-24, real live report: "the docket is showing 2 pages when i
+     want to print, is it that big?" -- was size: 80mm auto, the CSS-spec-
+     correct way to say "one continuous page as tall as the content
+     needs," but Chrome's print pipeline (preview AND the real print,
+     confirmed against her own report) has a long-standing bug where auto
+     block-size doesn't reliably give one unbounded page for a receipt-
+     width page -- it silently falls back to a default page LENGTH and
+     paginates, splitting one order's docket across two physical tears on
+     a continuous roll for no real reason. A generous FIXED height (400mm,
+     comfortably taller than any real order this app prints) is the
+     standard workaround -- Chrome handles an explicit height reliably.
+     Blank trailing space at the end of a short docket isn't printed on a
+     real continuous-feed thermal driver, so this costs nothing for a
+     normal-length order and just gives long ones enough room. */
   @page {
-    size: 80mm auto;
+    size: 80mm 400mm;
     margin: 3mm;
   }
   .printDocket {
