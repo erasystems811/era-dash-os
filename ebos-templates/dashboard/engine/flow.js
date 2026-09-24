@@ -2147,17 +2147,24 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
   // so it only ever activates on an explicit Settings choice.
   if (paymentConfig?.provider === 'monnify') {
     try {
-      const result = await initializeMonnifyTransaction({ order, customer, amount });
-      if (result) {
-        const minutesLeft = Math.max(1, Math.round((new Date(result.expiresAt).getTime() - Date.now()) / 60000));
+      // Chidera, 2026-09-24: "the monnify account that was sent is
+      // unavailable and invalid and cant it be a link like paystack? so the
+      // auto confirm can be obvious." A real hosted checkout link now
+      // (initializeMonnifyTransaction returns the URL string directly,
+      // same contract as initializePaystackTransaction below), not account
+      // details rendered into the text -- same "using the button below"
+      // wording Paystack's own branch uses, same paymentUrl handling in
+      // sendPaymentInstructions (sendPaymentLinkButton), no special-casing.
+      const url = await initializeMonnifyTransaction({ order, customer, amount });
+      if (url) {
         return {
-          payLine: `Please pay NGN ${amountLabel} using the account below (valid for the next ${minutesLeft} minutes).\n\nBank: ${result.bankName}\nAccount number: ${result.accountNumber}\nAccount name: ${result.accountName}\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
+          payLine: `Please pay NGN ${amountLabel} using the button below.\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,
           needsHandover: false,
-          paymentUrl: null,
+          paymentUrl: url,
         };
       }
     } catch (err) {
-      console.error(`Monnify dynamic account failed for order ${order.id}, falling back to bank details: ${err.message}`);
+      console.error(`Monnify checkout link failed for order ${order.id}, falling back to bank details: ${err.message}`);
     }
   }
   // Chidera, 2026-09-23: "so what of opay?" -- same shape as Monnify above,

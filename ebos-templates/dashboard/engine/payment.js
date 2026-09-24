@@ -3,7 +3,7 @@
 // encryption needed once there's only one business per deployment.
 import crypto from 'node:crypto';
 import { pool } from '../lib/db.js';
-import { callMonnifyDynamicAccount } from './monnify-api.js';
+import { callMonnifyCheckoutLink } from './monnify-api.js';
 import { callOpayBankTransfer } from './opay-api.js';
 
 // Chidera, 2026-09-16: "no paystack link for payment??" -- root cause,
@@ -96,24 +96,21 @@ export async function initializeOrderPaymentPaystackTransaction({ orderPayment, 
   return result.authorizationUrl;
 }
 
-// Chidera, 2026-09-23: "then we wont use reserved we will use dynamic" --
-// Monnify's "Pay with Bank Transfer", a real per-order dynamic virtual
-// account (no BVN/NIN needed, unlike Reserved Accounts), auto-confirmed via
-// engine/webhook-monnify.js. Same shape as initializePaystackTransaction
-// above but returns account DETAILS (no clickable link exists for a bank
-// transfer) instead of a URL -- flow.js's buildPayLine renders those into
-// the plain-text pay line itself. The Monnify reference is stored in the
-// SAME payment_reference column Paystack already uses, so
-// findOrderByPaymentReference below resolves either provider's webhook
-// without any change.
+// Chidera, 2026-09-24: "the monnify account that was sent is unavailable
+// and invalid and cant it be a link like paystack? so the auto confirm can
+// be obvious." Was the dynamic bank-transfer ACCOUNT (no clickable link
+// for a bank transfer, account details rendered into the plain-text pay
+// line by flow.js's buildPayLine) -- now a real hosted checkout link,
+// same shape as initializePaystackTransaction above, stored in the SAME
+// payment_link_url/payment_reference columns Paystack already uses, so
+// findOrderByPaymentReference below and buildPayLine's own paymentUrl
+// handling both resolve either provider identically, no special-casing
+// needed anywhere downstream.
 export async function initializeMonnifyTransaction({ order, customer, amount }) {
-  const result = await callMonnifyDynamicAccount({ customer, amount, referencePrefix: order.reference });
+  const result = await callMonnifyCheckoutLink({ customer, amount, referencePrefix: order.reference });
   if (!result) return null;
-  await pool.query(
-    `update "order" set payment_reference = $1, monnify_account_number = $2, monnify_account_name = $3, monnify_bank_name = $4, monnify_account_expires_at = $5 where id = $6`,
-    [result.paymentReference, result.accountNumber, result.accountName, result.bankName, result.expiresAt, order.id]
-  );
-  return result;
+  await pool.query('update "order" set payment_reference = $1, payment_link_url = $2 where id = $3', [result.paymentReference, result.checkoutUrl, order.id]);
+  return result.checkoutUrl;
 }
 
 // Chidera, 2026-09-23: "so what of opay?" -- same shape as

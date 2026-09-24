@@ -320,6 +320,15 @@ create index if not exists customers_last_message_at_idx on customers (last_mess
 alter table customers add column if not exists menu_token text;
 create unique index if not exists customers_menu_token_idx on customers (menu_token) where menu_token is not null;
 
+-- migrations/0060_website_chat.sql -- touched on every request into the
+-- web-chat page (routes/web-chat.js). Lets an async trigger
+-- (completePayment, fired from Paystack's webhook with no live customer
+-- object) know a customer's most recent turn was on this page, without
+-- ever writing 'website' into `channel` itself (which must stay the real
+-- stored channel so a fresh WhatsApp text days later still starts the
+-- normal WhatsApp flow).
+alter table customers add column if not exists web_chat_active_at timestamptz;
+
 create table if not exists product (
   id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -525,6 +534,31 @@ create table if not exists "order" (
   -- handleCollectFulfilment.
   delivery_zone_candidate_id uuid references delivery_zone(id),
   delivery_area_prompted_at timestamptz,
+  -- migrations/0060_monnify.sql -- display-only, from when Monnify's
+  -- provider was the dynamic bank-transfer ACCOUNT flow. That flow was
+  -- replaced by a real checkout link (engine/payment.js's
+  -- initializeMonnifyTransaction now reuses payment_link_url/
+  -- payment_reference above, same as Paystack) after the account kept
+  -- coming back unusable live ("the monnify account that was sent is
+  -- unavailable and invalid") -- these four are unused as of 2026-09-24,
+  -- left in place rather than dropped, same reasoning as
+  -- transfer_account_number above.
+  monnify_account_number text,
+  monnify_account_name text,
+  monnify_bank_name text,
+  monnify_account_expires_at timestamptz,
+  -- migrations/0061_opay.sql -- OPay's own dynamic bank-transfer account,
+  -- same shape as Monnify's above (no account NAME column -- OPay's own
+  -- response never returns one). Still the live flow for this provider
+  -- (only Monnify's own account got swapped for a link).
+  opay_account_number text,
+  opay_bank_name text,
+  opay_account_expires_at timestamptz,
+  -- migrations/0063_payment_method_cash_collected.sql -- what the new
+  -- finance dashboard's "total cash collected" figure sums (only ever set
+  -- for payment_method = 'cash').
+  payment_method text,
+  cash_collected numeric,
   -- Set the moment status actually becomes 'completed' -- both the
   -- staff-driven /orders/:id/status route and routes/rider.js's own
   -- auto-completion (delivery code entered) set this explicitly, never
@@ -925,6 +959,30 @@ create table if not exists message (
   created_at timestamptz not null default now()
 );
 create index if not exists message_platform_message_id_idx on message (platform_message_id) where platform_message_id is not null;
+
+-- migrations/0060_website_chat.sql -- structured payload for an
+-- interactive outbound message on the website channel (buttons/list/
+-- cta_url/document) -- the web-chat page renders a real bubble/button/
+-- list from this instead of flattened text; every other channel leaves
+-- this null and keeps using `body` as before.
+alter table message add column if not exists interactive jsonb;
+
+-- migrations/0062_whatsapp_send_log.sql -- Chidera, 2026-09-24: "even
+-- though a conversation is deleted it should be counted on my dash."
+-- routes/api.js's DELETE /customers/:id hard-deletes every row in
+-- `message` for that customer -- but /monitor/messaging-cost counted
+-- outbound WhatsApp sends straight out of that same table, so deleting a
+-- test conversation silently erased every real, already-billed WhatsApp
+-- send in it too. A permanent, append-only log of real outbound WhatsApp
+-- sends (engine/flow.js's logMessage), written once per send and never
+-- deleted by anything, customer-delete included. No customer_id/body/
+-- content at all on purpose -- this is a billing count, not a second copy
+-- of the conversation.
+create table if not exists whatsapp_send_log (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now()
+);
+create index if not exists whatsapp_send_log_created_at_idx on whatsapp_send_log (created_at);
 
 create table if not exists generated_document (
   id uuid primary key default gen_random_uuid(),
@@ -1332,9 +1390,12 @@ create index if not exists pos_transaction_occurred_at_idx on pos_transaction(oc
 -- bank_account_name (engine/payment.js's getPaymentConfig()), the same
 -- fields the "manual" flow has always used. Left in place, not dropped,
 -- only because migrate.mjs is DDL-additive-only by design.
+-- 'monnify'/'opay' added by migrations/0060_monnify.sql and
+-- migrations/0061_opay.sql -- both dynamic bank-transfer providers, same
+-- "then we wont use reserved we will use dynamic" shape as Paystack.
 create table if not exists payment_config (
   business_id uuid primary key references business(id),
-  provider text check (provider in ('pos', 'paystack', 'manual')),
+  provider text check (provider in ('pos', 'paystack', 'manual', 'monnify', 'opay')),
   transfer_account_number text,
   transfer_account_name text,
   transfer_bank_name text
