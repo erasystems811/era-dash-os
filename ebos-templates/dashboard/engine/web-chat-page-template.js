@@ -58,6 +58,15 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   .row{display:flex;margin:2px 0}
   .row.in{justify-content:flex-start}
   .row.out{justify-content:flex-end}
+  /* Chidera, 2026-09-24: "my own replies should be popping in on the
+     screen like bouncing (that subtle effect when a text comes in) not
+     just appearing on the screen after ive sent." A real bounce-settle,
+     not a fade -- the same "arrived" feeling as a real phone's own send
+     animation. Only ever applied to a message right as it's freshly
+     appended (see appendMessage below), never replayed on an ordinary
+     full re-render, so older bubbles never randomly re-animate. */
+  .pop-in{animation:bubblePop .28s cubic-bezier(.34,1.56,.64,1)}
+  @keyframes bubblePop{0%{transform:scale(.75);opacity:0}60%{transform:scale(1.04);opacity:1}100%{transform:scale(1)}}
   .bubble{position:relative;max-width:82%;min-width:80px;border-radius:9px;font-size:14.5px;line-height:1.4;box-shadow:0 1px 1px rgba(0,0,0,.2)}
   .row.in .bubble{background:var(--bubble-in);border-top-left-radius:0}
   .row.out .bubble{background:var(--bubble-out);border-top-right-radius:0}
@@ -224,7 +233,7 @@ function renderActions(interactive) {
   return '';
 }
 
-function renderMessage(m) {
+function renderMessage(m, animate) {
   const side = m.direction === 'inbound' ? 'out' : 'in';
   const body = '<div class="body">' + esc(m.body).replace(/\\n/g, '<br>') + '</div>';
   // Read-receipt ticks only make sense on the customer's own bubbles (the
@@ -234,7 +243,24 @@ function renderMessage(m) {
   const ticks = side === 'out' ? '<span class="ticks">&#10003;&#10003;</span>' : '';
   const time = '<div class="time">' + fmtTime(m.created_at) + ticks + '</div>';
   const actions = m.direction === 'outbound' ? renderActions(m.interactive) : '';
-  return '<div class="row ' + side + '"><div class="bubble">' + body + time + actions + '</div></div>';
+  return '<div class="row ' + side + (animate ? ' pop-in' : '') + '"><div class="bubble">' + body + time + actions + '</div></div>';
+}
+
+// Chidera, 2026-09-24: "my own replies should be popping in... not just
+// appearing on the screen after ive sent." Appends ONE bubble straight
+// onto the live DOM (with the bounce-in animation) instead of the usual
+// full renderAll() rebuild -- renderAll() is what runs right after this on
+// the next poll/server-confirm anyway, reconciling everything back to the
+// real data; this is purely the immediate, optimistic "it landed" feel.
+function appendMessage(m) {
+  const scroll = document.getElementById('scroll');
+  const pills = scroll.querySelectorAll('.datepill');
+  const lastDay = pills.length ? pills[pills.length - 1].textContent : null;
+  const day = fmtDay(m.created_at);
+  let html = day !== lastDay ? '<div class="daterow"><span class="datepill">' + esc(day) + '</span></div>' : '';
+  html += renderMessage(m, true);
+  scroll.insertAdjacentHTML('beforeend', html);
+  scroll.scrollTop = scroll.scrollHeight;
 }
 
 function renderAll() {
@@ -284,6 +310,7 @@ if (freshBatch.length) {
     HISTORY = HISTORY.concat(freshBatch);
     lastCursor = freshBatch[freshBatch.length - 1].created_at;
     renderAll();
+    playReceiveSound();
     if (freshBatch.some(function (m) { return m.trigger === 'payment_confirmed'; })) {
       showBanner('Payment confirmed!');
     }
@@ -300,6 +327,8 @@ if (freshBatch.length) {
 // multi-select set.
 let openListInteractive = null;
 let selectedQuantities = {};
+// Guards BOTH the Send and "No thanks" taps below -- see each one's own comment.
+let sheetSubmitting = false;
 
 function openListSheet(interactive) {
   openListInteractive = interactive;
@@ -330,6 +359,11 @@ function renderListSheetRows() {
 document.getElementById('listSheetRows').addEventListener('click', function (e) {
   const skipBtn = e.target.closest('[data-skip-row]');
   if (skipBtn) {
+    // Same double-tap guard as the Send button just below -- a fast
+    // double-tap on "No thanks" would otherwise skip two upsell
+    // categories at once and send two replies for one tap.
+    if (sheetSubmitting) return;
+    sheetSubmitting = true;
     document.getElementById('listSheet').classList.remove('open');
     tap({ rowId: 'upsell::skip' });
     return;
@@ -363,11 +397,22 @@ document.getElementById('listSheetClose').addEventListener('click', function () 
 document.getElementById('listSheetBg').addEventListener('click', function () {
   document.getElementById('listSheet').classList.remove('open');
 });
-document.getElementById('listSheetSend').addEventListener('click', function () {
+document.getElementById('listSheetSend').addEventListener('click', function (e) {
   const picks = Object.keys(selectedQuantities).map(function (rowId) {
     return { productId: rowId.slice('upsell::'.length), quantity: selectedQuantities[rowId] };
   });
   if (!picks.length) return;
+  // Chidera, 2026-09-24, real report: "when i tap a choose and put 2
+  // drinks, the bot sends me 2 response." Same double-tap protection the
+  // confirm/quick-reply buttons already have (see this file's other
+  // data-button-id handler's own comment) -- this one never got it, so a
+  // fast double-tap/ghost-click fired tap() twice, adding every pick
+  // TWICE and running finishItemsCollection twice (two real replies for
+  // one selection). disabled, not just hidden -- the sheet's own close
+  // animation/removal isn't synchronous enough to rule out a second event
+  // landing in between.
+  if (e.currentTarget.disabled) return;
+  e.currentTarget.disabled = true;
   document.getElementById('listSheet').classList.remove('open');
   tap({ upsellPicks: picks });
 });
@@ -402,14 +447,44 @@ async function tap(body) {
   poll();
 }
 
+// Chidera, 2026-09-24: "if possible add the text sound fx." Short,
+// synthesized tones (Web Audio API, no external audio file to host/load)
+// -- a quick rising blip for the customer's own send, a slightly lower
+// one for a bot reply landing. One shared AudioContext, created lazily on
+// first real use (browsers refuse to start one before any user gesture
+// has happened on the page at all; by the time either sound actually
+// needs to play, the customer has already tapped/typed something).
+// Deliberately best-effort -- audio failing (blocked, unsupported) must
+// never break sending or receiving an actual message.
+let audioCtx = null;
+function playTone(freq, duration) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.16, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration);
+  } catch (err) {}
+}
+function playSendSound() { playTone(720, 0.11); }
+function playReceiveSound() { playTone(480, 0.14); }
+
 async function sendText() {
   const input = document.getElementById('textInput');
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
   document.getElementById('sendBtn').disabled = true;
-  HISTORY.push({ id: 'local-' + Date.now(), direction: 'inbound', sender: 'customer', body: text, interactive: null, created_at: new Date().toISOString() });
-  renderAll();
+  const localMsg = { id: 'local-' + Date.now(), direction: 'inbound', sender: 'customer', body: text, interactive: null, created_at: new Date().toISOString() };
+  HISTORY.push(localMsg);
+  appendMessage(localMsg);
+  playSendSound();
   try {
     await fetch(MESSAGE_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text }) });
   } catch (err) {}
@@ -436,8 +511,10 @@ document.getElementById('fileInput').addEventListener('change', function (e) {
   const isImage = file.type.indexOf('image/') === 0;
   const reader = new FileReader();
   reader.onload = async function () {
-    HISTORY.push({ id: 'local-' + Date.now(), direction: 'inbound', sender: 'customer', body: isImage ? '[photo]' : '[file]', interactive: null, created_at: new Date().toISOString() });
-    renderAll();
+    const localMsg = { id: 'local-' + Date.now(), direction: 'inbound', sender: 'customer', body: isImage ? '[photo]' : '[file]', interactive: null, created_at: new Date().toISOString() };
+    HISTORY.push(localMsg);
+    appendMessage(localMsg);
+    playSendSound();
     try {
       await fetch(MEDIA_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataUrl: reader.result }) });
     } catch (err) {}
@@ -511,6 +588,7 @@ async function poll() {
         setTimeout(function () {
           hideTyping();
           applyRows();
+          playReceiveSound();
           pendingTyping = false;
         }, 2000);
       } else {

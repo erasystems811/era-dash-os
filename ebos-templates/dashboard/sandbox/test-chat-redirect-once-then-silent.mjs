@@ -7,6 +7,13 @@
 // reply customer makes on bare chat, just resend them the place to text
 // once if they text bare and if they text bare again, leave it stay
 // silent."
+//
+// Corrected same day: "i said after the first greeting there should be a
+// second resend of the tap here to chat to redirect customer again before
+// silent, but this one only did first greeting and went quiet with fake
+// false hope of typing." Up to TWO consecutive pings now (the entry ping,
+// then one real resend) before staying fully silent -- not just the one
+// this originally stopped at.
 process.env.EBOS_TEST_PGLITE = '1';
 process.env.EBOS_SANDBOX = '1';
 process.env.PORT = '3952';
@@ -23,8 +30,8 @@ function assert(cond, msg) {
 // each debounce cycle's dispatch (handleInboundMessage's own
 // scheduleDebouncedProcessing) -- a test reusing the same in-memory
 // object across multiple handlePendingBatch calls would see stale
-// chat_redirect_sent_at/web_chat_active_at values that were never really
-// possible in production.
+// chat_redirect_sent_at/web_chat_active_at/chat_redirect_count values that
+// were never really possible in production.
 async function freshCustomer(pool, id) {
   const { rows } = await pool.query('select * from customers where id = $1', [id]);
   return rows[0];
@@ -59,13 +66,23 @@ async function main() {
   assert(!/checking in/i.test(ping1.body), 'the real message content never leaks into the billable ping');
 
   // A second staff message right after -- customer hasn't visited the
-  // chat since the first ping, so NO new real ping, just another free bubble.
+  // chat since the first ping, but this is only the SECOND consecutive
+  // ping (the real resend Chidera asked for), so it still goes out.
   await flow.sendStaffReply(customer.id, 'Also, we have a new item on the menu.', null);
   rows = await outboundRows(pool, customer.id);
-  const bubbles = rows.filter((r) => r.trigger === 'staff_reply');
-  const pings = rows.filter((r) => r.trigger === 'staff_reply_ping');
+  let bubbles = rows.filter((r) => r.trigger === 'staff_reply');
+  let pings = rows.filter((r) => r.trigger === 'staff_reply_ping');
   assert(bubbles.length === 2, 'the second message also logs as a free bubble');
-  assert(pings.length === 1, 'but NO second real ping was sent -- one time only, per Chidera\'s own words');
+  assert(pings.length === 2, 'and a SECOND real ping goes out too -- the one real resend before silence');
+
+  // A THIRD staff message, still no visit at all -- now genuinely silent,
+  // two consecutive pings already spent.
+  await flow.sendStaffReply(customer.id, 'Still there?', null);
+  rows = await outboundRows(pool, customer.id);
+  bubbles = rows.filter((r) => r.trigger === 'staff_reply');
+  pings = rows.filter((r) => r.trigger === 'staff_reply_ping');
+  assert(bubbles.length === 3, 'the third message still logs as a free bubble');
+  assert(pings.length === 2, 'but NO third real ping -- two consecutive pings with no visit is the real cap');
 
   // Customer actually opens the chat page -- but has since left (not
   // "actively on it right now", which would correctly skip the ping for a
@@ -77,7 +94,7 @@ async function main() {
   await flow.sendStaffReply(customer.id, 'One more update for you.', null);
   rows = await outboundRows(pool, customer.id);
   const pingsAfterVisit = rows.filter((r) => r.trigger === 'staff_reply_ping');
-  assert(pingsAfterVisit.length === 2, 'a fresh ping IS sent once the customer has genuinely returned to the chat since the last one');
+  assert(pingsAfterVisit.length === 3, 'a fresh ping IS sent once the customer has genuinely returned to the chat since the last one -- the count resets, not just stays capped forever');
 
   // === PART B: a customer texting real ("bare") WhatsApp instead of the
   // web chat, while an order is genuinely in progress. ===
@@ -94,11 +111,19 @@ async function main() {
   assert(orderRowsOut.length === 1, 'the first bare-WhatsApp text gets exactly one real redirect');
   assert(orderRowsOut[0].trigger === 'greeting', 'tagged the same as the existing redirect (sendStartOrderLink)');
 
-  // A second bare-WhatsApp text, no chat visit in between -- must be
-  // completely silent, not even a repeat of the redirect.
+  // A second bare-WhatsApp text, no chat visit in between -- the one real
+  // resend Chidera asked for, still goes out.
   await flow.handlePendingBatch(await freshCustomer(pool, orderCustomer.id), 'hello? anyone there?');
   orderRowsOut = await outboundRows(pool, orderCustomer.id);
-  assert(orderRowsOut.length === 1, 'a second bare text with no chat visit in between gets NO reply at all -- still just the one row from before');
+  assert(orderRowsOut.length === 2, 'a second bare text with no chat visit in between still gets the one real resend');
+  assert(orderRowsOut[1].trigger === 'greeting', 'same redirect trigger as the first');
+
+  // A THIRD bare-WhatsApp text, still no visit at all -- now genuinely
+  // silent, no "fake false hope of typing" either (that's the client-side
+  // typing-indicator fix, tested separately).
+  await flow.handlePendingBatch(await freshCustomer(pool, orderCustomer.id), 'still nothing?');
+  orderRowsOut = await outboundRows(pool, orderCustomer.id);
+  assert(orderRowsOut.length === 2, 'a third bare text with still no visit gets nothing at all -- two consecutive pings already spent');
 
   // Customer actually visits the chat -- a later bare text gets redirected
   // again, since they've come back since. Backdating the FIRST redirect
@@ -109,7 +134,7 @@ async function main() {
   await pool.query('update customers set web_chat_active_at = now() - interval \'45 minutes\' where id = $1', [orderCustomer.id]);
   await flow.handlePendingBatch(await freshCustomer(pool, orderCustomer.id), 'still there?');
   orderRowsOut = await outboundRows(pool, orderCustomer.id);
-  assert(orderRowsOut.length === 2, 'after a genuine chat visit since the last redirect, a later bare text gets redirected again');
+  assert(orderRowsOut.length === 3, 'after a genuine chat visit since the last redirect, a later bare text gets redirected again -- the count genuinely reset, not just stayed capped');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

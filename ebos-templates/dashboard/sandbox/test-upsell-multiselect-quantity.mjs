@@ -58,59 +58,66 @@ async function main() {
   );
   await pool.query(`insert into order_item (order_id, product_id, quantity, price) values ($1, $2, 1, $3)`, [orderRows[0].id, mainRows[0].id, mainRows[0].price]);
 
-  // === 1. First offer is ONE category (drink) with its FULL catalogue --
-  // not a combined multi-category list, and the plain "would you like to
-  // add a drink?" wording, not "complete your order". ===
+  // === 1. Chidera, 2026-09-24: "if youll recommend a side, then the side
+  // should be first." First offer is ONE category (side) with its FULL
+  // catalogue -- not a combined multi-category list, plain "would you
+  // like to add a side?" wording, not "complete your order". Side leads
+  // because this order genuinely doesn't have one yet -- see
+  // nextUpsellGroup's own comment for the two priority tracks. ===
   await flow.finishItemsCollection(customer, orderRows[0], '');
   let messages = await (await fetch(`${BASE}/wa/${token}/messages`)).json();
-  let upsellMsg = messages.filter((m) => m.interactive?.type === 'list').pop();
-  assert(Boolean(upsellMsg), 'the first upsell offer went out');
-  assert(/would you like to add a drink/i.test(upsellMsg.body), 'plain, natural single-category wording, not the combined-list phrasing');
-  assert(!/complete your order/i.test(upsellMsg.body), 'never the "pre-requisite" sounding phrasing');
-  const drinkRowsOffered = (upsellMsg.interactive.rows || []).filter((r) => r.id !== 'upsell::skip');
-  assert(drinkRowsOffered.some((r) => r.title === 'Zobo') && drinkRowsOffered.some((r) => r.title === 'Chapman'), 'the FULL drink catalogue is offered (both Zobo and the seed\'s own Chapman), not just one representative product');
+  let sideMsg = messages.filter((m) => m.interactive?.type === 'list').pop();
+  assert(Boolean(sideMsg), 'the first upsell offer went out');
+  assert(/would you like to add a side/i.test(sideMsg.body), 'plain, natural single-category wording -- SIDE first, not drink');
+  assert(!/complete your order/i.test(sideMsg.body), 'never the "pre-requisite" sounding phrasing');
+  const sideRowsOffered = (sideMsg.interactive.rows || []).filter((r) => r.id !== 'upsell::skip');
+  assert(sideRowsOffered.some((r) => r.title === 'Fried Plantain'), 'the FULL side catalogue is offered');
 
   // === 2. Decline this one (multi-select "No thanks" tap). ===
   await fetch(`${BASE}/wa/${token}/tap`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rowId: 'upsell::skip' }),
   });
 
-  // === 3. A SECOND, sequential offer for the NEXT category (side) --
-  // proving "after theyve added [or declined] drink then ask again would
-  // you like to add one of our special sides". ===
+  // === 3. A SECOND, sequential offer for the NEXT category in the
+  // "side-needed" track (protein, then drink -- this seed has no protein
+  // products at all, so it naturally falls through to drink next, proving
+  // "after theyve added [or declined]" one category moves on to the next
+  // real one, not a repeat of the same category. ===
   messages = await (await fetch(`${BASE}/wa/${token}/messages`)).json();
-  const sideMsg = messages.filter((m) => m.interactive?.type === 'list').pop();
-  assert(Boolean(sideMsg), 'a second, sequential upsell offer went out after declining the first');
-  assert(/would you like to add a side/i.test(sideMsg.body), 'this one asks about the side specifically, not a repeat of drink');
+  const drinkMsg = messages.filter((m) => m.interactive?.type === 'list').pop();
+  assert(Boolean(drinkMsg), 'a second, sequential upsell offer went out after declining the first');
+  assert(/would you like to add a drink/i.test(drinkMsg.body), 'this one asks about drink specifically, not a repeat of side');
+  const drinkRowsOffered = (drinkMsg.interactive.rows || []).filter((r) => r.id !== 'upsell::skip');
+  assert(drinkRowsOffered.some((r) => r.title === 'Zobo') && drinkRowsOffered.some((r) => r.title === 'Chapman'), 'the FULL drink catalogue is offered (both Zobo and the seed\'s own Chapman)');
 
-  // === 4. Multi-select + quantity on the side offer: pick the side with
+  // === 4. Multi-select + quantity on the drink offer: pick a drink with
   // quantity 2. ===
-  const sideRow = (sideMsg.interactive.rows || []).find((r) => r.title === 'Fried Plantain');
+  const zoboRow = (drinkMsg.interactive.rows || []).find((r) => r.title === 'Zobo');
   const tapRes = await fetch(`${BASE}/wa/${token}/tap`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ upsellPicks: [{ productId: sideRow.id.slice('upsell::'.length), quantity: 2 }] }),
+    body: JSON.stringify({ upsellPicks: [{ productId: zoboRow.id.slice('upsell::'.length), quantity: 2 }] }),
   });
   assert(tapRes.status === 200, 'the multi-select tap on the second offer succeeds');
   const { rows: itemRows } = await pool.query(
-    `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1 and p.name = 'Fried Plantain'`,
+    `select p.name, oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1 and p.name = 'Zobo'`,
     [orderRows[0].id]
   );
-  assert(itemRows.length === 1 && Number(itemRows[0].quantity) === 2, 'the side was added with its real picked quantity (2)');
+  assert(itemRows.length === 1 && Number(itemRows[0].quantity) === 2, 'the drink was added with its real picked quantity (2)');
 
-  // === 5. THE REAL BUG: tapping an item on the FIRST (drink) bubble --
-  // already declined and long superseded by the side offer -- still
+  // === 5. THE REAL BUG: tapping an item on the FIRST (side) bubble --
+  // already declined and long superseded by the drink offer -- still
   // adds it. "after i said no thanks and later on i wanted to add, the
   // bot was not acknowledging my new selection." ===
-  const zoboRow = (upsellMsg.interactive.rows || []).find((r) => r.title === 'Zobo');
+  const sideRow = (sideMsg.interactive.rows || []).find((r) => r.title === 'Fried Plantain');
   const lateAddRes = await fetch(`${BASE}/wa/${token}/tap`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rowId: zoboRow.id }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rowId: sideRow.id }),
   });
-  assert(lateAddRes.status === 200, 'tapping an item on the OLD, already-declined drink bubble does not error');
-  const { rows: zoboRows } = await pool.query(
-    `select oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1 and p.name = 'Zobo'`,
+  assert(lateAddRes.status === 200, 'tapping an item on the OLD, already-declined side bubble does not error');
+  const { rows: plantainRows } = await pool.query(
+    `select oi.quantity from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1 and p.name = 'Fried Plantain'`,
     [orderRows[0].id]
   );
-  assert(zoboRows.length === 1, 'and it genuinely gets added -- a change of mind after declining is acknowledged, not silently ignored');
+  assert(plantainRows.length === 1, 'and it genuinely gets added -- a change of mind after declining is acknowledged, not silently ignored');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

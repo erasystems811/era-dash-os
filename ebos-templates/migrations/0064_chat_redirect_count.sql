@@ -1,0 +1,12 @@
+-- Chidera, 2026-09-24: "i said after the first greeting there should be a
+-- second resend of the tap here to chat to redirect customer again before
+-- silent, but this one only did first greeting and went quiet with fake
+-- false hope of typing." needsChatRedirect (0063_chat_redirect_sent_at.sql)
+-- only ever tracked WHEN the last ping went out, not HOW MANY have gone
+-- out since the customer's last real chat visit -- so a customer with no
+-- visit at all went silent after exactly one ping, not the two Chidera
+-- actually asked for (the original entry ping, then one real resend).
+-- Reset to 0 the moment a genuine chat visit is detected since the last
+-- ping (see needsChatRedirect's own updated comment), so this only ever
+-- counts a CONSECUTIVE run of unanswered pings, never accumulates forever.
+alter table customers add column if not exists chat_redirect_count integer not null default 0;

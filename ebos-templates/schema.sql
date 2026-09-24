@@ -330,6 +330,12 @@ alter table customers add column if not exists web_chat_active_at timestamptz;
 -- it stay silent." Shared by sendStaffReply and handlePendingBatch's own
 -- bare-WhatsApp redirect -- see 0063_chat_redirect_sent_at.sql.
 alter table customers add column if not exists chat_redirect_sent_at timestamptz;
+-- migrations/0064_chat_redirect_count.sql -- "after the first greeting
+-- there should be a second resend... before silent." How many consecutive
+-- pings have gone out since the customer's last real chat visit -- resets
+-- to 0 on a genuine visit, so this only ever counts a run, never
+-- accumulates across visits.
+alter table customers add column if not exists chat_redirect_count integer not null default 0;
 
 create table if not exists product (
   id uuid primary key default gen_random_uuid(),
@@ -941,6 +947,16 @@ create table if not exists message (
   created_at timestamptz not null default now()
 );
 create index if not exists message_platform_message_id_idx on message (platform_message_id) where platform_message_id is not null;
+
+-- migrations/0065_whatsapp_send_log.sql -- a permanent, delete-proof
+-- billing count of real outbound WhatsApp sends, independent of `message`
+-- (which a real customer-delete legitimately purges). See that migration's
+-- own comment for the full story.
+create table if not exists whatsapp_send_log (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now()
+);
+create index if not exists whatsapp_send_log_created_at_idx on whatsapp_send_log (created_at);
 
 create table if not exists generated_document (
   id uuid primary key default gen_random_uuid(),

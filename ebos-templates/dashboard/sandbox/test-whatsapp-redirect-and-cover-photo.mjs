@@ -71,23 +71,20 @@ async function main() {
   const { rows: msgAfter1 } = await pool.query(`select trigger from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`, [customer.id]);
   assert(msgAfter1[0]?.trigger === 'greeting', 'tagged as the same greeting/redirect trigger, not a real engine reply');
 
-  // === 3. A dine-in order must NOT be redirected -- dine-in guests belong
-  // on their own table page, this feature never touched dine-in. We can't
-  // fully exercise detectWantsHuman/dispatch here (real AI, no sandbox
-  // stub) -- just prove the redirect branch specifically was skipped. ===
+  // === 3. Chidera, 2026-09-24: "now we need dine in to go through web
+  // chat too." Dine-in is folded INTO the universal redirect gate now,
+  // same as every other whatsapp customer -- this deliberately replaces
+  // the earlier version of this assertion (dine-in used to be excluded
+  // here on purpose, before the dine-in-to-web-chat migration existed). ===
   const dineinCustomer = await flow.findOrCreateCustomer({ phoneNumber: '2348012349003', channel: 'whatsapp' });
   const { rows: order2 } = await pool.query(
     `insert into "order" (customer_id, reference, fulfilment_type, total, status, payment_status, engine_state, channel)
      values ($1, 'REF-REDIR-2', null, 3500, 'new', 'pending', 'collect_info', 'dinein') returning *`,
     [dineinCustomer.id]
   );
-  try {
-    await flow.handlePendingBatch(dineinCustomer, 'do you have jollof rice');
-  } catch (err) {
-    if (!/Anthropic API|x-api-key/i.test(err.message)) throw err;
-  }
+  await flow.handlePendingBatch(dineinCustomer, 'do you have jollof rice');
   const { rows: dineinMsg } = await pool.query(`select trigger from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`, [dineinCustomer.id]);
-  assert(dineinMsg[0]?.trigger !== 'greeting', 'a dine-in order is never redirected to the chat link -- it still tries the normal (AI-dependent) path');
+  assert(dineinMsg[0]?.trigger === 'greeting', 'a dine-in guest\'s own bare WhatsApp text also redirects now -- no AI call, no leaked normal-path reply');
 
   // === 4. Text relayed FROM the chat page itself (customer.channel already
   // flipped to 'website') must also skip the redirect -- that's the exact

@@ -48,10 +48,15 @@ async function main() {
   assert(ordersCreated[0].n === 0, 'no order was created -- classifyIntent/handleCollectInfo never ran at all, no real AI call needed');
 
   // === 2. Same customer, texting again with no chat visit in between --
-  // completely silent, not a repeat redirect. ===
+  // Chidera, 2026-09-24: "after the first greeting there should be a
+  // second resend... before silent" -- one real resend still goes out
+  // here, then a THIRD bare text with still no visit is genuinely silent.
   await flow.handlePendingBatch(await freshCustomer(pool, orderTextCustomer.id), 'hello?');
   rows = await outboundRows(pool, orderTextCustomer.id);
-  assert(rows.length === 1, 'a second bare text with no chat visit gets nothing at all');
+  assert(rows.length === 2, 'a second bare text with no chat visit still gets the one real resend');
+  await flow.handlePendingBatch(await freshCustomer(pool, orderTextCustomer.id), 'still there?');
+  rows = await outboundRows(pool, orderTextCustomer.id);
+  assert(rows.length === 2, 'a third bare text with still no visit gets nothing at all -- two consecutive pings already spent');
 
   // === 3. A plain "thanks"/"okay" ack from a whatsapp customer also
   // redirects now instead of getting an instant real "You're welcome!". ===

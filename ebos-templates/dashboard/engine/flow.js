@@ -105,6 +105,13 @@ async function logMessage({ customerId, direction, channel, sender, body, trigge
     [customerId, direction, channel, sender, body, trigger || null, platformMessageId || null, processed ? new Date() : null, interactive ? JSON.stringify(interactive) : null]
   );
   await pool.query(`update customers set last_message = $1, last_message_at = now() where id = $2`, [body, customerId]);
+  // migrations/0065_whatsapp_send_log.sql -- a permanent, delete-proof
+  // billing count of real outbound WhatsApp sends, independent of
+  // `message` (a real customer-delete legitimately purges that table, but
+  // must never silently erase already-billed history along with it).
+  if (direction === 'outbound' && channel === 'whatsapp') {
+    await pool.query(`insert into whatsapp_send_log default values`);
+  }
 }
 
 // A thin, purpose-built export for routes/web-chat.js's own first-load
@@ -999,13 +1006,27 @@ async function needsChatRedirect(customer) {
   if (!customer.chat_redirect_sent_at) return true;
   // Pinged before, and genuinely visited the chat again since that ping
   // (even if not "actively on it" right now) -- worth a fresh one next
-  // time they drift back to bare WhatsApp. Pinged before with no visit
-  // since at all -- already told them once, stay silent.
-  if (!customer.web_chat_active_at) return false;
-  return new Date(customer.web_chat_active_at) > new Date(customer.chat_redirect_sent_at);
+  // time they drift back to bare WhatsApp (markChatRedirectSent resets
+  // the count below once this ping actually goes out).
+  const visitedSinceLastPing = customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(customer.chat_redirect_sent_at);
+  if (visitedSinceLastPing) return true;
+  // No visit at all since the last ping -- Chidera, 2026-09-24: "i said
+  // after the first greeting there should be a second resend of the tap
+  // here to chat to redirect customer again before silent, but this one
+  // only did first greeting and went quiet." Up to 2 consecutive pings
+  // total (the entry ping, then one real resend) before staying fully
+  // silent -- not just the one this used to stop at.
+  return (customer.chat_redirect_count || 0) < 2;
 }
-async function markChatRedirectSent(customerId) {
-  await pool.query('update customers set chat_redirect_sent_at = now() where id = $1', [customerId]);
+async function markChatRedirectSent(customer) {
+  // A genuine visit since the last ping (or this being the very first
+  // ping ever) starts a fresh count of 1 -- otherwise this is one more
+  // consecutive ping in the current silent-run, see needsChatRedirect's
+  // own comment for why that's capped at 2.
+  const visitedSinceLastPing =
+    customer.chat_redirect_sent_at && customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(customer.chat_redirect_sent_at);
+  const nextCount = !customer.chat_redirect_sent_at || visitedSinceLastPing ? 1 : (customer.chat_redirect_count || 0) + 1;
+  await pool.query('update customers set chat_redirect_sent_at = now(), chat_redirect_count = $2 where id = $1', [customer.id, nextCount]);
 }
 
 // Sends ONLY the real ping itself (send + log + mark chat_redirect_sent_at)
@@ -1032,7 +1053,7 @@ async function sendChatRedirectPing(customer, pingText, { trigger = 'chat_redire
     sendResult = await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
   }
   await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender, body: pingText, trigger, platformMessageId: platformMessageIdFrom(customer, sendResult) });
-  await markChatRedirectSent(customer.id);
+  await markChatRedirectSent(customer);
 }
 
 // Chidera, 2026-09-22: "meta will start charging 14 naira per message...
@@ -1493,7 +1514,7 @@ export async function handleCollectInfo(customer, order, text, greetingPrefix = 
 // specific question been asked yet" is a real fact, not a guess.
 async function askNextItemQuestion(orderId) {
   const { rows } = await pool.query(
-    `select oi.id as order_item_id, pq.id as question_id, pq.question, p.name as product_name
+    `select oi.id as order_item_id, oi.quantity, pq.id as question_id, pq.question, p.name as product_name
      from order_item oi
      join product p on p.id = oi.product_id
      join product_question pq on pq.product_id = p.id
@@ -1539,10 +1560,10 @@ async function askNextItemQuestion(orderId) {
 // keyword matching nextUpsellGroup itself uses to decide a category's
 // already satisfied -- one source of truth for what counts as a match,
 // not a second guess at the same keywords.
-// Chidera, 2026-09-24: "it could be a side too." Order matters here --
-// pickUpsellOptions below caps at MAX_UPSELL_PICKS, taking groups in this
-// list's own order, so drink/protein/side get priority over snack when a
-// business sells all four and an order is missing everything.
+// Chidera, 2026-09-24: "it could be a side too." nextUpsellGroup below no
+// longer walks this array in one fixed order -- see its own comment for
+// the real priority logic (side-first when one's actually needed, a
+// different track when it's not).
 export const UPSELL_GROUPS = [
   { key: 'drink', keywords: ['drink', 'beverage', 'juice', 'water'], label: 'a drink' },
   { key: 'protein', keywords: ['protein', 'meat'], label: 'a protein' },
@@ -1577,6 +1598,21 @@ function catalogueOptions(menu, keywords) {
   return menu.filter((p) => categoryMatchesGroup(p.category, keywords));
 }
 
+// Chidera, 2026-09-24: "if youll recommend a side, then the side should
+// be first and its either side then protein then drink or protein then
+// snack then drink...and recommendation should depend on what is needed
+// for that customer." Two priority tracks, picked once per call by the
+// one real thing that decides which is "needed": whether this order
+// already has a side. A side genuinely missing gets offered FIRST (ahead
+// of protein/drink, reversing the old fixed drink-first order); an order
+// that already has one skips straight to the other track instead (a
+// second side offer would never fire anyway -- orderHasIt below already
+// excludes it -- so protein/snack/drink is what's actually left to offer,
+// in the order she asked for).
+const SIDE_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'side').keywords;
+const UPSELL_PRIORITY_WITH_SIDE = ['side', 'protein', 'drink'];
+const UPSELL_PRIORITY_WITHOUT_SIDE = ['protein', 'snack', 'drink'];
+
 // Next upsell offer worth making, if any -- one whole category at a time
 // (every real product in it, not just a representative one), already-
 // ordered categories and already-offered-this-order categories both
@@ -1589,7 +1625,10 @@ async function nextUpsellGroup(order, orderItems) {
   if (offered.length >= MAX_UPSELL_PICKS) return null;
   const menu = await resolveMenu(order.branch_id);
   const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
-  for (const group of UPSELL_GROUPS) {
+  const orderHasSide = orderedCategories.some((c) => categoryMatchesGroup(c, SIDE_KEYWORDS));
+  const priorityKeys = orderHasSide ? UPSELL_PRIORITY_WITHOUT_SIDE : UPSELL_PRIORITY_WITH_SIDE;
+  const priorityGroups = priorityKeys.map((key) => UPSELL_GROUPS.find((g) => g.key === key));
+  for (const group of priorityGroups) {
     if (offered.includes(group.key)) continue; // already asked about this one this order
     const options = catalogueOptions(menu, group.keywords);
     if (!options.length) continue;
@@ -1768,7 +1807,20 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
       if (shownLink) return;
     }
     const soFar = await orderSoFarSummary(order);
-    await reply(customer, `${prefix}${soFar}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
+    // Chidera, 2026-09-24: "for things like drink just asks for your
+    // drinks cold or room temperature, the customer can type 1 cold and 1
+    // room temperature and you just show it like that for staff."
+    // handlePendingItemQuestion already stores whatever's typed here
+    // verbatim as this line's modification, no forced single answer -- the
+    // real gap was that a quantity>1 line never told the customer there
+    // WAS more than one, so nothing hinted a split answer was even an
+    // option. Only worth naming the quantity/split hint once there
+    // genuinely is more than one -- a plain "For your Zobo Drink, cold or
+    // room temperature?" stays exactly as before for a single unit.
+    const qtyHint = nextQuestion.quantity > 1
+      ? ` (You have ${nextQuestion.quantity} -- feel free to split it, e.g. "1 cold, 1 room temperature".)`
+      : '';
+    await reply(customer, `${prefix}${soFar}For your ${nextQuestion.quantity > 1 ? `${nextQuestion.quantity}x ` : ''}${nextQuestion.product_name}, ${nextQuestion.question}${qtyHint}`.trim(), 'item_question_asked');
     return;
   }
 
@@ -4611,7 +4663,7 @@ export async function handlePendingBatch(customer, text) {
     if (customer.channel === 'whatsapp') {
       if (await needsChatRedirect(customer)) {
         await sendStartOrderLink(customer);
-        await markChatRedirectSent(customer.id);
+        await markChatRedirectSent(customer);
       }
       return;
     }
@@ -4677,7 +4729,7 @@ export async function handlePendingBatch(customer, text) {
   if (customer.channel === 'whatsapp') {
     if (await needsChatRedirect(customer)) {
       await sendStartOrderLink(customer);
-      await markChatRedirectSent(customer.id);
+      await markChatRedirectSent(customer);
     }
     return;
   }
@@ -5338,6 +5390,31 @@ export async function sweepOpeningNotifications() {
   }
 }
 
+// Chidera, 2026-09-24, real report: "if on bare chat we already set that
+// bot wont respond, why is it still showing the typing sign like it
+// wants to respond? ... went quiet with fake false hope of typing." The
+// debounce handleInboundMessage's own typing keep-alive spans
+// (DEBOUNCE_MS below) runs entirely BEFORE handlePendingBatch's real
+// decision -- by the time that decision is silence, the customer already
+// watched "typing..." for the whole wait, with nothing ever arriving.
+// Reuses the exact same checks handlePendingBatch itself makes for a
+// plain bare-WhatsApp text with the bot still in control (not a
+// simplified guess at them, so this can never promise a reply the real
+// gate has already decided not to send): a pure "ok"-type ack against a
+// genuinely open order is the one case that skips the redirect gate
+// entirely and always gets a real dispatch reply (see handlePendingBatch's
+// own ackType==='ack' branch) -- every other whatsapp/bot-controlled case
+// funnels through needsChatRedirect, same as the gate itself. Exported
+// (own named function, not inlined) so this specific decision can be
+// tested directly -- markTypingIndicator itself is a real-credentials-only
+// send with no sandbox hook to observe.
+export async function shouldSkipTypingIndicator(customer, channel, text) {
+  if (channel !== 'whatsapp' || customer.handled_by === 'staff') return false;
+  const bypassesRedirectGate = classifyPureAck(text) === 'ack' && Boolean(await resolveCustomerOrder(customer));
+  if (bypassesRedirectGate) return false;
+  return !(await needsChatRedirect(customer));
+}
+
 export async function handleInboundMessage({ phoneNumber, channelId, text, channel = 'whatsapp', messageId, branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
   await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: text });
@@ -5364,7 +5441,8 @@ export async function handleInboundMessage({ phoneNumber, channelId, text, chann
   // messageId (its typing indicator is a mark-as-read+typing combo tied to
   // that specific message); Instagram's sender_action just needs who to
   // show it to.
-  if (!pendingTimers.has(customer.id)) {
+  const skipsTyping = await shouldSkipTypingIndicator(customer, channel, text);
+  if (!skipsTyping && !pendingTimers.has(customer.id)) {
     startTypingKeepAlive(customer, channel, messageId, channelId);
   }
   scheduleDebouncedProcessing(customer);
