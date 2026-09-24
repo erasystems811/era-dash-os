@@ -1514,7 +1514,7 @@ export async function handleCollectInfo(customer, order, text, greetingPrefix = 
 // specific question been asked yet" is a real fact, not a guess.
 async function askNextItemQuestion(orderId) {
   const { rows } = await pool.query(
-    `select oi.id as order_item_id, pq.id as question_id, pq.question, p.name as product_name
+    `select oi.id as order_item_id, pq.id as question_id, pq.question, pq.options, p.name as product_name
      from order_item oi
      join product p on p.id = oi.product_id
      join product_question pq on pq.product_id = p.id
@@ -1667,6 +1667,29 @@ function upsellSectionTitle(upsell) {
   return upsell.label.charAt(0).toUpperCase() + upsell.label.slice(1);
 }
 
+// Chidera, 2026-09-24: "can i have it as a dropdown they can choose, and
+// an optional type extra note if they have extra, so they just only have
+// to select." website-channel only -- WhatsApp has no dropdown UI to send
+// this as, so it keeps asking in plain text there, same as it always did
+// (finishItemsCollection's own caller falls through to that when this
+// returns false). Real options only, same "never invent structure that
+// isn't really there" rule as everywhere else in this file -- a question
+// with none returns false too, falling through to the plain-text ask.
+async function sendItemQuestionAsChoice(customer, nextQuestion, prefix, soFar) {
+  if (customer.channel !== 'website') return false;
+  if (!nextQuestion.options || !nextQuestion.options.length) return false;
+  await logMessage({
+    customerId: customer.id,
+    direction: 'outbound',
+    channel: customer.channel,
+    sender: 'bot',
+    body: `${prefix}${soFar}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(),
+    trigger: 'item_question_asked',
+    interactive: { type: 'item_question', buttonText: 'Choose', options: nextQuestion.options },
+  });
+  return true;
+}
+
 export async function sendUpsellList(customer, upsell, prefix = '') {
   if (customer.channel !== 'whatsapp' && customer.channel !== 'website') return false;
   const rows = upsell.options.slice(0, 8).map((p) => ({
@@ -1804,11 +1827,23 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
     // pending_question_order_item_id/_id above are still set regardless,
     // so a customer who ignores the link and just types an answer anyway
     // (handlePendingItemQuestion) still works exactly as before.
+    const soFarForChoice = await orderSoFarSummary(order);
+    // Chidera, 2026-09-24: "can i have it as a dropdown they can choose,
+    // and an optional type extra note if they have extra, so they just
+    // only have to select." Same real product_question.options the web
+    // menu page's own qSheet already offers a select-plus-optional-note
+    // UI for -- now available directly in the chat too, so a website
+    // customer never has to leave it (or type a free-text answer by hand)
+    // just to say "cold" or "no pepper". Only for a question that
+    // genuinely HAS real options set in Catalogue -- one with none keeps
+    // asking in plain text exactly as before, same "never invent
+    // structure that isn't really there" rule as everywhere else.
+    const shownChoice = await sendItemQuestionAsChoice(customer, nextQuestion, prefix, soFarForChoice);
+    if (shownChoice) return;
     if (!preferTextForQuestions) {
       const shownLink = await sendWebMenuLink(customer, `${prefix}Just need a couple more details on your order -- tap below to finish up.`, 'Finish my order', null, null, order);
       if (shownLink) return;
     }
-    const soFar = await orderSoFarSummary(order);
     // Chidera, 2026-09-24: first tried naming the quantity + a split-answer
     // hint here for a multi-unit line ("for things like drink just asks
     // for your drinks cold or room temperature, the customer can type 1
@@ -1818,7 +1853,7 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
     // every time. handlePendingItemQuestion already stores whatever's
     // typed here verbatim (no forced single answer), so a real split
     // answer still works fine without the bot spelling out the option.
-    await reply(customer, `${prefix}${soFar}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
+    await reply(customer, `${prefix}${soFarForChoice}For your ${nextQuestion.product_name}, ${nextQuestion.question}`.trim(), 'item_question_asked');
     return;
   }
 
@@ -2114,6 +2149,29 @@ async function handlePendingItemQuestion(customer, order, text) {
   // they just answered this one by typing, so a second outstanding
   // question stays in text too, not a web-link detour.
   return finishItemsCollection(customer, order, 'Got it. ', { preferTextForQuestions: true });
+}
+
+// Chidera, 2026-09-24: "can i have it as a dropdown they can choose, and
+// an optional type extra note if they have extra." routes/web-chat.js's
+// own POST /:token/tap door for the select-plus-optional-note sheet
+// (sendItemQuestionAsChoice's own interactive bubble) -- composes the
+// exact same "Option (note)" shape the web menu page's own qSheet already
+// stores (order_item_answer.answer is still just one plain string either
+// way), then reuses handlePendingItemQuestion verbatim, same as a typed
+// answer would. Deterministic, zero AI call, same shape as
+// handleUpsellListTap/handleOrderConfirmYesTap.
+export async function handleItemQuestionChoiceTap({ customer, option, note }) {
+  const order = await resolveCustomerOrder(customer);
+  // A stale tap (the order's moved on, or this question's already been
+  // answered another way) -- nothing to do, same "stale tap = no-op"
+  // reasoning as handleUpsellListTap's own guard.
+  if (!order || !order.pending_question_id || ['completed', 'cancelled'].includes(order.status)) return;
+  const trimmedOption = String(option || '').trim();
+  if (!trimmedOption) return;
+  const trimmedNote = String(note || '').trim();
+  const answer = trimmedNote ? `${trimmedOption} (${trimmedNote})` : trimmedOption;
+  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: `[selected: ${answer}]`, processed: true });
+  return handlePendingItemQuestion(customer, order, answer);
 }
 
 // "Confirmed" (order.status) and "engine_state = confirm_order" are not the

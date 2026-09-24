@@ -2,15 +2,18 @@
 // /:token) -- Chidera, 2026-09-22: "i need the whole flow duplicated in a
 // site... they were still texting a bot but instead theyll do it on the
 // site." Colors/structure matched directly against a real WhatsApp screen
-// recording (Chidera, 2026-09-23, dark mode -- black wallpaper, dark
-// green outgoing bubbles, dark gray incoming bubbles, buttons/lists living
-// INSIDE the message bubble they belong to with a divider line, a list
-// message opening as a real bottom-sheet picker, not inline rows) --
-// matched on purpose, not guessed at, since the whole point of this page
-// is that it FEELS like the app the customer already trusts. Item
-// selection itself is NOT rebuilt here -- a cta_url bubble just navigates
-// out to the existing /m/:token shop page (see routes/web-chat.js's own
-// comment on why).
+// recording (Chidera, 2026-09-23, originally dark mode -- black wallpaper,
+// dark green outgoing bubbles, dark gray incoming bubbles; switched to
+// WhatsApp's own LIGHT palette 2026-09-24: "can you make the web chat
+// light mode, not dark mode" -- tan-dot wallpaper, white incoming/
+// light-green outgoing bubbles, all still matched against the real app,
+// not guessed) -- buttons/lists living INSIDE the message bubble they
+// belong to with a divider line, a list message opening as a real
+// bottom-sheet picker, not inline rows -- matched on purpose, since the
+// whole point of this page is that it FEELS like the app the customer
+// already trusts. Item selection itself is NOT rebuilt here -- a cta_url
+// bubble just navigates out to the existing /m/:token shop page (see
+// routes/web-chat.js's own comment on why).
 //
 // history: real `message` rows (channel='website'), oldest first --
 // {id, direction, sender, body, interactive, created_at}. interactive is
@@ -25,17 +28,23 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
     ? `background-image:url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : '';
   return `<!doctype html>
-<html style="background:#0b141a"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<html style="background:#efeae2"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>${escapeHtml(businessName)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
 <style>
-  :root{--bg:#0b141a;--header:#1f2c34;--bubble-in:#202c33;--bubble-out:#005c4b;--text:#e9edef;--text2:#8696a0;--accent:#00a884;--divider:rgba(255,255,255,.09);--input:#2a3942}
+  /* Chidera, 2026-09-24: "can you make the web chat light mode, not dark
+     mode." Real WhatsApp's own light palette (white/near-white surfaces,
+     the light-green outgoing bubble, the tan-dot chat wallpaper), not a
+     guess -- everything below derives from these vars plus --panel/
+     --surface2 (added here so the two remaining bottom-sheet cards and
+     their inputs never fall back to a hardcoded dark hex again either). */
+  :root{--bg:#efeae2;--header:#f0f2f5;--bubble-in:#ffffff;--bubble-out:#d9fdd3;--text:#111b21;--text2:#667781;--accent:#00a884;--divider:rgba(0,0,0,.08);--input:#ffffff;--panel:#ffffff;--surface2:#f0f2f5}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;height:100%;overflow:hidden;font-family:Inter,-apple-system,sans-serif;color:var(--text);background:#000}
+  html,body{margin:0;height:100%;overflow:hidden;font-family:Inter,-apple-system,sans-serif;color:var(--text);background:var(--bg)}
   #app{display:flex;flex-direction:column;height:100%;position:relative}
-  header{flex:none;background:var(--header);color:var(--text);padding:10px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(255,255,255,.05)}
+  header{flex:none;background:var(--header);color:var(--text);padding:10px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--divider)}
   header .back{flex:none;color:var(--accent);font-size:26px;line-height:1;padding:0 2px}
   .avatar{width:36px;height:36px;border-radius:50%;background:var(--accent);flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:#fff;${avatarStyle}}
   header .name{font-size:16px;font-weight:600}
@@ -45,7 +54,7 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
      deliberately tiny, muted imprint -- ERA's own attribution, never
      competing with the business's own name/status above it. */
   header .powered-by{font-size:10px;color:var(--text2);opacity:.55;letter-spacing:.3px;margin-top:1px}
-  #scroll{flex:1;overflow-y:auto;padding:14px 10px;background-color:var(--bg);background-image:radial-gradient(rgba(255,255,255,.035) 1px, transparent 1px);background-size:22px 22px}
+  #scroll{flex:1;overflow-y:auto;padding:14px 10px;background-color:var(--bg);background-image:radial-gradient(rgba(0,0,0,.055) 1px, transparent 1px);background-size:22px 22px}
   /* Chidera, 2026-09-24: "let the webchat notification of received pop as
      a banner... paystack leaves it loading there without making it clear
      when it has actually been confirmed." A real, hard-to-miss banner
@@ -54,7 +63,7 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   #banner{position:absolute;top:0;left:0;right:0;z-index:30;background:var(--accent);color:#04120d;font-weight:700;font-size:14.5px;padding:13px 16px;display:flex;align-items:center;gap:8px;box-shadow:0 2px 10px rgba(0,0,0,.35);transform:translateY(-110%);transition:transform .35s ease}
   #banner.show{transform:translateY(0)}
   .daterow{text-align:center;margin:12px 0}
-  .datepill{display:inline-block;background:#182229;color:var(--text2);font-size:12px;font-weight:600;padding:5px 12px;border-radius:8px}
+  .datepill{display:inline-block;background:var(--panel);color:var(--text2);box-shadow:0 1px 2px rgba(0,0,0,.12);font-size:12px;font-weight:600;padding:5px 12px;border-radius:8px}
   .row{display:flex;margin:2px 0}
   .row.in{justify-content:flex-start}
   .row.out{justify-content:flex-end}
@@ -81,7 +90,7 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   .bubble .actions{border-top:1px solid var(--divider)}
   .actionrow{display:flex;align-items:center;gap:10px;width:100%;background:transparent;border:none;border-top:1px solid var(--divider);color:var(--accent);font-weight:600;font-size:14.5px;padding:11px 12px;cursor:pointer;text-align:left;text-decoration:none;font-family:inherit}
   .actionrow:first-child{border-top:none}
-  .actionrow:active{background:rgba(255,255,255,.04)}
+  .actionrow:active{background:rgba(0,0,0,.04)}
   .actionrow .icon{flex:none;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:15px}
   .actionrow .desc{color:var(--text2);font-weight:400;font-size:12.5px;display:block}
   /* cta_url/document rows ("See menu", "View invoice") read as plain text
@@ -105,10 +114,19 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   #listSheet{position:fixed;inset:0;display:none;z-index:20}
   #listSheet.open{display:block}
   #listSheetBg{position:absolute;inset:0;background:rgba(0,0,0,.5)}
-  #listSheetCard{position:absolute;left:0;right:0;bottom:0;background:#182229;border-radius:14px 14px 0 0;max-height:78%;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom)}
+  #listSheetCard{position:absolute;left:0;right:0;bottom:0;background:var(--panel);border-radius:14px 14px 0 0;max-height:78%;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom)}
   #listSheetHead{flex:none;display:flex;align-items:center;justify-content:space-between;padding:16px 18px;font-weight:700;font-size:17px}
   #listSheetClose{background:none;border:none;color:var(--text);font-size:20px;cursor:pointer;padding:4px}
   #listSheetRows{flex:1;overflow-y:auto;padding:0 18px}
+  /* Same bottom-sheet chrome as #listSheet above, reused verbatim for the
+     item-question select-plus-note sheet -- see its own comment further
+     down by #qSheetBody. */
+  #qSheet{position:fixed;inset:0;display:none;z-index:20}
+  #qSheet.open{display:block}
+  #qSheetBg{position:absolute;inset:0;background:rgba(0,0,0,.5)}
+  #qSheetCard{position:absolute;left:0;right:0;bottom:0;background:var(--panel);border-radius:14px 14px 0 0;max-height:78%;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom)}
+  #qSheetHead{flex:none;display:flex;align-items:center;justify-content:space-between;padding:16px 18px;font-weight:700;font-size:17px}
+  #qSheetClose{background:none;border:none;color:var(--text);font-size:20px;cursor:pointer;padding:4px}
   /* Chidera, 2026-09-24: "let them be able to pick multiple and also when
      they pick one let the + and - thing show so they can buy more than
      1." A row is now a plain wrapper (not itself the button -- a button
@@ -123,11 +141,23 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   .sheetrow .check{color:var(--text2);font-size:17px;flex:none}
   .sheetrow.selected .check{color:var(--accent)}
   .sheetrow .qty{display:flex;align-items:center;gap:10px;flex:none;margin-left:10px}
-  .qtybtn{width:26px;height:26px;flex:none;border-radius:50%;border:1px solid var(--divider);background:#0f171c;color:var(--text);font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;font-family:inherit;padding:0}
-  .qtybtn:active{background:#182229}
+  .qtybtn{width:26px;height:26px;flex:none;border-radius:50%;border:1px solid var(--divider);background:var(--surface2);color:var(--text);font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;font-family:inherit;padding:0}
+  .qtybtn:active{background:var(--divider)}
   .qtycount{min-width:16px;text-align:center;font-size:14.5px;font-weight:600}
   #listSheetSend{flex:none;margin:14px 18px;padding:13px;border:none;border-radius:24px;background:linear-gradient(180deg,#1fda63,#0abb5f);color:#062b1a;font-weight:700;font-size:15.5px;cursor:pointer}
   #listSheetSend:disabled{opacity:.4;cursor:default}
+  /* Chidera, 2026-09-24: "can i have it as a dropdown they can choose,
+     and an optional type extra note if they have extra, so they just
+     only have to select." Same bottom-sheet shape as the upsell list
+     above, a genuinely different control inside it though -- one real
+     dropdown (never free multi-select/quantity, this is always exactly
+     one answer) plus one optional note field, same as the web menu
+     page's own qSheet already offers for a question with real options. */
+  #qSheetBody{flex:1;overflow-y:auto;padding:4px 18px 0}
+  #qSheetSelect{width:100%;padding:12px;border-radius:8px;border:1px solid var(--divider);background:var(--surface2);color:var(--text);font-size:15px;font-family:inherit;margin-bottom:10px}
+  #qSheetNote{width:100%;padding:12px;border-radius:8px;border:1px solid var(--divider);background:var(--surface2);color:var(--text);font-size:14.5px;font-family:inherit;box-sizing:border-box}
+  #qSheetNote::placeholder{color:var(--text2)}
+  #qSheetSend{flex:none;margin:14px 18px;padding:13px;border:none;border-radius:24px;background:linear-gradient(180deg,#1fda63,#0abb5f);color:#062b1a;font-weight:700;font-size:15.5px;cursor:pointer}
   #composer{flex:none;display:flex;gap:6px;align-items:center;padding:8px 10px;background:var(--header)}
   .composer-icon{flex:none;width:26px;height:26px;border:none;background:none;color:var(--text2);font-size:21px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
   #inputWrap{flex:1;display:flex;align-items:center;background:var(--input);border-radius:22px;padding:0 6px 0 16px}
@@ -142,8 +172,8 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
      :active (no JS, no round-trip wait), on every real tappable control
      on this page, so a tap always reads as "that registered" the moment
      it happens, not only once a reply eventually shows up. */
-  .actionrow,.linkbtn,.confirmbtn,.sheetrow-toggle,.qtybtn,#listSheetSend,.composer-icon,#sendBtn{transition:transform .08s ease}
-  .actionrow:active,.linkbtn:active,.confirmbtn:active,.sheetrow-toggle:active,.qtybtn:active,#listSheetSend:active,.composer-icon:active,#sendBtn:active{transform:scale(.94)}
+  .actionrow,.linkbtn,.confirmbtn,.sheetrow-toggle,.qtybtn,#listSheetSend,#qSheetSend,.composer-icon,#sendBtn{transition:transform .08s ease}
+  .actionrow:active,.linkbtn:active,.confirmbtn:active,.sheetrow-toggle:active,.qtybtn:active,#listSheetSend:active,#qSheetSend:active,.composer-icon:active,#sendBtn:active{transform:scale(.94)}
   /* Chidera, 2026-09-24: "the next text just appears, customer may not
      even notice its a new text... add the typing sign." A real WhatsApp-
      style three-dot bubble shown for 2s before a new bot message actually
@@ -178,6 +208,17 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
     <div id="listSheetHead"><span id="listSheetTitle">Choose</span><button type="button" id="listSheetClose">&times;</button></div>
     <div id="listSheetRows"></div>
     <button type="button" id="listSheetSend">Send</button>
+  </div>
+</div>
+<div id="qSheet">
+  <div id="qSheetBg"></div>
+  <div id="qSheetCard">
+    <div id="qSheetHead"><span id="qSheetTitle">Choose</span><button type="button" id="qSheetClose">&times;</button></div>
+    <div id="qSheetBody">
+      <select id="qSheetSelect"></select>
+      <input id="qSheetNote" type="text" placeholder="Extra note (optional)">
+    </div>
+    <button type="button" id="qSheetSend">Send</button>
   </div>
 </div>
 <script>
@@ -237,6 +278,13 @@ function renderActions(interactive) {
   }
   if (interactive.type === 'document') {
     return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '" target="_blank" rel="noopener"><span class="icon">&#128196;</span>' + esc(interactive.filename || 'View document') + '</a><span class="linkcaption">Tap to view</span></div>';
+  }
+  if (interactive.type === 'item_question') {
+    // Chidera, 2026-09-24: "can i have it as a dropdown they can choose,
+    // and an optional type extra note if they have extra." Same "Tap
+    // here" caption treatment every other tappable bubble on this page
+    // already has.
+    return '<div class="actions"><button type="button" class="actionrow" data-open-qsheet="1"><span class="icon">&#9776;</span>' + esc(interactive.buttonText || 'Choose') + '</button></div><span class="linkcaption">Tap here to answer</span>';
   }
   return '';
 }
@@ -436,18 +484,55 @@ document.getElementById('listSheetSend').addEventListener('click', function (e) 
   tap({ upsellPicks: picks });
 });
 
+// Chidera, 2026-09-24: "can i have it as a dropdown they can choose, and
+// an optional type extra note if they have extra, so they just only have
+// to select." One real dropdown (always exactly one answer -- never
+// multi-select/quantity like the upsell sheet above) plus one optional
+// note, same shape as the web menu page's own qSheet for a question with
+// real options.
+function openQuestionSheet(interactive) {
+  document.getElementById('qSheetTitle').textContent = interactive.buttonText || 'Choose';
+  document.getElementById('qSheetSelect').innerHTML = (interactive.options || []).map(function (opt) {
+    return '<option value="' + esc(opt) + '">' + esc(opt) + '</option>';
+  }).join('');
+  document.getElementById('qSheetNote').value = '';
+  // Re-enabled on every open -- Send disables itself once submitted (see
+  // its own click handler below), same double-tap guard the upsell
+  // sheet's own Send button uses.
+  document.getElementById('qSheetSend').disabled = false;
+  document.getElementById('qSheet').classList.add('open');
+}
+document.getElementById('qSheetClose').addEventListener('click', function () {
+  document.getElementById('qSheet').classList.remove('open');
+});
+document.getElementById('qSheetBg').addEventListener('click', function () {
+  document.getElementById('qSheet').classList.remove('open');
+});
+document.getElementById('qSheetSend').addEventListener('click', function (e) {
+  if (e.currentTarget.disabled) return;
+  const option = document.getElementById('qSheetSelect').value;
+  if (!option) return;
+  const note = document.getElementById('qSheetNote').value;
+  e.currentTarget.disabled = true;
+  document.getElementById('qSheet').classList.remove('open');
+  tap({ itemQuestionAnswer: { option: option, note: note } });
+});
+
 document.getElementById('scroll').addEventListener('click', function (e) {
   const openList = e.target.closest('[data-open-list]');
-  if (openList) {
-    const bubble = openList.closest('.bubble');
+  const openQSheet = e.target.closest('[data-open-qsheet]');
+  if (openList || openQSheet) {
+    const bubble = (openList || openQSheet).closest('.bubble');
     const idx = Array.prototype.indexOf.call(document.querySelectorAll('.bubble'), bubble);
-    const msg = HISTORY.filter(function (m) { return m.direction === 'outbound'; })[0];
-    // Find the actual message this bubble renders by matching DOM order
-    // against the outbound-only slice isn't reliable once inbound rows
-    // are interleaved -- walk HISTORY in the same order renderAll did.
+    // Find the actual message this bubble renders by matching DOM order --
+    // walk HISTORY in the same order renderAll did (can't just match on
+    // "the first outbound row", that's not reliable once inbound rows are
+    // interleaved).
     let seen = -1, found = null;
     HISTORY.forEach(function (m) { seen++; if (seen === idx) found = m; });
-    if (found && found.interactive) openListSheet(found.interactive);
+    if (!found || !found.interactive) return;
+    if (openList) openListSheet(found.interactive);
+    else openQuestionSheet(found.interactive);
     return;
   }
   const btn = e.target.closest('button[data-button-id]');

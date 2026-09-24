@@ -24,6 +24,7 @@ import {
   handleWebChatMedia,
   handleUpsellListTap,
   handleUpsellMultiTap,
+  handleItemQuestionChoiceTap,
   handleOrderConfirmNoTap,
   handleOrderConfirmYesTap,
   logWebsiteBubble,
@@ -307,7 +308,16 @@ router.post('/:token/tap', async (req, res) => {
   customer.channel = 'website';
   await touchWebChatActive(customer.id);
 
-  const { buttonId, title, rowId, upsellPicks } = req.body || {};
+  const { buttonId, title, rowId, upsellPicks, itemQuestionAnswer } = req.body || {};
+
+  // Chidera, 2026-09-24: "can i have it as a dropdown they can choose, and
+  // an optional type extra note if they have extra." The select-plus-note
+  // sheet's own Send button -- sendItemQuestionAsChoice's own interactive
+  // bubble is what this answers.
+  if (itemQuestionAnswer && typeof itemQuestionAnswer === 'object') {
+    await handleItemQuestionChoiceTap({ customer, option: itemQuestionAnswer.option, note: itemQuestionAnswer.note });
+    return res.json({ ok: true });
+  }
 
   // Chidera, 2026-09-24: "let them be able to pick multiple and also when
   // they pick one let the + and - thing show so they can buy more than
