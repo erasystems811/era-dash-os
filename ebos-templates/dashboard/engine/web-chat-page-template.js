@@ -210,7 +210,13 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, waNumber, h
   <div id="banner"><span>&#10003;</span><span id="bannerText">Payment confirmed!</span></div>
   <header>
     ${waDigits ? `<a class="back" href="https://wa.me/${waDigits}">&#8249;</a>` : '<div class="back">&#8249;</div>'}
-    <div class="avatar">${escapeHtml((businessName || '?').slice(0, 1).toUpperCase())}</div>
+    <!-- Chidera, 2026-09-24, real report: "there is an E sign on profile
+         photo blocking the actual profile photo." The initial-letter
+         fallback (avatarStyle below sets the real cover photo as a CSS
+         background) used to render unconditionally as the div's own text
+         content, sitting ON TOP of that photo instead of only showing
+         when there's no real photo to show instead. -->
+    <div class="avatar">${coverPhotoVersion ? '' : escapeHtml((businessName || '?').slice(0, 1).toUpperCase())}</div>
     <div><div class="name">${escapeHtml(businessName || 'Order')}</div><div class="status">online</div><div class="powered-by">Powered by ERA Systems</div></div>
   </header>
   <div id="scroll"></div>
