@@ -45,12 +45,19 @@ function emailFor(customer) {
     : `customer-${customer.id}@ebos-customer.com`;
 }
 
-// Two real calls to Monnify's own API, chained: initialize a transaction,
-// then immediately request ITS dynamic bank-transfer account -- "Pay with
-// Bank Transfer" needs an already-initialized transaction's reference, per
-// Monnify's own docs. Throws on a real failure; callers decide their own
-// fallback, same shape as payment.js's callPaystackInitialize.
-export async function callMonnifyDynamicAccount({ customer, amount, referencePrefix }) {
+// Chidera: "the monnify account that was sent is unavailable and invalid
+// and cant it be a link like paystack? so the auto confirm can be
+// obvious." (Ported from main, fd5a018-adjacent work -- this branch's own
+// monnify-api.js still had the account-only flow.) The dynamic
+// bank-transfer ACCOUNT this used to chain a second call for
+// (bank-transfer/init-payment) is what kept coming back broken/unusable
+// live. Init-transaction's own response already carries a real hosted
+// checkout link (checkoutUrl -- Monnify's own "Pay with Monnify" page,
+// same page the Web SDK modal itself loads), confirmed directly against
+// Monnify's docs, not guessed -- same shape as Paystack's
+// authorization_url, so this drops the second call entirely instead of
+// trying to fix the account-only flow.
+export async function callMonnifyCheckoutLink({ customer, amount, referencePrefix }) {
   const contractCode = process.env.MONNIFY_CONTRACT_CODE;
   const accessToken = await getAccessToken();
   if (!accessToken || !contractCode) return null; // caller falls back to bank transfer instructions
@@ -72,35 +79,18 @@ export async function callMonnifyDynamicAccount({ customer, amount, referencePre
       paymentDescription: `Order payment ${referencePrefix}`,
       currencyCode: 'NGN',
       contractCode,
-      paymentMethods: ['ACCOUNT_TRANSFER'],
+      // No paymentMethods restriction (used to be ACCOUNT_TRANSFER only,
+      // matching the old account-only flow) -- the hosted checkout page
+      // shows whatever's enabled on the contract (card, transfer, USSD),
+      // same "let Monnify's own page handle it" idea as Paystack's page.
     }),
   });
   if (!initRes.ok) throw new Error(`Monnify init-transaction failed ${initRes.status}: ${await initRes.text()}`);
   const initData = await initRes.json();
-  const transactionReference = initData?.responseBody?.transactionReference;
-  if (!transactionReference) throw new Error('Monnify init-transaction succeeded but returned no transactionReference.');
+  const checkoutUrl = initData?.responseBody?.checkoutUrl;
+  if (!checkoutUrl) throw new Error('Monnify init-transaction succeeded but returned no checkoutUrl.');
 
-  const acctRes = await fetch(`${MONNIFY_BASE_URL}/api/v1/merchant/bank-transfer/init-payment`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
-    body: JSON.stringify({ transactionReference }),
-  });
-  if (!acctRes.ok) throw new Error(`Monnify bank-transfer init failed ${acctRes.status}: ${await acctRes.text()}`);
-  const acctData = await acctRes.json();
-  const body = acctData?.responseBody;
-  if (!body?.accountNumber) throw new Error('Monnify bank-transfer init succeeded but returned no accountNumber.');
-
-  // Monnify's own confirmed max is 2400 seconds (40 minutes) --
-  // accountDurationSeconds is however many of those are actually left for
-  // this specific call.
-  const expiresAt = new Date(Date.now() + (body.accountDurationSeconds || 2400) * 1000);
-  return {
-    paymentReference,
-    accountNumber: body.accountNumber,
-    accountName: body.accountName,
-    bankName: body.bankName,
-    expiresAt,
-  };
+  return { paymentReference, checkoutUrl };
 }
 
 // Header name and algorithm confirmed directly against Monnify's own docs:

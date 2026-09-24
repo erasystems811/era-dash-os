@@ -542,6 +542,18 @@ create table if not exists "order" (
   -- handleCollectFulfilment.
   delivery_zone_candidate_id uuid references delivery_zone(id),
   delivery_area_prompted_at timestamptz,
+  -- migrations/0060_monnify.sql -- display-only, from when Monnify's
+  -- provider was the dynamic bank-transfer ACCOUNT flow. That flow was
+  -- replaced by a real checkout link (engine/payment.js's
+  -- initializeMonnifyTransaction now reuses payment_link_url/
+  -- payment_reference above, same as Paystack) after the account kept
+  -- coming back unusable live ("the monnify account that was sent is
+  -- unavailable and invalid") -- these four are unused, left in place
+  -- rather than dropped, same reasoning as transfer_account_number above.
+  monnify_account_number text,
+  monnify_account_name text,
+  monnify_bank_name text,
+  monnify_account_expires_at timestamptz,
   -- Set the moment status actually becomes 'completed' -- both the
   -- staff-driven /orders/:id/status route and routes/rider.js's own
   -- auto-completion (delivery code entered) set this explicitly, never
@@ -1384,9 +1396,12 @@ create index if not exists pos_transaction_occurred_at_idx on pos_transaction(oc
 -- bank_account_name (engine/payment.js's getPaymentConfig()), the same
 -- fields the "manual" flow has always used. Left in place, not dropped,
 -- only because migrate.mjs is DDL-additive-only by design.
+-- 'monnify' added by migrations/0060_monnify.sql -- a real dynamic
+-- bank-transfer provider, same "then we wont use reserved we will use
+-- dynamic" shape as Paystack (no OPay on this branch).
 create table if not exists payment_config (
   business_id uuid primary key references business(id),
-  provider text check (provider in ('pos', 'paystack', 'manual')),
+  provider text check (provider in ('pos', 'paystack', 'manual', 'monnify')),
   transfer_account_number text,
   transfer_account_name text,
   transfer_bank_name text
