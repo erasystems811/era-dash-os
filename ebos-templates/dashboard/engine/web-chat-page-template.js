@@ -97,6 +97,15 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   #textInput:focus{outline:none}
   #sendBtn{flex:none;width:42px;height:42px;border-radius:50%;background:var(--accent);border:none;color:#fff;font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center}
   #sendBtn:disabled{opacity:.5}
+  /* Chidera, 2026-09-24: "the next text just appears, customer may not
+     even notice its a new text... add the typing sign." A real WhatsApp-
+     style three-dot bubble shown for 2s before a new bot message actually
+     renders, so the arrival is felt, not just silently there. */
+  .typing-dots{display:inline-flex;align-items:center;gap:4px;padding:10px 6px}
+  .typing-dots span{width:7px;height:7px;border-radius:50%;background:var(--text2);animation:typingBounce 1.2s infinite ease-in-out}
+  .typing-dots span:nth-child(2){animation-delay:.2s}
+  .typing-dots span:nth-child(3){animation-delay:.4s}
+  @keyframes typingBounce{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-4px);opacity:1}}
 </style></head>
 <body>
 <div id="app">
@@ -305,22 +314,59 @@ document.getElementById('fileInput').addEventListener('change', function (e) {
   reader.readAsDataURL(file);
 });
 
+function showTyping() {
+  const scroll = document.getElementById('scroll');
+  const row = document.createElement('div');
+  row.className = 'row in';
+  row.id = 'typingRow';
+  row.innerHTML = '<div class="bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>';
+  scroll.appendChild(row);
+  scroll.scrollTop = scroll.scrollHeight;
+}
+function hideTyping() {
+  const row = document.getElementById('typingRow');
+  if (row) row.remove();
+}
+
 // Picks up anything NOT triggered by this tab's own action -- a payment
 // confirmed by Paystack's webhook, "order ready" if that ever lands here,
 // a staff reply. Same lightweight polling idiom the existing dine-in/POS
 // pay pages already use, no websocket infra in this codebase.
+// pendingTyping blocks a second poll tick from firing mid-delay -- since
+// lastCursor only advances once the delayed rows actually land, an
+// overlapping poll would otherwise refetch and re-queue the exact same
+// rows a second time.
+let pendingTyping = false;
 async function poll() {
+  if (pendingTyping) return;
   try {
     const url = POLL_PATH + (lastCursor ? '?since=' + encodeURIComponent(lastCursor) : '');
     const res = await fetch(url);
     const rows = await res.json();
     if (Array.isArray(rows) && rows.length) {
-      // Drop the optimistic local echo once the real logged row for it
-      // arrives, so a customer's own typed message doesn't render twice.
-      HISTORY = HISTORY.filter(function (m) { return typeof m.id !== 'string' || !m.id.startsWith('local-'); });
-      HISTORY = HISTORY.concat(rows);
-      lastCursor = rows[rows.length - 1].created_at;
-      renderAll();
+      const applyRows = function () {
+        // Drop the optimistic local echo once the real logged row for it
+        // arrives, so a customer's own typed message doesn't render twice.
+        HISTORY = HISTORY.filter(function (m) { return typeof m.id !== 'string' || !m.id.startsWith('local-'); });
+        HISTORY = HISTORY.concat(rows);
+        lastCursor = rows[rows.length - 1].created_at;
+        renderAll();
+      };
+      // Chidera, 2026-09-24: "add the typing sign but it should type for 2
+      // seconds, so they know a new text has dropped." Only for a real bot
+      // reply arriving (outbound) -- nothing to announce for the
+      // customer's own message being echoed back.
+      if (rows.some(function (m) { return m.direction === 'outbound'; })) {
+        pendingTyping = true;
+        showTyping();
+        setTimeout(function () {
+          hideTyping();
+          applyRows();
+          pendingTyping = false;
+        }, 2000);
+      } else {
+        applyRows();
+      }
     }
   } catch (err) {}
 }
