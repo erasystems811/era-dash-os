@@ -1156,6 +1156,17 @@ create table if not exists table_session (
 create unique index if not exists table_session_one_open_idx on table_session (table_id) where closed_at is null;
 create index if not exists table_session_branch_idx on table_session (branch_id);
 
+-- migrations/0066_message_table_session.sql -- "let table dine in and
+-- online delivery have their complete different web chat so a person can
+-- be doing both at same time in 2 different web chats." NULL means "the
+-- existing /wa/:token online thread"; a real id means "this bubble
+-- belongs to that table's own chat thread" (routes/dinein-menu.js's
+-- /t/:qrToken/chat) -- table_session comes after message in this file's
+-- own declaration order, so this alter lives here instead of inline on
+-- message's own create table.
+alter table message add column if not exists table_session_id uuid references table_session(id);
+create index if not exists message_table_session_idx on message (table_session_id) where table_session_id is not null;
+
 -- Chidera, 2026-09-20: joint dine-in ordering -- who's currently part of
 -- an open table sitting, recorded the first time each guest actually
 -- interacts with the table (scans, or the shared order page loads for

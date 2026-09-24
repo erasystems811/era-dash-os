@@ -98,11 +98,22 @@ function displayNameFor(customer) {
 // 0060_website_chat.sql). Null for every other channel; the web-chat page
 // (routes/web-chat.js) renders a real bubble/button/list from this instead
 // of flattened text.
-async function logMessage({ customerId, direction, channel, sender, body, trigger, platformMessageId, processed, interactive }) {
+// tableSessionId -- Chidera, 2026-09-24: "let table dine in and online
+// delivery have their complete different web chat so a person can be
+// doing both at same time in 2 different web chats." NULL means "the
+// customer's own general /wa/:token thread" (online); a real
+// table_session id scopes a bubble to that table's own separate thread
+// (routes/dinein-menu.js's /t/:qrToken/chat) instead, see
+// migrations/0066_message_table_session.sql. Almost never passed
+// explicitly -- reply() below forwards customer.tableSessionId
+// automatically (an in-memory-only marker the dine-in chat route sets
+// before calling in, same pattern customer.channel = 'website' already
+// uses), so the ~70 existing reply() call sites needed no changes at all.
+async function logMessage({ customerId, direction, channel, sender, body, trigger, platformMessageId, processed, interactive, tableSessionId }) {
   await pool.query(
-    `insert into message (customer_id, direction, channel, sender, body, trigger, platform_message_id, processed_at, interactive)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [customerId, direction, channel, sender, body, trigger || null, platformMessageId || null, processed ? new Date() : null, interactive ? JSON.stringify(interactive) : null]
+    `insert into message (customer_id, direction, channel, sender, body, trigger, platform_message_id, processed_at, interactive, table_session_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [customerId, direction, channel, sender, body, trigger || null, platformMessageId || null, processed ? new Date() : null, interactive ? JSON.stringify(interactive) : null, tableSessionId || null]
   );
   await pool.query(`update customers set last_message = $1, last_message_at = now() where id = $2`, [body, customerId]);
   // migrations/0065_whatsapp_send_log.sql -- a permanent, delete-proof
@@ -119,8 +130,8 @@ async function logMessage({ customerId, direction, channel, sender, body, trigge
 // customer) -- logMessage itself stays module-private, this just fixes the
 // direction/channel/sender every caller outside this file needs, rather
 // than handing a route the full logMessage signature.
-export async function logWebsiteBubble({ customerId, body, trigger, interactive }) {
-  await logMessage({ customerId, direction: 'outbound', channel: 'website', sender: 'bot', body, trigger, interactive });
+export async function logWebsiteBubble({ customerId, body, trigger, interactive, tableSessionId }) {
+  await logMessage({ customerId, direction: 'outbound', channel: 'website', sender: 'bot', body, trigger, interactive, tableSessionId });
 }
 
 // Chidera, 2026-09-24: "now feedback can have a fill a complaint form kind
@@ -131,7 +142,7 @@ export async function logWebsiteBubble({ customerId, body, trigger, interactive 
 // handover, not a bot conversation turn that needs the AI engine's
 // classifyIntent/order-state logic at all.
 export async function logInboundWebsiteMessage(customer, text) {
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: text, processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel: 'website', sender: 'customer', body: text, processed: true });
 }
 
 // Instagram's send response carries the new message's own id (message_id).
@@ -185,6 +196,13 @@ export async function reply(customer, text, logTag = 'bot_flow_step') {
     body: clean,
     trigger: logTag,
     platformMessageId: platformMessageIdFrom(customer, sendResult),
+    // Chidera, 2026-09-24: dine-in's own separate web chat -- see
+    // logMessage's own comment on tableSessionId. customer.tableSessionId
+    // only exists in-memory, set by routes/dinein-menu.js's own /chat
+    // route before calling in here, same pattern customer.channel =
+    // 'website' already uses -- every other caller (whatsapp, online
+    // website) leaves it undefined and this is simply omitted, unchanged.
+    tableSessionId: customer.tableSessionId,
   });
 }
 
@@ -208,7 +226,7 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
   // web-chat.js), same tap-through-the-normal-text-pipeline shape as
   // WhatsApp's own buttons -- see that route's POST /:token/tap.
   if (customer.channel === 'website') {
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger, interactive: { type: 'buttons', buttons } });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger, interactive: { type: 'buttons', buttons } });
     return;
   }
   if (customer.channel !== 'whatsapp') {
@@ -217,7 +235,7 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppButtons(recipientFor(customer), bodyText, buttons, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger });
 }
 
 // A real staff member, typing their own words from the dashboard's
@@ -237,7 +255,7 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
 // uses; Instagram/voice/an already-website customer keep the original
 // direct send below, unchanged.
 async function sendStaffReplyRedirect(customer, text, staffId) {
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
 
   if (await needsChatRedirect(customer)) {
     await sendChatRedirectPing(customer, `We're trying to reach out to you.`, { trigger: 'staff_reply_ping', sender: 'staff' });
@@ -257,7 +275,7 @@ export async function sendStaffReply(customerId, text, staffId) {
 
   const sendResult = await botEngine.sendMessage({ trigger: 'explicit_type_command', to: recipientFor(customer), text, whatsappSend: await senderFor(customer) });
   await logMessage({
-    customerId: customer.id,
+    customerId: customer.id, tableSessionId: customer.tableSessionId,
     direction: 'outbound',
     channel: customer.channel,
     sender: 'staff',
@@ -320,7 +338,7 @@ export async function retryFailedSendAsTemplate(failedPlatformMessageId) {
 
   await pool.query(`update message set delivery_status = 'retried' where id = $1`, [original.id]);
   await logMessage({
-    customerId: customer.id,
+    customerId: customer.id, tableSessionId: customer.tableSessionId,
     direction: 'outbound',
     channel: 'whatsapp',
     sender: original.sender,
@@ -370,7 +388,7 @@ export async function takeOverConversation(customerId, staffId) {
 // belongs in the dashboard/Activity Log, not pushed to a phone.
 export async function recordAppReply({ phoneNumber, text }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channel: 'whatsapp' });
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'staff', body: text, trigger: 'app_reply' });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'staff', body: text, trigger: 'app_reply' });
   await pool.query(
     `update customers set handled_by = 'staff', app_handled_at = coalesce(app_handled_at, now()), handover_at = coalesce(handover_at, now()) where id = $1`,
     [customer.id]
@@ -385,7 +403,7 @@ export async function recordAppReply({ phoneNumber, text }) {
 // calling this, so by the time this runs, that check has already happened.
 export async function recordAppReplyInstagram({ channelId, text }) {
   const customer = await findOrCreateCustomer({ channelId, channel: 'instagram' });
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'staff', body: text, trigger: 'app_reply' });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'staff', body: text, trigger: 'app_reply' });
   await pool.query(
     `update customers set handled_by = 'staff', app_handled_at = coalesce(app_handled_at, now()), handover_at = coalesce(handover_at, now()) where id = $1`,
     [customer.id]
@@ -443,9 +461,20 @@ export function newReference(prefix) {
 // though nobody ever formally closed it. `updated_at` is bumped every time
 // this actually returns an order (the "touch" below), so the 3-hour window
 // is since the last REAL interaction, not since the order was created.
+// Chidera, 2026-09-24: "let table dine in and online delivery have their
+// complete different web chat so a person can be doing both at same time
+// in 2 different web chats." channel <> 'dinein' added here -- every real
+// caller (routes/menu-page.js, routes/web-chat.js) is an online-only
+// surface, so a customer who's simultaneously mid a dine-in table session
+// (their own dine-in order shares this same customer_id when they're the
+// table's original scanner) never had this silently steal their online
+// order resolution before. resolveCustomerOrder below already has its
+// own separate, deliberate table_session lookup for the dine-in case --
+// this exclusion is what actually forces it to be reached instead of
+// getOpenOrder grabbing whichever order is simply more recent.
 export async function getOpenOrder(customerId) {
   const { rows } = await pool.query(
-    `select * from "order" where customer_id = $1 and engine_state not in ('completed', 'cancelled')
+    `select * from "order" where customer_id = $1 and channel <> 'dinein' and engine_state not in ('completed', 'cancelled')
        and updated_at > now() - interval '3 hours'
      order by created_at desc limit 1`,
     [customerId]
@@ -1052,7 +1081,7 @@ async function sendChatRedirectPing(customer, pingText, { trigger = 'chat_redire
     const components = [{ type: 'body', parameters: [{ type: 'text', text: pingText }] }];
     sendResult = await sendWhatsAppTemplate(customer.phone_number, 'business_outreach', 'en_US', components, credentials);
   }
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender, body: pingText, trigger, platformMessageId: platformMessageIdFrom(customer, sendResult) });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender, body: pingText, trigger, platformMessageId: platformMessageIdFrom(customer, sendResult) });
   await markChatRedirectSent(customer);
 }
 
@@ -1097,7 +1126,7 @@ async function sendStartOrderLink(customer) {
   // real send in this file already uses (sendWebMenuLink's own comment:
   // "ensure image appear on chat cause its not still appearing").
   await sendWhatsAppCtaUrl(recipientFor(customer), shortGreeting, 'Tap here to text', chatUrl, credentials, await businessCoverPhotoUrl());
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortGreeting, trigger: 'greeting', processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortGreeting, trigger: 'greeting', processed: true });
 }
 
 // Chidera, 2026-09-23: "i need customer complaint and all those in the
@@ -1129,7 +1158,7 @@ export async function sendComplaintLink(customer) {
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   const shortMessage = `I'm sorry to hear that. Tap below to tell us what happened.`;
   await sendWhatsAppCtaUrl(recipientFor(customer), shortMessage, 'Tell us more', chatUrl, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortMessage, trigger: 'complaint_redirect', processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: shortMessage, trigger: 'complaint_redirect', processed: true });
 }
 
 // Chidera, 2026-09-24: "if they want to reply, let reply not come to the
@@ -1149,7 +1178,7 @@ export async function notifyComplaintReply(customer, replyText) {
   // matching this whole feature's own near-zero-message-cost shape (the
   // real content is free once they're on the page, only the nudge to get
   // them there is a billable send).
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'website', sender: 'bot', body: replyText, trigger: 'complaint_reply' });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: 'website', sender: 'bot', body: replyText, trigger: 'complaint_reply' });
   if (!process.env.PUBLIC_URL) return;
   await sendChatRedirectPing(customer, `You have a message from our manager.`, { trigger: 'complaint_reply_ping' });
 }
@@ -1431,7 +1460,7 @@ export async function handleCollectInfo(customer, order, text, greetingPrefix = 
           if (!catalogShown) {
             await send(await fieldPrompt('items', 'What would you like to order?', order.branch_id), 'items_menu_shown');
           } else {
-            await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[covered by menu button above, no separate text sent]', trigger: 'items_menu_shown', processed: true });
+            await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[covered by menu button above, no separate text sent]', trigger: 'items_menu_shown', processed: true });
           }
         }
         return;
@@ -1456,7 +1485,7 @@ export async function handleCollectInfo(customer, order, text, greetingPrefix = 
         // logged here too or every later message in this same order would
         // think the menu was never shown and keep re-sending it.
         if (sent) {
-          await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[covered by menu button above, no separate text sent]', trigger: 'items_menu_shown', processed: true });
+          await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: '[covered by menu button above, no separate text sent]', trigger: 'items_menu_shown', processed: true });
         }
       }
       // The clear items above still get added -- the ambiguous part just
@@ -1679,7 +1708,7 @@ async function sendItemQuestionAsChoice(customer, nextQuestion, prefix, soFar) {
   if (customer.channel !== 'website') return false;
   if (!nextQuestion.options || !nextQuestion.options.length) return false;
   await logMessage({
-    customerId: customer.id,
+    customerId: customer.id, tableSessionId: customer.tableSessionId,
     direction: 'outbound',
     channel: customer.channel,
     sender: 'bot',
@@ -1711,7 +1740,7 @@ export async function sendUpsellList(customer, upsell, prefix = '') {
   // WhatsApp list_reply webhook event does today.
   if (customer.channel === 'website') {
     await logMessage({
-      customerId: customer.id,
+      customerId: customer.id, tableSessionId: customer.tableSessionId,
       direction: 'outbound',
       channel: customer.channel,
       sender: 'bot',
@@ -1749,7 +1778,7 @@ export async function sendUpsellList(customer, upsell, prefix = '') {
   // readback), not a separate hand-written string -- was drifting from
   // what the customer actually saw, so the dashboard transcript read
   // differently than the real conversation did.
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText} We have: ${upsell.options.map((o) => o.name).join(', ')}.`, trigger: 'upsell_offered_list' });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText} We have: ${upsell.options.map((o) => o.name).join(', ')}.`, trigger: 'upsell_offered_list' });
   return true;
 }
 
@@ -2047,13 +2076,13 @@ export async function handleUpsellListTap({ phoneNumber, channelId, rowId, chann
 
   const picked = rowId.slice('upsell::'.length);
   if (picked === 'skip') {
-    await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: No thanks]', processed: true });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: '[tapped: No thanks]', processed: true });
     return finishItemsCollection(customer, order, '');
   }
 
   const product = await productForRowId(picked);
   if (!product) return finishItemsCollection(customer, order, '');
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${product.name}]`, processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${product.name}]`, processed: true });
   // added_by_customer_id -- Chidera, 2026-09-20, real report ("water is
   // still categorized as guest"): a THIRD parallel insert for an upsell-
   // added item, missed by the earlier "guest-chicken" fix -- that pass
@@ -2103,7 +2132,7 @@ export async function handleUpsellMultiTap({ customer, picks }) {
     const product = await productForRowId(pick.productId);
     if (!product) continue;
     const quantity = Math.max(1, Math.min(20, Math.trunc(Number(pick.quantity)) || 1));
-    await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: `[tapped: ${quantity}x ${product.name}]`, processed: true });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel: 'website', sender: 'customer', body: `[tapped: ${quantity}x ${product.name}]`, processed: true });
     await pool.query('insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, $3, $4, $5)', [order.id, product.id, quantity, product.price, customer.id]);
     added.push(`${quantity}x ${product.name}`);
   }
@@ -2170,7 +2199,7 @@ export async function handleItemQuestionChoiceTap({ customer, option, note }) {
   if (!trimmedOption) return;
   const trimmedNote = String(note || '').trim();
   const answer = trimmedNote ? `${trimmedOption} (${trimmedNote})` : trimmedOption;
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: `[selected: ${answer}]`, processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel: 'website', sender: 'customer', body: `[selected: ${answer}]`, processed: true });
   return handlePendingItemQuestion(customer, order, answer);
 }
 
@@ -2295,12 +2324,12 @@ export async function sendFieldPrompt(customer, fieldKey, promptText, trigger) {
       { id: 'fulfilment_pickup', title: 'Pickup' },
     ];
     if (customer.channel === 'website') {
-      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: trigger || 'bot_flow_step', interactive: { type: 'buttons', buttons } });
+      await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: trigger || 'bot_flow_step', interactive: { type: 'buttons', buttons } });
       return;
     }
     const credentials = await getWhatsAppCredentials(customer.branch_id);
     await sendWhatsAppButtons(recipientFor(customer), promptText, buttons, credentials);
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: trigger || 'bot_flow_step' });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: trigger || 'bot_flow_step' });
     return;
   }
   await reply(customer, promptText, trigger);
@@ -2321,12 +2350,12 @@ async function sendYesNoConfirm(customer, promptText) {
       { id: 'confirm_no', title: 'No' },
     ];
     if (customer.channel === 'website') {
-      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: 'bot_flow_step', interactive: { type: 'buttons', buttons } });
+      await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: 'bot_flow_step', interactive: { type: 'buttons', buttons } });
       return;
     }
     const credentials = await getWhatsAppCredentials(customer.branch_id);
     await sendWhatsAppButtons(recipientFor(customer), promptText, buttons, credentials);
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: 'bot_flow_step' });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: promptText, trigger: 'bot_flow_step' });
     return;
   }
   await reply(customer, promptText);
@@ -2536,7 +2565,7 @@ async function sendPaymentLinkButton(customer, paymentUrl, bodyText) {
   }
   if (customer.channel === 'website') {
     await logMessage({
-      customerId: customer.id,
+      customerId: customer.id, tableSessionId: customer.tableSessionId,
       direction: 'outbound',
       channel: customer.channel,
       sender: 'bot',
@@ -2561,7 +2590,7 @@ async function sendPaymentLinkButton(customer, paymentUrl, bodyText) {
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, 'Pay now', paymentUrl, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText}\n[payment link sent: ${paymentUrl}]`, trigger: 'payment_link', processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `${bodyText}\n[payment link sent: ${paymentUrl}]`, trigger: 'payment_link', processed: true });
 }
 
 // Chidera, 2026-09-20: "i want them to be able to pick transfer or card,
@@ -2623,12 +2652,12 @@ async function sendPosPaymentChoice(customer, order) {
   // it, not a real WhatsApp send. Full on-page POS parity (claim-tap etc.)
   // is Phase 2; this just closes the "falls through to a real send" gap.
   if (customer.channel === 'website') {
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice', interactive: { type: 'cta_url', buttonText: 'Ready to pay?', url } });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice', interactive: { type: 'cta_url', buttonText: 'Ready to pay?', url } });
     return;
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), 'Ready to pay?', 'Click here', url, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice' });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice' });
 }
 
 async function buildPayLine(order, customer, { amount, amountLabel }) {
@@ -2726,7 +2755,7 @@ export async function sendPaymentInstructions(customer, order) {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
       if (customer.channel === 'instagram') {
         await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
-        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
       } else if (customer.channel === 'website') {
         // website: link to the plain HTML invoice page (routes/documents.js's
         // GET /invoice/:orderId), not the /pdf route -- the customer's
@@ -2739,10 +2768,10 @@ export async function sendPaymentInstructions(customer, order) {
         // failed the moment a customer tapped it ("the invoice link keeps
         // not opening, an invalid link").
         const invoiceHtmlUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
-        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice] ${invoiceHtmlUrl}`, trigger: 'invoice_pdf', interactive: { type: 'document', filename: `invoice-${order.reference}`, url: invoiceHtmlUrl } });
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice] ${invoiceHtmlUrl}`, trigger: 'invoice_pdf', interactive: { type: 'document', filename: `invoice-${order.reference}`, url: invoiceHtmlUrl } });
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `invoice-${order.reference}.pdf`, `Invoice for order ${order.reference}`);
-        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
       }
       invoiceSent = true;
     } catch (err) {
@@ -3173,17 +3202,17 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
       if (customer.channel === 'instagram') {
         await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
-        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
       } else if (customer.channel === 'website') {
         // Same fix as sendPaymentInstructions' website branch above -- link
         // to the plain HTML topup invoice page, not /pdf (Gotenberg-backed,
         // internal-only, and never actually rendered before this bubble was
         // marked "sent").
         const invoiceHtmlUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
-        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice] ${invoiceHtmlUrl}`, trigger: 'topup_invoice_pdf', interactive: { type: 'document', filename: `topup-${order.reference}`, url: invoiceHtmlUrl } });
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice] ${invoiceHtmlUrl}`, trigger: 'topup_invoice_pdf', interactive: { type: 'document', filename: `topup-${order.reference}`, url: invoiceHtmlUrl } });
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `topup-${order.reference}.pdf`, `Top-up invoice for order ${order.reference}`);
-        await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
       }
       invoiceSent = true;
     } catch (err) {
@@ -4288,7 +4317,7 @@ export async function currentDineinSession(customer) {
 
 export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${buttonId}]` , processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: `[tapped: ${buttonId}]` , processed: true });
 
   const session = await currentDineinSession(customer);
   if (!session) {
@@ -4320,7 +4349,7 @@ export async function handleDineinButtonTap({ phoneNumber, channelId, buttonId, 
   const bodyText = buttonId === 'dinein_specials' ? `Here's today's specials for Table ${session.table_label}.` : `Here's our menu for Table ${session.table_label}.`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), bodyText, buttonId === 'dinein_specials' ? 'See specials' : 'View menu', url, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'dinein_menu_sent' });
 }
 
 // Whether every order in a table_session is settled -- the single source
@@ -4683,7 +4712,7 @@ export async function sendFeedbackRequest(orderId) {
   if (!inserted.length) return; // already sent for this order
   const url = `${process.env.PUBLIC_URL}/f/${inserted[0].id}`;
   if (customer.channel === 'website') {
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `How was your order? Tap below to rate it, takes 10 seconds.\n[feedback form sent: ${url}]`, trigger: 'feedback_form_sent', interactive: { type: 'cta_url', buttonText: 'Rate your order', url } });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `How was your order? Tap below to rate it, takes 10 seconds.\n[feedback form sent: ${url}]`, trigger: 'feedback_form_sent', interactive: { type: 'cta_url', buttonText: 'Rate your order', url } });
     return;
   }
   if (customer.channel === 'instagram') {
@@ -4692,7 +4721,7 @@ export async function sendFeedbackRequest(orderId) {
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   await sendWhatsAppCtaUrl(recipientFor(customer), 'How was your order? Tap below to rate it -- takes 10 seconds.', 'Rate your order', url, credentials);
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[feedback form sent: ${url}]`, trigger: 'feedback_form_sent' });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[feedback form sent: ${url}]`, trigger: 'feedback_form_sent' });
 }
 
 export async function handlePendingBatch(customer, text) {
@@ -4964,7 +4993,7 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
         console.error(`sendWebMenuLink (dinein) failed, falling back to text: ${err.message}`);
         return false;
       }
-      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${dineinUrl}]`, trigger: 'menu_shown', processed: true });
+      await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${dineinUrl}]`, trigger: 'menu_shown', processed: true });
       return true;
     }
   }
@@ -4986,7 +5015,7 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
   // single highest-traffic call site in the whole engine (every "show me
   // the menu" moment funnels through here).
   if (customer.channel === 'website') {
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger: 'menu_shown', processed: true, interactive: { type: 'cta_url', buttonText: buttonTitle, url } });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: bodyText, trigger: 'menu_shown', processed: true, interactive: { type: 'cta_url', buttonText: buttonTitle, url } });
     return true;
   }
   const credentials = await getWhatsAppCredentials(customer.branch_id);
@@ -5015,7 +5044,7 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
     console.error(`sendWebMenuLink failed, falling back to text: ${err.message}`);
     return false;
   }
-  await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'menu_shown', processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'menu_shown', processed: true });
   return true;
 }
 
@@ -5029,7 +5058,7 @@ async function sendWebMenuLink(customer, bodyText, buttonTitle = 'View menu', ca
 // instant button handler in this file. Chidera 2026-09-10.
 export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel = 'whatsapp', branchId, customer: presetCustomer }) {
   const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: No, change it]', processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: '[tapped: No, change it]', processed: true });
 
   // The reference demo's exact wording (Chidera 2026-09-10) plus one
   // added clause -- without it, a customer who opens the menu, decides
@@ -5070,7 +5099,7 @@ export async function handleOrderConfirmNoTap({ phoneNumber, channelId, channel 
     const url = `${process.env.PUBLIC_URL}/t/${tableToken}?g=${guestToken}`;
     const credentials = await getWhatsAppCredentials(customer.branch_id);
     await sendWhatsAppCtaUrl(recipientFor(customer), message, 'Tap here to see menu', url, credentials);
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'order_confirm_no', processed: true });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel, sender: 'bot', body: `[menu link sent: ${url}]`, trigger: 'order_confirm_no', processed: true });
     return;
   }
   const shown = await sendWebMenuLink(customer, message, 'Tap here to see menu');
@@ -5095,13 +5124,13 @@ export async function handleOrderConfirmYesTap({ phoneNumber, channelId, channel
   // -- nothing to do, same "stale tap = no-op" reasoning as
   // handleUpsellListTap's own guard.
   if (!order || order.confirmed_at || order.engine_state !== 'confirm_order') return;
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Yes, confirm]', processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Yes, confirm]', processed: true });
   await markOrderConfirmed(customer, order);
 }
 
 export async function handleStartOrderTap({ phoneNumber, channelId, channel = 'whatsapp', branchId, customer: presetCustomer }) {
   const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' , processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: '[tapped: Place an order]' , processed: true });
   // Same minimal-CTA-to-/wa/:token send as a plain "hi" now gets
   // (sendStartOrderLink) -- a "Place an order" button tap and a fresh
   // greeting converge on the same outcome, 2026-09-22.
@@ -5352,7 +5381,7 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
 // customer. Same passthrough shape handleWebMenuOrder already uses.
 export async function handleMenuItemTap({ phoneNumber, channelId, product, channel = 'whatsapp', branchId, customer: presetCustomer }) {
   const customer = presetCustomer || (await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId }));
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${product.name}]` , processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: `[tapped menu: ${product.name}]` , processed: true });
 
   let order = await resolveCustomerOrder(customer);
   const item = { productId: product.id, name: product.name, price: product.price, quantity: 1 };
@@ -5480,7 +5509,7 @@ export async function shouldSkipTypingIndicator(customer, channel, text) {
 
 export async function handleInboundMessage({ phoneNumber, channelId, text, channel = 'whatsapp', messageId, branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: text });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: text });
 
   // Voice has its own separate closed-hours path (voice_config.operating_hours,
   // checked in engine/voice.js before this function is ever reached) -- this
@@ -5526,7 +5555,7 @@ export async function handleInboundMessage({ phoneNumber, channelId, text, chann
 // anyway, since each POST from the page is already one deliberate submit
 // (a Send-button tap), not WhatsApp's SMS-style rapid-fire bursts.
 export async function handleWebChatMessage({ customer, text }) {
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: text });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel: 'website', sender: 'customer', body: text });
   const { branchId: hoursBranchId, openingHours } = await branchHoursFor(customer);
   const hours = checkOperatingHours(openingHours);
   if (!hours.open) {
@@ -5581,7 +5610,7 @@ export async function handleVoiceTurn({ callerNumber, branchId, spokenText, isFi
   if (isFirstTurn) {
     await pool.query('update customers set last_voice_call_at = now() where id = $1', [customer.id]);
   }
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'voice', sender: 'customer', body: spokenText , processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel: 'voice', sender: 'customer', body: spokenText , processed: true });
 
   voiceReplyBuffers.set(customer.id, []);
   await handlePendingBatch(customer, spokenText);
@@ -5591,7 +5620,7 @@ export async function handleVoiceTurn({ callerNumber, branchId, spokenText, isFi
 
   if (isFirstTurn && hasCalledBefore && customer.preferred_name) {
     const greeting = `Welcome back, ${customer.preferred_name}!`;
-    await logMessage({ customerId: customer.id, direction: 'outbound', channel: 'voice', sender: 'bot', body: greeting, trigger: 'voice_welcome_back' });
+    await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: 'voice', sender: 'bot', body: greeting, trigger: 'voice_welcome_back' });
     replyText = `${greeting} ${replyText}`.trim();
   }
 
@@ -5684,7 +5713,7 @@ export async function handleClosedHoursCall({ callerNumber, branchId, opensAt })
 // channel below rather than two separate function signatures.
 export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind, channel = 'whatsapp', branchId }) {
   const customer = await findOrCreateCustomer({ phoneNumber, channelId, channel, branchId });
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel, sender: 'customer', body: `[${kind}]` , processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel, sender: 'customer', body: `[${kind}]` , processed: true });
 
   // Same principle as handlePendingBatch -- a pending handover alone
   // doesn't mean a human is actually on this thread yet, only a real
@@ -5795,7 +5824,7 @@ export async function handleInboundMedia({ phoneNumber, channelId, mediaId, kind
 // pipeline (customer resolution, staff-handover idle check, channel
 // download) can never accidentally touch this one.
 export async function handleWebChatMedia(customer, dataUrl, kind = 'photo') {
-  await logMessage({ customerId: customer.id, direction: 'inbound', channel: 'website', sender: 'customer', body: `[${kind}]`, processed: true });
+  await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'inbound', channel: 'website', sender: 'customer', body: `[${kind}]`, processed: true });
 
   const order = await resolveCustomerOrder(customer);
   const awaitingPayment = order && order.engine_state === 'confirm_payment' && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted';
