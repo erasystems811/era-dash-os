@@ -1980,7 +1980,7 @@ function myDashboardPage() {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>My Dashboard — ERA Dash OS</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
   * { box-sizing: border-box; overflow-wrap: break-word; word-break: break-word; min-width: 0; }
   html, body { overflow-x: hidden; max-width: 100vw; }
@@ -2113,38 +2113,57 @@ async function loadBusinessIntelligence() {
     // naturally a whole made of two parts; complaint/abandoned are rates
     // against a different base each (active customers, total orders) so
     // they don't belong in the same pie without misrepresenting it.
-    const upsellMissed = Math.max(0, (o.upsellOffered || 0) - (o.upsellAccepted || 0));
-    if (pieChart) pieChart.destroy();
-    pieChart = new Chart(document.getElementById('biPieChart'), {
-      type: 'doughnut',
-      data: {
-        labels: ['Upsell accepted', 'Upsell offered but missed'],
-        datasets: [{ data: [o.upsellAccepted || 0, upsellMissed], backgroundColor: ['#2e7d32', '#e0e2e7'] }],
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { title: { display: true, text: 'Upsell offers: accepted vs missed (all businesses)', font: { size: 13 } }, legend: { position: 'bottom' } },
-      },
-    });
-
+    // Chidera, real live report right after this shipped: "my dashboard
+    // looks blank... right now nothing is showing" -- root cause was
+    // cdnjs.cloudflare.com returning a real 503/404 for the exact
+    // Chart.js file this loaded (an external outage, confirmed live via
+    // network inspection, not a code bug -- switched to jsdelivr below).
+    // But the deeper bug was here: one CDN hiccup threw inside this same
+    // try block every table render below was also sitting in, so a chart
+    // failing silently blanked the ENTIRE page -- cards above rendered
+    // (set before this point), everything after did not. Charts are now
+    // their own try/catch, entirely optional to the page actually working.
     const okBusinesses = bi.businesses.filter((b) => !b.error);
-    if (barChart) barChart.destroy();
-    barChart = new Chart(document.getElementById('biBarChart'), {
-      type: 'bar',
-      data: {
-        labels: okBusinesses.map((b) => b.displayName),
-        datasets: [
-          { label: 'Upsell success %', data: okBusinesses.map((b) => b.upsellSuccessRate ?? 0), backgroundColor: '#2f6feb' },
-          { label: 'Complaint rate %', data: okBusinesses.map((b) => b.complaintRate ?? 0), backgroundColor: '#c62828' },
-          { label: 'Abandoned rate %', data: okBusinesses.map((b) => b.abandonedRate ?? 0), backgroundColor: '#e65100' },
-        ],
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        scales: { y: { beginAtZero: true, ticks: { callback: (v) => v + '%' } } },
-        plugins: { title: { display: true, text: 'Upsell / complaint / abandoned rate, per business', font: { size: 13 } }, legend: { position: 'bottom' } },
-      },
-    });
+    const okCost = cost.filter((c) => !c.error);
+    try {
+      if (typeof Chart === 'undefined') throw new Error('Chart.js did not load');
+      const upsellMissed = Math.max(0, (o.upsellOffered || 0) - (o.upsellAccepted || 0));
+      if (pieChart) pieChart.destroy();
+      pieChart = new Chart(document.getElementById('biPieChart'), {
+        type: 'doughnut',
+        data: {
+          labels: ['Upsell accepted', 'Upsell offered but missed'],
+          datasets: [{ data: [o.upsellAccepted || 0, upsellMissed], backgroundColor: ['#2e7d32', '#e0e2e7'] }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { title: { display: true, text: 'Upsell offers: accepted vs missed (all businesses)', font: { size: 13 } }, legend: { position: 'bottom' } },
+        },
+      });
+
+      if (barChart) barChart.destroy();
+      barChart = new Chart(document.getElementById('biBarChart'), {
+        type: 'bar',
+        data: {
+          labels: okBusinesses.map((b) => b.displayName),
+          datasets: [
+            { label: 'Upsell success %', data: okBusinesses.map((b) => b.upsellSuccessRate ?? 0), backgroundColor: '#2f6feb' },
+            { label: 'Complaint rate %', data: okBusinesses.map((b) => b.complaintRate ?? 0), backgroundColor: '#c62828' },
+            { label: 'Abandoned rate %', data: okBusinesses.map((b) => b.abandonedRate ?? 0), backgroundColor: '#e65100' },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: { y: { beginAtZero: true, ticks: { callback: (v) => v + '%' } } },
+          plugins: { title: { display: true, text: 'Upsell / complaint / abandoned rate, per business', font: { size: 13 } }, legend: { position: 'bottom' } },
+        },
+      });
+    } catch (err) {
+      document.getElementById('biPieChart').closest('.chart-card').innerHTML = '<p class="muted">Charts failed to load (' + escBi(err.message) + ') -- the numbers below are still accurate.</p>';
+      const barCard = document.getElementById('biBarChart') && document.getElementById('biBarChart').closest('.chart-card');
+      if (barCard) barCard.innerHTML = '<p class="muted">Chart unavailable -- see the table below.</p>';
+      console.error('Chart render failed:', err);
+    }
 
     document.getElementById('biRows').innerHTML = bi.businesses.map((b) => {
       if (b.error) return '<tr><td>' + escBi(b.displayName) + '</td><td colspan="4">Error: ' + escBi(b.error) + '</td></tr>';
@@ -2157,27 +2176,33 @@ async function loadBusinessIntelligence() {
         '</tr>';
     }).join('') || '<tr><td colspan="5">No EBOS businesses yet.</td></tr>';
 
-    const okCost = cost.filter((c) => !c.error);
-    const barColors = okCost.map((c) => {
-      const ratio = Math.min(1, (c.outboundWhatsapp || 0) / (c.freeAllowance || 1000));
-      return ratio >= 0.9 ? '#c62828' : ratio >= 0.7 ? '#e65100' : '#2e7d32';
-    });
-    if (msgChart) msgChart.destroy();
-    msgChart = new Chart(document.getElementById('biMsgChart'), {
-      type: 'bar',
-      data: {
-        labels: okCost.map((c) => c.displayName),
-        datasets: [{ label: 'WhatsApp messages sent this month', data: okCost.map((c) => c.outboundWhatsapp || 0), backgroundColor: barColors }],
-      },
-      options: {
-        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-        plugins: {
-          title: { display: true, text: 'WhatsApp messages sent this month (green < 70% of free allowance, orange < 90%, red at/over)', font: { size: 13 } },
-          legend: { display: false },
+    try {
+      if (typeof Chart === 'undefined') throw new Error('Chart.js did not load');
+      const barColors = okCost.map((c) => {
+        const ratio = Math.min(1, (c.outboundWhatsapp || 0) / (c.freeAllowance || 1000));
+        return ratio >= 0.9 ? '#c62828' : ratio >= 0.7 ? '#e65100' : '#2e7d32';
+      });
+      if (msgChart) msgChart.destroy();
+      msgChart = new Chart(document.getElementById('biMsgChart'), {
+        type: 'bar',
+        data: {
+          labels: okCost.map((c) => c.displayName),
+          datasets: [{ label: 'WhatsApp messages sent this month', data: okCost.map((c) => c.outboundWhatsapp || 0), backgroundColor: barColors }],
         },
-        scales: { x: { beginAtZero: true } },
-      },
-    });
+        options: {
+          indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+          plugins: {
+            title: { display: true, text: 'WhatsApp messages sent this month (green < 70% of free allowance, orange < 90%, red at/over)', font: { size: 13 } },
+            legend: { display: false },
+          },
+          scales: { x: { beginAtZero: true } },
+        },
+      });
+    } catch (err) {
+      const msgCard = document.getElementById('biMsgChart') && document.getElementById('biMsgChart').closest('.chart-card');
+      if (msgCard) msgCard.innerHTML = '<p class="muted">Chart unavailable -- see the table below.</p>';
+      console.error('Chart render failed:', err);
+    }
 
     document.getElementById('biMessageRows').innerHTML = cost.map((c) => {
       if (c.error) return '<tr><td>' + escBi(c.displayName) + '</td><td colspan="3">Error: ' + escBi(c.error) + '</td></tr>';
