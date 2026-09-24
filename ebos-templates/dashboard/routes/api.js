@@ -311,6 +311,77 @@ router.get('/monitor/messaging-cost', requireEraAdmin, async (req, res) => {
   });
 });
 
+// Chidera, 2026-09-24: "i want a personal dashboard for myself to monitor
+// all my ebos business and see if im really improving their business with
+// my tactics... upsell success rate... abandoned chat rate... complaint
+// rate... basically all these things that help me study the customers
+// response to the automation". ERA-admin-only, same trust boundary as
+// monitor/summary -- this is Chidera's own cross-business read, not
+// something a business owner's own dashboard exposes. Reuses
+// computeUpsellStats (a hoisted function declaration further down this
+// file, built for customers/stats) rather than a second copy of that
+// match-and-count logic. Must stay above router.use(requireStaffApi)
+// below -- see the comment on pos-sync-config for why.
+router.get('/business-intelligence', requireEraAdmin, async (req, res) => {
+  const days = Math.min(Number(req.query.days) || 30, 365);
+  const interval = `${days} days`;
+
+  const [upsell, { rows: complaintRows }, { rows: activeCustomerRows }, { rows: abandonedRows }, { rows: totalOrderRows }] = await Promise.all([
+    computeUpsellStats('and o.created_at >= now() - $1::interval', [interval]),
+    // Complaint rate: the exact handover_reason string handleInboundMessage
+    // sets when Claude classifies a message as a complaint (see
+    // handleInboundMessage's own `intent === 'complaint'` branch) --
+    // deliberately not a LIKE match on "complaint" anywhere in the reason,
+    // since a handover a STAFF member typed a free-text reason for could
+    // coincidentally contain that word without being one.
+    pool.query(
+      `select count(*) as count from customers
+       where handover_reason = 'Customer message classified as a complaint' and handover_at >= now() - $1::interval`,
+      [interval]
+    ),
+    pool.query(
+      `select count(distinct customer_id) as count from message where direction = 'inbound' and created_at >= now() - $1::interval`,
+      [interval]
+    ),
+    // Abandoned chat rate: there's no dedicated "why was this cancelled"
+    // column yet (closeStaleOrders' own timeout-sweep and a customer
+    // explicitly saying no both just land on status='cancelled') -- this is
+    // an honest proxy, not exact: a cancelled order whose customer sent
+    // nothing in the hour immediately before the order's own last update.
+    // An explicit cancel is customer-driven and near-instant (their own
+    // message is what causes the update); closeStaleOrders only ever fires
+    // long after the customer already went quiet, so the two shapes are
+    // genuinely distinguishable most of the time even without a real flag.
+    pool.query(
+      `select count(*) as count from "order" o
+       where o.status = 'cancelled' and o.created_at >= now() - $1::interval
+         and not exists (
+           select 1 from message m
+           where m.customer_id = o.customer_id and m.direction = 'inbound'
+             and m.created_at > o.updated_at - interval '1 hour' and m.created_at <= o.updated_at
+         )`,
+      [interval]
+    ),
+    pool.query(`select count(*) as count from "order" where created_at >= now() - $1::interval`, [interval]),
+  ]);
+
+  const activeCustomers = Number(activeCustomerRows[0].count);
+  const complaints = Number(complaintRows[0].count);
+  const abandonedOrders = Number(abandonedRows[0].count);
+  const totalOrders = Number(totalOrderRows[0].count);
+
+  res.json({
+    days,
+    ...upsell,
+    complaints,
+    activeCustomers,
+    complaintRate: activeCustomers > 0 ? Math.round((complaints / activeCustomers) * 1000) / 10 : null,
+    abandonedOrders,
+    totalOrders,
+    abandonedRate: totalOrders > 0 ? Math.round((abandonedOrders / totalOrders) * 1000) / 10 : null,
+  });
+});
+
 // Raw-content half of the same panel -- deliberately not gated behind any
 // "flag" logic. The point Chidera asked for is to actually watch real
 // conversations across every business from one place, not wait for the
@@ -1849,75 +1920,6 @@ async function computeUpsellStats(dateWhereSql, dateParams) {
     upsellSuccessRate: offered > 0 ? Math.round((accepted / offered) * 1000) / 10 : null,
   };
 }
-
-// Chidera, 2026-09-24: "i want a personal dashboard for myself to monitor
-// all my ebos business and see if im really improving their business with
-// my tactics... upsell success rate... abandoned chat rate... complaint
-// rate... basically all these things that help me study the customers
-// response to the automation". ERA-admin-only, same trust boundary as
-// monitor/summary -- this is Chidera's own cross-business read, not
-// something a business owner's own dashboard exposes. Reuses
-// computeUpsellStats (already built for customers/stats) rather than a
-// second copy of that match-and-count logic.
-router.get('/business-intelligence', requireEraAdmin, async (req, res) => {
-  const days = Math.min(Number(req.query.days) || 30, 365);
-  const interval = `${days} days`;
-
-  const [upsell, { rows: complaintRows }, { rows: activeCustomerRows }, { rows: abandonedRows }, { rows: totalOrderRows }] = await Promise.all([
-    computeUpsellStats('and o.created_at >= now() - $1::interval', [interval]),
-    // Complaint rate: the exact handover_reason string handleInboundMessage
-    // sets when Claude classifies a message as a complaint (see
-    // handleInboundMessage's own `intent === 'complaint'` branch) --
-    // deliberately not a LIKE match on "complaint" anywhere in the reason,
-    // since a handover a STAFF member typed a free-text reason for could
-    // coincidentally contain that word without being one.
-    pool.query(
-      `select count(*) as count from customers
-       where handover_reason = 'Customer message classified as a complaint' and handover_at >= now() - $1::interval`,
-      [interval]
-    ),
-    pool.query(
-      `select count(distinct customer_id) as count from message where direction = 'inbound' and created_at >= now() - $1::interval`,
-      [interval]
-    ),
-    // Abandoned chat rate: there's no dedicated "why was this cancelled"
-    // column yet (closeStaleOrders' own timeout-sweep and a customer
-    // explicitly saying no both just land on status='cancelled') -- this is
-    // an honest proxy, not exact: a cancelled order whose customer sent
-    // nothing in the hour immediately before the order's own last update.
-    // An explicit cancel is customer-driven and near-instant (their own
-    // message is what causes the update); closeStaleOrders only ever fires
-    // long after the customer already went quiet, so the two shapes are
-    // genuinely distinguishable most of the time even without a real flag.
-    pool.query(
-      `select count(*) as count from "order" o
-       where o.status = 'cancelled' and o.created_at >= now() - $1::interval
-         and not exists (
-           select 1 from message m
-           where m.customer_id = o.customer_id and m.direction = 'inbound'
-             and m.created_at > o.updated_at - interval '1 hour' and m.created_at <= o.updated_at
-         )`,
-      [interval]
-    ),
-    pool.query(`select count(*) as count from "order" where created_at >= now() - $1::interval`, [interval]),
-  ]);
-
-  const activeCustomers = Number(activeCustomerRows[0].count);
-  const complaints = Number(complaintRows[0].count);
-  const abandonedOrders = Number(abandonedRows[0].count);
-  const totalOrders = Number(totalOrderRows[0].count);
-
-  res.json({
-    days,
-    ...upsell,
-    complaints,
-    activeCustomers,
-    complaintRate: activeCustomers > 0 ? Math.round((complaints / activeCustomers) * 1000) / 10 : null,
-    abandonedOrders,
-    totalOrders,
-    abandonedRate: totalOrders > 0 ? Math.round((abandonedOrders / totalOrders) * 1000) / 10 : null,
-  });
-});
 
 // Dashboard cards/charts (Chidera, 2026-09-16, matching a client's own CRM
 // mockup) -- New = exactly 1 completed order, Repeat = 2+, VIP = top 10%
