@@ -40,20 +40,31 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
      guess -- everything below derives from these vars plus --panel/
      --surface2 (added here so the two remaining bottom-sheet cards and
      their inputs never fall back to a hardcoded dark hex again either). */
-  :root{--bg:#efeae2;--header:#f0f2f5;--bubble-in:#ffffff;--bubble-out:#d9fdd3;--text:#111b21;--text2:#667781;--accent:#00a884;--divider:rgba(0,0,0,.08);--input:#ffffff;--panel:#ffffff;--surface2:#f0f2f5}
+  /* Chidera, 2026-09-24: "you made it too light o, it should have normal
+     whatsapp look but just not like that dark mode, just make the header
+     that has the restaurant name and all darker." Real WhatsApp's actual
+     light theme: the chat body/bubbles are light (unchanged from the
+     first pass), but the top header bar is its own dark teal-green, not
+     light gray -- --header/--header-text are now specific to that one
+     bar; --composer-bg is the (still light) bottom input bar, which used
+     to share --header's value back when that was light too. */
+  :root{--bg:#efeae2;--header:#008069;--header-text:#ffffff;--composer-bg:#f0f2f5;--bubble-in:#ffffff;--bubble-out:#d9fdd3;--text:#111b21;--text2:#667781;--accent:#00a884;--divider:rgba(0,0,0,.08);--input:#ffffff;--panel:#ffffff;--surface2:#f0f2f5}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%;overflow:hidden;font-family:Inter,-apple-system,sans-serif;color:var(--text);background:var(--bg)}
   #app{display:flex;flex-direction:column;height:100%;position:relative}
-  header{flex:none;background:var(--header);color:var(--text);padding:10px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--divider)}
-  header .back{flex:none;color:var(--accent);font-size:26px;line-height:1;padding:0 2px}
-  .avatar{width:36px;height:36px;border-radius:50%;background:var(--accent);flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:#fff;${avatarStyle}}
+  header{flex:none;background:var(--header);color:var(--header-text);padding:10px 14px;display:flex;align-items:center;gap:8px}
+  header .back{flex:none;color:var(--header-text);font-size:26px;line-height:1;padding:0 2px}
+  /* White circle + accent-colored initial -- an accent-green avatar (the
+     old treatment) would nearly vanish against the header's own dark
+     green now. */
+  .avatar{width:36px;height:36px;border-radius:50%;background:#fff;flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:var(--accent);${avatarStyle}}
   header .name{font-size:16px;font-weight:600}
-  header .status{font-size:12.5px;color:var(--text2)}
+  header .status{font-size:12.5px;color:rgba(255,255,255,.75)}
   /* Chidera, 2026-09-24: "under the restaurant name, under should have an
      imprint smaller writing Powered by ERA Systems for my branding." A
      deliberately tiny, muted imprint -- ERA's own attribution, never
      competing with the business's own name/status above it. */
-  header .powered-by{font-size:10px;color:var(--text2);opacity:.55;letter-spacing:.3px;margin-top:1px}
+  header .powered-by{font-size:10px;color:rgba(255,255,255,.6);opacity:.85;letter-spacing:.3px;margin-top:1px}
   #scroll{flex:1;overflow-y:auto;padding:14px 10px;background-color:var(--bg);background-image:radial-gradient(rgba(0,0,0,.055) 1px, transparent 1px);background-size:22px 22px}
   /* Chidera, 2026-09-24: "let the webchat notification of received pop as
      a banner... paystack leaves it loading there without making it clear
@@ -158,7 +169,7 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
   #qSheetNote{width:100%;padding:12px;border-radius:8px;border:1px solid var(--divider);background:var(--surface2);color:var(--text);font-size:14.5px;font-family:inherit;box-sizing:border-box}
   #qSheetNote::placeholder{color:var(--text2)}
   #qSheetSend{flex:none;margin:14px 18px;padding:13px;border:none;border-radius:24px;background:linear-gradient(180deg,#1fda63,#0abb5f);color:#062b1a;font-weight:700;font-size:15.5px;cursor:pointer}
-  #composer{flex:none;display:flex;gap:6px;align-items:center;padding:8px 10px;background:var(--header)}
+  #composer{flex:none;display:flex;gap:6px;align-items:center;padding:8px 10px;background:var(--composer-bg);border-top:1px solid var(--divider)}
   .composer-icon{flex:none;width:26px;height:26px;border:none;background:none;color:var(--text2);font-size:21px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
   #inputWrap{flex:1;display:flex;align-items:center;background:var(--input);border-radius:22px;padding:0 6px 0 16px}
   #textInput{flex:1;border:none;padding:11px 4px;font-size:14.5px;font-family:inherit;resize:none;max-height:100px;background:transparent;color:var(--text)}
