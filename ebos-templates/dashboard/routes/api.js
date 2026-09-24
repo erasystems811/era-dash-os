@@ -1322,6 +1322,28 @@ router.post('/orders/:id/release', requireEditorApi, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Chidera, 2026-09-24: "in the dine in where is the space to type in cash
+// collected by staff so bot knows how much to expect?" -- "Mark paid" was
+// a single click with no payment method or amount captured. Its own route,
+// separate from /orders/:id/status just below -- payment method is a fact
+// about how an order got paid, recorded before that click actually closes
+// it out, not part of the status-advance itself (which every other
+// fulfilment type also uses, most of which never touch cash at all).
+// requireStaffApi, same tier as notify-ready/status -- a Tier 3 (PIN)
+// staff member closing out a dine-in table needs this same as any other
+// action on the floor.
+router.post('/orders/:id/payment-method', requireStaffApi, async (req, res) => {
+  const { paymentMethod, cashCollected } = req.body || {};
+  if (!['cash', 'card', 'transfer'].includes(paymentMethod)) {
+    return res.status(400).json({ error: 'paymentMethod must be cash, card, or transfer.' });
+  }
+  await pool.query(
+    `update "order" set payment_method = $1, cash_collected = $2 where id = $3`,
+    [paymentMethod, paymentMethod === 'cash' ? Number(cashCollected) || 0 : null, req.params.id]
+  );
+  res.json({ ok: true });
+});
+
 router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
   const { status } = req.body;
   await pool.query('update "order" set status = $1, updated_at = now() where id = $2', [status, req.params.id]);
@@ -2443,6 +2465,57 @@ router.get('/pos-transactions/stats', requireFullAccessApi, async (req, res) => 
     from pos_transaction
   `);
   res.json(rows[0]);
+});
+
+// Chidera, 2026-09-24: "the way its looking we need a finance dashboard...
+// total cash collected(all time and any month), outstanding, total
+// revenue(all time and each month)... revenue from top 10 best
+// sellers(all time and any month)." ?month=YYYY-MM scopes every figure to
+// that calendar month; omitted (or any other value) means all-time --
+// same two-mode shape /orders/stats/today's own window uses, just at
+// month granularity instead of a fixed "today". Revenue only ever counts
+// an order whose payment actually landed (payment_status in
+// ('confirmed','accepted')), same definition /orders/stats/today already
+// uses for "collected" -- an unpaid or still-pending order was never real
+// income. cashCollected sums cash_collected regardless of payment_status
+// (POS-payment-method's own route only ever sets it once a dine-in table
+// is actually being closed out with cash in hand, so there's no
+// "pending cash" state to exclude).
+router.get('/finance/summary', requireFullAccessApi, async (req, res) => {
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : null;
+  const dateFilter = month ? `and date_trunc('month', o.created_at) = $1::date` : '';
+  const params = month ? [`${month}-01`] : [];
+
+  const [{ rows: totals }, { rows: cashRows }, { rows: topSellers }] = await Promise.all([
+    pool.query(
+      `select coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as revenue,
+              coalesce(sum(total) filter (where status != 'cancelled'), 0) as total_value
+       from "order" o where 1 = 1 ${dateFilter}`,
+      params
+    ),
+    pool.query(`select coalesce(sum(cash_collected), 0) as cash from "order" o where payment_method = 'cash' ${dateFilter}`, params),
+    pool.query(
+      `select p.name, sum(oi.quantity)::int as quantity, sum(oi.quantity * oi.price) as revenue
+       from order_item oi
+         join product p on p.id = oi.product_id
+         join "order" o on o.id = oi.order_id
+       where o.payment_status in ('confirmed', 'accepted') ${dateFilter}
+       group by p.name
+       order by revenue desc
+       limit 10`,
+      params
+    ),
+  ]);
+
+  const revenue = Number(totals[0].revenue);
+  const totalValue = Number(totals[0].total_value);
+  res.json({
+    month,
+    revenue,
+    outstanding: Math.max(0, totalValue - revenue),
+    cashCollected: Number(cashRows[0].cash),
+    topSellers: topSellers.map((r) => ({ name: r.name, quantity: r.quantity, revenue: Number(r.revenue) })),
+  });
 });
 
 // Staff reaching a phone number with no existing thread yet -- just opens

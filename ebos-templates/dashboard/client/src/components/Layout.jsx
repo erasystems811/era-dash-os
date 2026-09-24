@@ -41,6 +41,14 @@ const BASE_NAV = [
   { to: '/knowledge-base', label: 'Knowledge base' },
   { to: '/documents', label: 'Documents' },
   { to: '/feedback', label: 'Feedback' },
+  // Chidera, 2026-09-24: "the way its looking we need a finance dashboard"
+  // -- was the POS tab, spliced in below only once Moniepoint POS sync was
+  // switched on (addOnItems' own old posEnabled entry). Cash/revenue/
+  // outstanding apply to every business regardless of whether Moniepoint
+  // sync is even in use, so this is core nav now, not an add-on -- the POS
+  // terminal-sales section inside Finance.jsx still gates itself on that
+  // same toggle for its own content.
+  { to: '/finance', label: 'Finance' },
   { to: '/staff', label: 'Roles and numbers' },
   { to: '/activity-log', label: 'Activity log' },
   { to: '/settings', label: 'Settings' },
@@ -95,9 +103,6 @@ export default function Layout() {
   // Customer database (CRM) add-on -- same "genuinely inert while off"
   // rule as the other add-ons above.
   const [crmEnabled, setCrmEnabled] = useState(false);
-  // POS sync add-on (real Moniepoint terminal transactions) -- same
-  // "genuinely inert while off" rule as the other add-ons above.
-  const [posEnabled, setPosEnabled] = useState(false);
   const location = useLocation();
   // Zero DOM below one branch, not just hidden -- a single-location
   // business must not be able to tell this feature exists at all. Also
@@ -117,7 +122,6 @@ export default function Layout() {
     // crmEnabled toggle covers both; there's no separate add-on for just
     // one of them.
     ...(crmEnabled ? [{ to: '/crm', label: 'CRM' }, { to: '/customers', label: 'Customers' }] : []),
-    ...(posEnabled ? [{ to: '/pos', label: 'POS' }] : []),
   ];
   // Staff/Settings/Activity log stay owner-or-manager-visible in the nav
   // even when branch-locked; requireEditorApi on their write routes already
@@ -157,7 +161,6 @@ export default function Layout() {
     api.get('/voice-config').then((c) => setVoiceEnabled(Boolean(c?.enabled)));
     api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
     api.get('/crm-config').then((c) => setCrmEnabled(Boolean(c?.enabled)));
-    api.get('/pos-sync-config').then((c) => setPosEnabled(Boolean(c?.enabled)));
   }, []);
 
   // A route change is the clearest signal the user picked something on

@@ -289,10 +289,29 @@ export default function Orders() {
     loadInHouse();
   }
 
-  async function markInHousePaid(e, orderId) {
+  // Same payment-method capture as InHouse.jsx's own board -- see its
+  // 2026-09-24 comment for why this exists (a plain "Mark paid" click had
+  // nowhere to record cash collected at all).
+  const [payingOrderId, setPayingOrderId] = useState(null);
+  const [cashAmount, setCashAmount] = useState('');
+
+  function startInHousePaid(e, order) {
     e.preventDefault();
     e.stopPropagation();
+    setPayingOrderId(order.id);
+    setCashAmount(String(Math.round(Number(order.total || 0))));
+  }
+
+  async function markInHousePaid(e, orderId, paymentMethod) {
+    e.preventDefault();
+    e.stopPropagation();
+    await api.post(`/orders/${orderId}/payment-method`, {
+      paymentMethod,
+      cashCollected: paymentMethod === 'cash' ? Number(cashAmount) || 0 : undefined,
+    });
     await api.post(`/orders/${orderId}/status`, { status: 'completed' });
+    setPayingOrderId(null);
+    setCashAmount('');
     loadInHouse();
   }
 
@@ -492,9 +511,38 @@ export default function Orders() {
                     <div className="foot">
                       <span className="total mono">NGN {Number(o.total || 0).toLocaleString()}</span>
                     </div>
-                    <button style={{ marginTop: 8, width: '100%' }} onClick={(e) => col.onAction(e, o.id)}>
-                      {col.actionLabel}
-                    </button>
+                    {col.actionLabel === 'Mark paid' && payingOrderId === o.id ? (
+                      <div style={{ marginTop: 8 }} onClick={(e) => e.preventDefault()}>
+                        <div className="button-row" style={{ gap: 6, marginBottom: 6 }}>
+                          <button style={{ flex: 1 }} className="secondary" onClick={(e) => markInHousePaid(e, o.id, 'card')}>
+                            Card
+                          </button>
+                          <button style={{ flex: 1 }} className="secondary" onClick={(e) => markInHousePaid(e, o.id, 'transfer')}>
+                            Transfer
+                          </button>
+                        </div>
+                        <div className="button-row" style={{ gap: 6 }}>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            style={{ flex: 1, minWidth: 90 }}
+                            value={cashAmount}
+                            onChange={(e) => setCashAmount(e.target.value)}
+                            placeholder="Cash collected"
+                          />
+                          <button style={{ flex: 1 }} onClick={(e) => markInHousePaid(e, o.id, 'cash')}>
+                            Cash
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        style={{ marginTop: 8, width: '100%' }}
+                        onClick={(e) => (col.actionLabel === 'Mark paid' ? startInHousePaid(e, o) : col.onAction(e, o.id))}
+                      >
+                        {col.actionLabel}
+                      </button>
+                    )}
                   </Link>
                 ))}
                 {!col.orders.length && <div className="empty">{col.emptyText}</div>}

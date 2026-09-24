@@ -47,10 +47,35 @@ export default function InHouse() {
     load();
   }
 
-  async function markPaid(e, orderId) {
+  // Chidera, 2026-09-24: "in the dine in where is the space to type in
+  // cash collected by staff so bot knows how much to expect?" -- "Mark
+  // paid" was a single click, no payment method or amount captured at
+  // all, so there was nowhere for this to even go. Card/transfer close
+  // out immediately (nothing more to record); cash reveals an amount
+  // field, defaulted to the order's own total but editable -- a real
+  // dine-in bill doesn't always land exactly on the system total (a
+  // rounded-up cash handover, a tip folded in), and the whole point is
+  // recording what staff actually collected, not assuming it matches.
+  const [payingOrderId, setPayingOrderId] = useState(null);
+  const [cashAmount, setCashAmount] = useState('');
+
+  function startMarkPaid(e, order) {
     e.preventDefault();
     e.stopPropagation();
+    setPayingOrderId(order.id);
+    setCashAmount(String(Math.round(Number(order.total || 0))));
+  }
+
+  async function confirmPaid(e, orderId, paymentMethod) {
+    e.preventDefault();
+    e.stopPropagation();
+    await api.post(`/orders/${orderId}/payment-method`, {
+      paymentMethod,
+      cashCollected: paymentMethod === 'cash' ? Number(cashAmount) || 0 : undefined,
+    });
     await api.post(`/orders/${orderId}/status`, { status: 'completed' });
+    setPayingOrderId(null);
+    setCashAmount('');
     load();
   }
 
@@ -110,9 +135,38 @@ export default function InHouse() {
               <div className="foot">
                 <span className="total mono">NGN {Number(o.total || 0).toLocaleString()}</span>
               </div>
-              <button style={{ marginTop: 8, width: '100%' }} onClick={(e) => onAction(e, o.id)}>
-                {actionLabel}
-              </button>
+              {actionLabel === 'Mark paid' && payingOrderId === o.id ? (
+                <div style={{ marginTop: 8 }} onClick={(e) => e.preventDefault()}>
+                  <div className="button-row" style={{ gap: 6, marginBottom: 6 }}>
+                    <button style={{ flex: 1 }} className="secondary" onClick={(e) => confirmPaid(e, o.id, 'card')}>
+                      Card
+                    </button>
+                    <button style={{ flex: 1 }} className="secondary" onClick={(e) => confirmPaid(e, o.id, 'transfer')}>
+                      Transfer
+                    </button>
+                  </div>
+                  <div className="button-row" style={{ gap: 6 }}>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      style={{ flex: 1, minWidth: 90 }}
+                      value={cashAmount}
+                      onChange={(e) => setCashAmount(e.target.value)}
+                      placeholder="Cash collected"
+                    />
+                    <button style={{ flex: 1 }} onClick={(e) => confirmPaid(e, o.id, 'cash')}>
+                      Cash
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  style={{ marginTop: 8, width: '100%' }}
+                  onClick={(e) => (actionLabel === 'Mark paid' ? startMarkPaid(e, o) : onAction(e, o.id))}
+                >
+                  {actionLabel}
+                </button>
+              )}
             </Link>
           ))}
           {!orders.length && <div className="empty">{emptyText}</div>}
