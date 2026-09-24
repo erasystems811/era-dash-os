@@ -19,6 +19,7 @@ import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
 import { createMagicLink, findStaffByPhoneNumber, toWhatsAppDigits } from '../lib/auth.js';
 import { checkOperatingHours } from './hours.js';
+import { messageEvents } from './message-events.js';
 
 // The one place that decides "who is this customer and how do we reach
 // them" by channel -- WhatsApp uses their phone number, Instagram uses
@@ -122,6 +123,12 @@ async function logMessage({ customerId, direction, channel, sender, body, trigge
     );
     if (Number(monthRows[0].count) === 1) await logMetric('active_customer');
   }
+  // Chidera, 2026-09-25: "that customer reply coming in and staff seeing
+  // it pop in live without refreshing it." Every real message emits here
+  // (not just inbound) -- if two staff members have the same conversation
+  // open, or one has it open while another sends from a different device,
+  // both tabs should update instantly, not just the one that sent it.
+  messageEvents.emit('message', { customerId });
 }
 
 async function logMetric(metric) {

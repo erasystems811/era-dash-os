@@ -26,13 +26,25 @@ export default function ConversationDetail() {
   // send()/takeOver()/returnToBot() below each call load() themselves right
   // after posting. An inbound customer reply arrives over the WhatsApp
   // webhook straight into the database with nothing pushing it to an
-  // already-open browser tab, so without a poll it just sits there until
-  // someone manually reloads. Same order of magnitude as InHouse.jsx's own
-  // queue poll (15s) -- a staff chat doesn't need push-grade latency.
+  // already-open browser tab.
+  // Chidera, 2026-09-25, follow-up: "that customer reply coming in and
+  // staff seeing it pop in live without refreshing it" -- the first fix
+  // was a 15s poll, which could still sit on a reply for several seconds.
+  // routes/api.js's GET /conversations/:id/stream (SSE, same shape as
+  // routes/rider.js's own /offers/stream) pushes the instant any message
+  // is logged for this conversation; EventSource reconnects on its own if
+  // the connection drops. The poll stays too, at a much longer interval,
+  // purely as a safety net for the rare case SSE itself doesn't reach a
+  // given network (a strict corporate proxy, etc).
   useEffect(() => {
     load();
-    const t = setInterval(load, 15000);
-    return () => clearInterval(t);
+    const source = new EventSource(`/api/conversations/${id}/stream`);
+    source.onmessage = load;
+    const t = setInterval(load, 60000);
+    return () => {
+      source.close();
+      clearInterval(t);
+    };
   }, [id]);
 
   // Staff opening a thread care about the newest message, not the oldest --

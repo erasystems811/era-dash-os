@@ -37,6 +37,7 @@ import { router as dineinRoutes } from './dinein.js';
 import { encrypt } from '../lib/crypto.js';
 import { maybeDispatchOwnRiders, manuallyRingForRider } from '../engine/delivery-dispatch.js';
 import { offerBus } from '../engine/offer-bus.js';
+import { messageEvents } from '../engine/message-events.js';
 
 export const router = express.Router();
 
@@ -2016,11 +2017,53 @@ router.get('/conversations/search', async (req, res) => {
   res.json(rows);
 });
 
+// Chidera, 2026-09-25: "that customer reply coming in and staff seeing it
+// pop in live without refreshing it." Same SSE shape as routes/rider.js's
+// own /offers/stream (see engine/message-events.js's comment for why an
+// in-process EventEmitter is the whole mechanism) -- a ping here just
+// means "something changed, go re-fetch /api/conversations", not a copy
+// of the row itself, so the client always ends up with the exact same
+// shape a normal GET already returns. Deliberately defined before the
+// /:id route below, same reason as /search above.
+router.get('/conversations/stream', (req, res) => {
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  res.flushHeaders();
+  const onMessage = () => res.write('data: update\n\n');
+  messageEvents.on('message', onMessage);
+  // Same 20s idle-comment convention as offers/stream, so Caddy/any
+  // intermediary proxy never decides this connection went quiet and
+  // closes it out from under a staff member still watching the list.
+  const keepAlive = setInterval(() => res.write(':\n\n'), 20_000);
+  req.on('close', () => {
+    messageEvents.off('message', onMessage);
+    clearInterval(keepAlive);
+  });
+});
+
 router.get('/conversations/:id', async (req, res) => {
   const { rows: customerRows } = await pool.query('select * from customers where id = $1', [req.params.id]);
   if (!customerRows[0]) return res.status(404).json({ error: 'Not found.' });
   const { rows: messages } = await pool.query('select * from message where customer_id = $1 order by created_at', [req.params.id]);
   res.json({ customer: customerRows[0], messages });
+});
+
+// Same shape as /conversations/stream above, scoped to one conversation --
+// ConversationDetail.jsx watches this instead of the unscoped one so a
+// staff member reading one thread isn't woken up by every OTHER
+// customer's message across the whole business.
+router.get('/conversations/:id/stream', (req, res) => {
+  const { id } = req.params;
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  res.flushHeaders();
+  const onMessage = (event) => {
+    if (event.customerId === id) res.write('data: update\n\n');
+  };
+  messageEvents.on('message', onMessage);
+  const keepAlive = setInterval(() => res.write(':\n\n'), 20_000);
+  req.on('close', () => {
+    messageEvents.off('message', onMessage);
+    clearInterval(keepAlive);
+  });
 });
 
 // Customer database (CRM add-on) -- every customer with spend computed

@@ -52,12 +52,18 @@ function AllConversations() {
   useEffect(() => {
     const load = () => api.get('/conversations').then(setConversations);
     load();
-    // Same reasoning as ConversationDetail.jsx's own poll -- an inbound
-    // customer message never pushes to an already-open tab on its own, so
-    // this list's "Last message" column would otherwise go stale until a
-    // manual reload too.
-    const t = setInterval(load, 15000);
-    return () => clearInterval(t);
+    // Same SSE-first, poll-as-safety-net shape as ConversationDetail.jsx's
+    // own live update -- GET /conversations/stream pushes the instant any
+    // message lands anywhere in the business, so this list's "Last
+    // message" column updates the moment a customer replies, not on the
+    // next poll tick.
+    const source = new EventSource('/api/conversations/stream');
+    source.onmessage = load;
+    const t = setInterval(load, 60000);
+    return () => {
+      source.close();
+      clearInterval(t);
+    };
   }, []);
 
   async function startConversation() {
@@ -256,10 +262,14 @@ function ActiveConversations() {
   useEffect(() => {
     const load = () => api.get('/conversations').then(setConversations);
     load();
-    // Same reasoning as ConversationDetail.jsx's own poll -- an inbound
-    // customer message never pushes to an already-open tab on its own.
-    const t = setInterval(load, 15000);
-    return () => clearInterval(t);
+    // Same SSE-first, poll-as-safety-net shape as AllConversations above.
+    const source = new EventSource('/api/conversations/stream');
+    source.onmessage = load;
+    const t = setInterval(load, 60000);
+    return () => {
+      source.close();
+      clearInterval(t);
+    };
   }, []);
 
   if (!conversations) return <Loading />;
