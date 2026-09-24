@@ -3173,13 +3173,14 @@ export async function completePayment(orderId) {
   // Chidera, 2026-09-16: "a staff number should be able to get a confirmed
   // order after paystack has automatically confirmed payment on their
   // whatsapp without accessing the back end... the open link will just
-  // show the kanban so they can click the ready button." A plain text
-  // alert (what/who/how much), then a separate CTA-URL button opening the
-  // kanban board itself -- same two-message shape as handover()'s own
-  // conversation-link alert just above, landing on '/' (the board, same
-  // page PIN-tier staff already land on) rather than a specific order's
-  // page, since the "ready" action lives on the board's own order card,
-  // not a detail page.
+  // show the kanban so they can click the ready button."
+  // Chidera, 2026-09-24: "turn handover messages to 1 text not 2 different,
+  // but the button and text together and same with the ones stating what
+  // the customer ordered" -- this was the alert text and the board-link
+  // button as two separate WhatsApp sends (two billable messages), same
+  // shape handover() itself had before its own 2026-09-24 merge just above.
+  // Same fix here: one cta_url message carries the alert as its body AND
+  // the button, when a link is even possible.
   const orderRecipients = await orderAlertRecipients();
   if (orderRecipients.length) {
     // Chidera, 2026-09-16: "when reporting to staff what to prepare, make
@@ -3192,8 +3193,10 @@ export async function completePayment(orderId) {
     const { itemLines, total } = await summariseOrder(order);
     const alertText = `Payment confirmed, ready to prepare: ${displayNameFor(customer)} (${order.fulfilment_type || 'pickup'})\n${itemLines.join('\n')}\nTotal: NGN ${total}`;
     for (const { phoneNumber: to, staffId } of orderRecipients) {
-      await sendStaffAlert(to, alertText);
-      if (!process.env.PUBLIC_URL || !staffId) continue;
+      if (!process.env.PUBLIC_URL || !staffId) {
+        await sendStaffAlert(to, alertText);
+        continue;
+      }
       try {
         // Chidera, 2026-09-17: "the link is meant to open the specific
         // kanban inside for that order not the pipeline surface" -- still
@@ -3204,9 +3207,14 @@ export async function completePayment(orderId) {
         // among everything else in the pipeline. Orders.jsx reads ?order=.
         const link = `${process.env.PUBLIC_URL}/api/auth/magic/${await createMagicLink(staffId, `/?order=${order.id}`)}`;
         const credentials = await getWhatsAppCredentials(order.branch_id);
-        await sendWhatsAppCtaUrl(to, `Tap below to open the board.`, 'Open Orders', link, credentials);
+        await sendWhatsAppCtaUrl(to, alertText, 'Open Orders', link, credentials);
       } catch (err) {
-        console.error(`Failed to send order-alert board link to ${to}:`, err.message);
+        // Same reasoning as handover()'s own fallback just above -- a
+        // cta_url send has no template equivalent for outside the 24h
+        // window, so a staff member outside it still gets the alert text,
+        // just without the one-tap link in that case.
+        console.error(`Failed to send merged order-alert message to ${to}, falling back to text-only alert:`, err.message);
+        await sendStaffAlert(to, alertText);
       }
     }
   }
