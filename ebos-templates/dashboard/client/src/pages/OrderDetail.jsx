@@ -20,7 +20,7 @@ export default function OrderDetail() {
   const [overrideError, setOverrideError] = useState(null);
 
   if (!data) return <Loading />;
-  const { order, items, customer, topups = [], paymentProofs = [], delivery, deliveryAssignment, tableLabel, businessName } = data;
+  const { order, items, customer, topups = [], paymentProofs = [], delivery, tableLabel, businessName } = data;
 
   // Chidera, 2026-09-21: "the docket is for kitchen people o so, hope it
   // has details a standard kitchen will need" -- grouped by station
@@ -67,12 +67,21 @@ export default function OrderDetail() {
   // all) -- see markServed's own comment above.
   const dineinUnserved = order.channel === 'dinein' && !order.served_at;
 
+  // Chidera, 2026-09-24, real live incident: a rider was stuck waiting on
+  // a customer code that could never come (a test), with no way to close
+  // the order out -- this used to only exist for own_riders orders that
+  // had a real delivery_assignment row (routes/delivery.js's own
+  // /assignments/:id/release). "Every order in transit should be able to
+  // be released with reason" -- now order-scoped (routes/api.js's
+  // /orders/:id/release), which still releases the real assignment
+  // underneath when one exists (rider still gets paid), but no longer
+  // requires one to exist at all.
   async function releaseDelivery(e) {
     e.preventDefault();
     setOverrideError(null);
     setOverrideBusy(true);
     try {
-      await api.post(`/delivery/assignments/${deliveryAssignment.id}/release`, { reason: overrideReason.trim() });
+      await api.post(`/orders/${id}/release`, { reason: overrideReason.trim() });
       setOverrideReason('');
       load();
     } catch (err) {
@@ -259,31 +268,38 @@ export default function OrderDetail() {
             Provider: {delivery.provider} &middot; Status: <span className={`badge ${delivery.status}`}>{delivery.status}</span>
           </p>
           {delivery.rider_name && <p>Rider: {delivery.rider_name} ({delivery.rider_phone})</p>}
-          {/* Own-riders only -- a human override for when the normal code
-              hand-off can't happen (customer lost the code, phone died,
-              gave it to a neighbour). Never available once it's already
-              closed out, one way or another. */}
-          {canEdit(staff) && deliveryAssignment && !['DELIVERED', 'FAILED'].includes(deliveryAssignment.status) && (
-            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-              <p className="hint" style={{ marginTop: 0 }}>
-                Customer lost the code, or the rider can't reach them to confirm? Release this delivery with a reason -- the rider still gets
-                paid.
-              </p>
-              {overrideError && <div className="error-banner">{overrideError}</div>}
-              <form onSubmit={releaseDelivery} className="button-row" style={{ gap: 10 }}>
-                <input
-                  style={{ flex: 1, minWidth: 180 }}
-                  placeholder="Reason (e.g. customer lost the code)"
-                  value={overrideReason}
-                  onChange={(e) => setOverrideReason(e.target.value)}
-                  required
-                />
-                <button type="submit" className="secondary" disabled={overrideBusy}>
-                  {overrideBusy ? 'Releasing...' : 'Release delivery'}
-                </button>
-              </form>
-            </div>
-          )}
+        </div>
+      )}
+
+      {/* A human override for when the normal code hand-off can't happen
+          (customer lost the code, phone died, gave it to a neighbour, or
+          it was a test that never had a real code to give). Chidera,
+          2026-09-24, real live incident: this used to only show for
+          own_riders orders that had a real delivery_assignment row --
+          "every order in transit should be able to be released with
+          reason" -- so this is order.status-gated now, not
+          deliveryAssignment-gated. If a real assignment does exist,
+          releasing it here still pays the rider (routes/api.js's
+          /orders/:id/release checks for one underneath). */}
+      {canEdit(staff) && order.status === 'in_transit' && (
+        <div className="card">
+          <h3 style={{ marginTop: 0 }}>Release order</h3>
+          <p className="hint" style={{ marginTop: 0 }}>
+            Customer lost the code, the rider can't reach them, or this never had a real delivery to finish? Release it with a reason.
+          </p>
+          {overrideError && <div className="error-banner">{overrideError}</div>}
+          <form onSubmit={releaseDelivery} className="button-row" style={{ gap: 10 }}>
+            <input
+              style={{ flex: 1, minWidth: 180 }}
+              placeholder="Reason (e.g. customer lost the code)"
+              value={overrideReason}
+              onChange={(e) => setOverrideReason(e.target.value)}
+              required
+            />
+            <button type="submit" className="secondary" disabled={overrideBusy}>
+              {overrideBusy ? 'Releasing...' : 'Release order'}
+            </button>
+          </form>
         </div>
       )}
 

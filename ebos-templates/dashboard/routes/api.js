@@ -1269,6 +1269,47 @@ router.post('/orders/:id/ring-rider', requireStaffApi, async (req, res) => {
   }
 });
 
+// Chidera, 2026-09-24, real live incident: a rider was waiting on a
+// customer code that could never come (a test), and there was no way to
+// close the order out -- routes/delivery.js's /assignments/:id/release
+// only exists for own_riders orders that got as far as a real
+// delivery_assignment row, and nextStageFor's own in_transit case
+// deliberately returns null (2026-09-21: no generic "mark completed" with
+// no reason). Between those two, an in_transit order with no assignment
+// (third-party delivery, or own_riders but no rider ever actually
+// accepted) had no path off in_transit at all. "Every order in transit
+// should be able to be released with reason" -- this is that path, order-
+// scoped rather than assignment-scoped: if a real assignment exists it's
+// released exactly like the dedicated route would (rider still gets
+// paid), and if not, the order still closes out with the same
+// reason-required accountability, just with nothing assignment-specific
+// to update.
+router.post('/orders/:id/release', requireEditorApi, async (req, res) => {
+  const reason = (req.body?.reason || '').trim();
+  if (!reason) return res.status(400).json({ error: 'A reason is required.' });
+
+  const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [req.params.id]);
+  const order = orderRows[0];
+  if (!order) return res.status(404).json({ error: 'Not found.' });
+  if (order.status !== 'in_transit') return res.status(409).json({ error: 'This order is not in transit.' });
+
+  const { rows: assignmentRows } = await pool.query(
+    `select id from delivery_assignment where order_id = $1 and status not in ('DELIVERED', 'FAILED') order by created_at desc limit 1`,
+    [order.id]
+  );
+  if (assignmentRows[0]) {
+    await pool.query(
+      `update delivery_assignment set status = 'DELIVERED', delivered_at = now(), released_by_staff = $1, override_reason = $2 where id = $3`,
+      [req.staff.id, reason, assignmentRows[0].id]
+    );
+  }
+  await pool.query(`update delivery set status = 'delivered' where order_id = $1`, [order.id]);
+  await pool.query(`update "order" set status = 'completed' where id = $1`, [order.id]);
+  sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
+  await logActivity(req, 'order_released', { entityType: 'order', entityId: order.id, detail: { reason, hadAssignment: !!assignmentRows[0] } });
+  res.json({ ok: true });
+});
+
 router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
   const { status } = req.body;
   await pool.query('update "order" set status = $1, updated_at = now() where id = $2', [status, req.params.id]);
