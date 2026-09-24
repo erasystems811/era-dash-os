@@ -28,6 +28,15 @@ function ensureConfigured() {
 // logic, one place to get it right. Never throws -- a delivery still has
 // to dispatch (or a manual "ring" still has to return something to staff)
 // even if pushing to one particular rider isn't 100% reliable this second.
+// Chidera, 2026-09-24, real live report: "when i pressed ring rider... it
+// didnt actually re reing anyone" -- staff clicked it, the button said
+// "Re-pinged every on-duty rider," and nothing rang anywhere. The lie was
+// structural: this always returned undefined regardless of whether the push
+// actually went out, so the broadcast path had no way to tell the truth
+// back to staff -- unlike the single-rider reminder below, which already
+// reports delivered/not. Returns true/false per rider now, so
+// pushOfferToOnDutyRiders (and manuallyRingForRider's broadcast branch) can
+// report an honest count instead of always claiming success.
 async function pushToRider(rider, payload) {
   try {
     // 'high' urgency (Chidera's report, 2026-09-03: "when a rider ... is
@@ -43,6 +52,7 @@ async function pushToRider(rider, payload) {
     // a device setting only the rider can change, same ceiling as the
     // notification SOUND length fix already hit.
     await webpush.sendNotification(rider.push_subscription, payload, { urgency: 'high' });
+    return true;
   } catch (err) {
     // 404/410 means the push service itself says this subscription is
     // gone for good -- clear it so this rider stops being queried every
@@ -54,14 +64,20 @@ async function pushToRider(rider, payload) {
     } else {
       console.error(`Push to rider ${rider.id} failed:`, err.message);
     }
+    return false;
   }
 }
 
 // One push per on-duty rider with a saved subscription, in the same
 // branch-or-unassigned scope the SSE broadcast already uses (spec B3: a
 // rider only ever sees offers from their own branch).
+// Returns {configured, ridersFound, delivered} -- see pushToRider's own
+// 2026-09-24 comment for why this can no longer just be "fire and forget"
+// with no report back: manuallyRingForRider's broadcast branch needs the
+// real numbers to tell staff the truth instead of a blanket "re-pinged
+// everyone" that may have reached zero actual riders.
 export async function pushOfferToOnDutyRiders(offer, details) {
-  if (!ensureConfigured()) return; // not set up on this deployment yet -- SSE alarm still works for anyone with the app open
+  if (!ensureConfigured()) return { configured: false, ridersFound: 0, delivered: 0 }; // not set up on this deployment yet -- SSE alarm still works for anyone with the app open
 
   const { rows: riders } = await pool.query(
     `select id, push_subscription from rider
@@ -76,7 +92,8 @@ export async function pushOfferToOnDutyRiders(offer, details) {
     offerId: offer.id,
   });
 
-  await Promise.all(riders.map((rider) => pushToRider(rider, payload)));
+  const results = await Promise.all(riders.map((rider) => pushToRider(rider, payload)));
+  return { configured: true, ridersFound: riders.length, delivered: results.filter(Boolean).length };
 }
 
 // Staff's manual "Ring rider" button (Chidera's ask, 2026-09-03) -- a

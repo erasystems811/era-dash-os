@@ -166,8 +166,17 @@ export async function manuallyRingForRider(orderId) {
       offer.branch_id ? [offer.branch_id] : []
     );
     const business = bizRows[0] || {};
-    broadcastOffer(offer, { zoneName: offer.zone_name, payout: offer.rider_payout, pickupName: business.name, pickupAddress: business.address, reference: order?.reference }, { urgent: true });
-    return { mode: 'broadcast' };
+    const details = { zoneName: offer.zone_name, payout: offer.rider_payout, pickupName: business.name, pickupAddress: business.address, reference: order?.reference };
+    // Same SSE alarm broadcastOffer() sends for anyone with the app open
+    // right now, but AWAITED here (not fire-and-forget like broadcastOffer
+    // uses for the automatic sweep) -- Chidera, 2026-09-24, real live
+    // report: "when i pressed ring rider... it didnt actually re reing
+    // anyone." Staff clicked this and got told "Re-pinged every on-duty
+    // rider" whether or not that was true, because the old fire-and-forget
+    // path had no way to report back before responding. This one does.
+    offerBus.emit('offer', { id: offer.id, branchId: offer.branch_id, ...details, urgent: true });
+    const pushResult = await pushOfferToOnDutyRiders(offer, details);
+    return { mode: 'broadcast', ...pushResult };
   }
 
   // CLAIMED -- someone already has it, so this is a direct nudge, not a

@@ -329,12 +329,21 @@ export default function Orders() {
     let message;
     try {
       const result = await api.post(`/orders/${orderId}/ring-rider`, {});
-      message =
-        result.mode === 'broadcast'
-          ? 'Re-pinged every on-duty rider.'
-          : result.delivered
-            ? `Reminder sent to ${result.riderName}.`
-            : `${result.riderName} has no working notification right now -- call them directly.`;
+      // Chidera, 2026-09-24: "when i pressed ring rider... it didnt
+      // actually re reing anyone" -- this used to say "Re-pinged every
+      // on-duty rider" unconditionally for a broadcast, even when zero
+      // riders actually got a push (nobody on duty, no saved
+      // subscriptions, or push isn't configured on this deployment at
+      // all). Now says exactly what happened.
+      if (result.mode === 'broadcast') {
+        if (!result.configured) message = 'The in-app alarm rang for anyone with the rider app open, but push notifications are not set up on this deployment -- riders with the app closed were not reached.';
+        else if (result.ridersFound === 0) message = 'No on-duty rider has a working notification right now -- call one directly.';
+        else if (result.delivered === 0) message = `Tried ${result.ridersFound} on-duty rider(s) but none of the pushes went through -- call one directly.`;
+        else if (result.delivered < result.ridersFound) message = `Re-pinged ${result.delivered} of ${result.ridersFound} on-duty riders (the rest had no working notification).`;
+        else message = `Re-pinged ${result.delivered} on-duty rider(s).`;
+      } else {
+        message = result.delivered ? `Reminder sent to ${result.riderName}.` : `${result.riderName} has no working notification right now -- call them directly.`;
+      }
     } catch (err) {
       message = err.message;
     }
