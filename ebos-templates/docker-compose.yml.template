@@ -133,6 +133,18 @@ services:
       - PAYMENT_PROVIDER=${PAYMENT_PROVIDER}
       - PAYMENT_SECRET_KEY=${PAYMENT_SECRET_KEY}
       - PAYMENT_PUBLIC_KEY=${PAYMENT_PUBLIC_KEY}
+      # Chidera, 2026-09-24: real live bug found testing era-demo's first
+      # real Monnify credentials -- add-payment.mjs writes these to .env
+      # correctly, but docker-compose doesn't auto-passthrough .env (this
+      # is an explicit allowlist, not env_file), so the app never actually
+      # saw them, no matter how many times the container restarted.
+      - MONNIFY_API_KEY=${MONNIFY_API_KEY}
+      - MONNIFY_SECRET_KEY=${MONNIFY_SECRET_KEY}
+      - MONNIFY_CONTRACT_CODE=${MONNIFY_CONTRACT_CODE}
+      - MONNIFY_BASE_URL=${MONNIFY_BASE_URL}
+      - OPAY_MERCHANT_ID=${OPAY_MERCHANT_ID}
+      - OPAY_SECRET_KEY=${OPAY_SECRET_KEY}
+      - OPAY_BASE_URL=${OPAY_BASE_URL}
       - DELIVERY_PROVIDER=${DELIVERY_PROVIDER}
       - CHOWDECK_API_BASE=${CHOWDECK_API_BASE}
       - CHOWDECK_SECRET_KEY=${CHOWDECK_SECRET_KEY}
