@@ -1331,164 +1331,174 @@ label {
 .printDocket {
   display: none;
 }
+/* Chidera, 2026-09-24, real live report: "why is the docket gold and
+   black?" -- on iPad's print PREVIEW specifically, before anything was
+   even sent to a printer. The hide/show below only ever ran inside
+   @media print, which depends on the browser actually applying print
+   styles before it builds that preview -- iOS Safari doesn't reliably do
+   that for a page like this one, so what she saw was the app's own real
+   navy/gold UI (sidebar, buttons) still showing through instead of an
+   isolated black-and-white docket. OrderDetail.jsx's printDocket() adds
+   this class synchronously, as a normal DOM change, right before calling
+   window.print() -- the swap then happens as ordinary CSS, before the
+   browser ever starts generating anything, regardless of whether that
+   browser's print-media timing can be trusted. Same rules @media print
+   already has below, just not gated on print-media detection this time. */
+body.printing-docket .sidebar,
+body.printing-docket .mobile-header,
+body.printing-docket .nav-backdrop,
+body.printing-docket .no-print {
+  display: none !important;
+}
+body.printing-docket .printDocket {
+  display: block;
+}
+/* Chidera, 2026-09-21: "hope when its printed it wont be tiny on the
+   paper and actually sit well on the docket paper" -- a real margin
+   instead of the browser's own often-huge default page margin, which
+   otherwise pushes a narrow docket column oddly far from the edge on a
+   normal A4/Letter sheet.
+   2026-09-24: "that docket the name of the printer is x-printer" -- the
+   real kitchen printer is an Xprinter thermal receipt printer, an 80mm
+   roll (the common width for these -- confirm and adjust to 58mm if it
+   turns out to be the narrower model). 3mm margin, not 0 -- most thermal
+   printer drivers already clip a hairline off each edge; 0 margin risks
+   losing the outermost pixels of text right at the paper edge.
+   2026-09-24, real live report: "the docket is showing 2 pages when i
+   want to print, is it that big?" -- was size: 80mm auto, the CSS-spec-
+   correct way to say "one continuous page as tall as the content
+   needs," but Chrome's print pipeline has a long-standing bug where auto
+   block-size doesn't reliably give one unbounded page for a receipt-
+   width page -- it silently falls back to a default page LENGTH and
+   paginates, splitting one order's docket across two physical tears on
+   a continuous roll for no real reason. A generous FIXED height (400mm,
+   comfortably taller than any real order this app prints) is the
+   standard workaround -- Chrome handles an explicit height reliably.
+   Blank trailing space at the end of a short docket isn't printed on a
+   real continuous-feed thermal driver, so this costs nothing for a
+   normal-length order and just gives long ones enough room. This @page
+   rule stays inside @media print (unlike everything below it, moved out)
+   since page-box geometry has no meaning outside an actual print
+   context. */
 @media print {
-  /* Found live, 2026-09-21: OrderDetail.jsx's own .no-print only ever
-     hid that page's own content -- the app shell around it (Layout.jsx's
-     .sidebar/.mobile-header/.nav-backdrop) sits OUTSIDE that wrapper
-     entirely, so a real print would have shown the full navy sidebar
-     bleeding onto the page next to the docket. Hidden globally here
-     instead, once, so every future print view (not just this one) gets
-     a clean page automatically -- .main naturally fills the freed space
-     since .app-shell is a plain flex row, not a fixed-position sidebar. */
   .sidebar,
   .mobile-header,
-  .nav-backdrop {
-    display: none !important;
-  }
+  .nav-backdrop,
   .no-print {
     display: none !important;
   }
-  /* Chidera, 2026-09-21: "hope when its printed it wont be tiny on the
-     paper and actually sit well on the docket paper" -- a real margin
-     instead of the browser's own often-huge default page margin, which
-     otherwise pushes a narrow docket column oddly far from the edge on a
-     normal A4/Letter sheet.
-     2026-09-24: "that docket the name of the printer is x-printer" --
-     the real kitchen printer is an Xprinter thermal receipt printer, an
-     80mm roll (the common width for these -- confirm and adjust to 58mm
-     if it turns out to be the narrower model). 3mm margin, not 0 -- most
-     thermal printer drivers already clip a hairline off each edge; 0
-     margin risks losing the outermost pixels of text right at the paper
-     edge.
-     2026-09-24, real live report: "the docket is showing 2 pages when i
-     want to print, is it that big?" -- was size: 80mm auto, the CSS-spec-
-     correct way to say "one continuous page as tall as the content
-     needs," but Chrome's print pipeline (preview AND the real print,
-     confirmed against her own report) has a long-standing bug where auto
-     block-size doesn't reliably give one unbounded page for a receipt-
-     width page -- it silently falls back to a default page LENGTH and
-     paginates, splitting one order's docket across two physical tears on
-     a continuous roll for no real reason. A generous FIXED height (400mm,
-     comfortably taller than any real order this app prints) is the
-     standard workaround -- Chrome handles an explicit height reliably.
-     Blank trailing space at the end of a short docket isn't printed on a
-     real continuous-feed thermal driver, so this costs nothing for a
-     normal-length order and just gives long ones enough room. */
   @page {
     size: 80mm 400mm;
     margin: 3mm;
   }
   .printDocket {
     display: block;
-    font-family: var(--font-body);
-    color: #000;
-    max-width: 74mm;
-    margin: 0 auto;
   }
-  /* Chidera, 2026-09-24, real live report against the actual Xprinter:
-     "the text on docket paper is too small o, i though we said we will
-     make ours look premuim and high class." Every size below bumped up a
-     full step -- kitchen staff read this at a glance in a moving kitchen,
-     not up close at a desk, and "premium" on a receipt printer reads as
-     bold and generously sized, not as small-and-refined the way it might
-     on a proper invoice (documents.js's own PDF, a different medium
-     printed on real paper and held, not scanned in a hurry). */
-  /* 2026-09-24, real live report: "on my ipad im still seeing 2 pages"
-     -- the fixed 400mm @page height above is a Chrome-specific fix;
-     iOS/AirPrint often ignores a webpage's own @page size entirely and
-     paginates against the PRINTER'S OWN registered paper length instead
-     (commonly a fixed Letter/A4-ish length for a generic AirPrint
-     bridge), no matter what this CSS says. The reliable fix there is
-     making the CONTENT itself shorter, not the page taller -- margins/
-     padding below tightened without touching the font sizes that were
-     just deliberately made bigger, so a normal order comfortably clears
-     one real page length on any platform. */
-  .printDocket .docketBrand {
-    text-align: center;
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: #444;
-    margin-bottom: 8px;
-  }
-  .printDocket .docketTable {
-    text-align: center;
-    font-size: 34px;
-    font-weight: 700;
-    letter-spacing: 0.01em;
-    line-height: 1.1;
-  }
-  .printDocket .docketMeta {
-    text-align: center;
-    font-size: 13px;
-    color: #555;
-    margin-top: 4px;
-    margin-bottom: 10px;
-  }
-  .printDocket hr {
-    border: none;
-    border-top: 2px solid #000;
-    margin: 0 0 10px;
-  }
-  .printDocket .docketGroup {
-    margin-bottom: 8px;
-  }
-  .printDocket .docketCategory {
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: #444;
-    border-bottom: 1px solid #ccc;
-    padding-bottom: 3px;
-    margin-bottom: 5px;
-  }
-  .printDocket .docketItem {
-    display: flex;
-    gap: 10px;
-    padding: 4px 0;
-    align-items: baseline;
-  }
-  .printDocket .docketQty {
-    flex-shrink: 0;
-    width: 34px;
-    font-weight: 700;
-    font-size: 20px;
-    font-variant-numeric: tabular-nums;
-  }
-  .printDocket .docketName {
-    flex: 1;
-    font-size: 20px;
-    font-weight: 600;
-    line-height: 1.3;
-  }
-  .printDocket .docketNew {
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    border: 1.5px solid #000;
-    border-radius: 3px;
-    padding: 2px 5px;
-    margin-left: 4px;
-    vertical-align: middle;
-  }
-  .printDocket .docketNote {
-    font-size: 14px;
-    font-style: italic;
-    color: #444;
-    margin-top: 3px;
-  }
-  .printDocket .docketAddonHead {
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    text-align: center;
-    border-top: 1.5px dashed #000;
-    border-bottom: 1.5px dashed #000;
-    padding: 4px 0;
-    margin: 6px 0 8px;
-  }
+}
+/* Everything below is plain, unconditional CSS -- not inside @media
+   print -- moved out 2026-09-24 so it's also what OrderDetail.jsx's own
+   printing-docket class toggle sees on SCREEN, before any actual print
+   or preview happens (see its own comment above). Safe unconditionally:
+   .printDocket is display:none by default, so none of this is ever
+   visible except when something (the class, or a real print) turns it
+   on. "on my ipad im still seeing 2 pages" -- iOS/AirPrint often ignores
+   a webpage's own @page size and paginates against the printer's own
+   registered paper length instead, no matter what CSS says; the margins/
+   padding here are tightened (without touching the font sizes just
+   deliberately made bigger, per "the text on docket paper is too small
+   o... make ours look premuim and high class") so a normal order clears
+   one real page length regardless of platform. */
+.printDocket {
+  font-family: var(--font-body);
+  color: #000;
+  max-width: 74mm;
+  margin: 0 auto;
+}
+.printDocket .docketBrand {
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #444;
+  margin-bottom: 8px;
+}
+.printDocket .docketTable {
+  text-align: center;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.1;
+}
+.printDocket .docketMeta {
+  text-align: center;
+  font-size: 13px;
+  color: #555;
+  margin-top: 4px;
+  margin-bottom: 10px;
+}
+.printDocket hr {
+  border: none;
+  border-top: 2px solid #000;
+  margin: 0 0 10px;
+}
+.printDocket .docketGroup {
+  margin-bottom: 8px;
+}
+.printDocket .docketCategory {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #444;
+  border-bottom: 1px solid #ccc;
+  padding-bottom: 3px;
+  margin-bottom: 5px;
+}
+.printDocket .docketItem {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  align-items: baseline;
+}
+.printDocket .docketQty {
+  flex-shrink: 0;
+  width: 34px;
+  font-weight: 700;
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.printDocket .docketName {
+  flex: 1;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.printDocket .docketNew {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  border: 1.5px solid #000;
+  border-radius: 3px;
+  padding: 2px 5px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.printDocket .docketNote {
+  font-size: 14px;
+  font-style: italic;
+  color: #444;
+  margin-top: 3px;
+}
+.printDocket .docketAddonHead {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+  border-top: 1.5px dashed #000;
+  border-bottom: 1.5px dashed #000;
+  padding: 4px 0;
+  margin: 6px 0 8px;
 }
 

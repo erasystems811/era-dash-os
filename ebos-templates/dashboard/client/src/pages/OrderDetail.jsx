@@ -106,6 +106,28 @@ export default function OrderDetail() {
     load();
   }
 
+  // Chidera, 2026-09-24, real live report: "and why is the docket gold
+  // and black?" -- on iPad screen, in the print preview. .no-print/
+  // .printDocket were only ever hidden/shown via @media print, which
+  // relies on the browser applying print styles before it generates the
+  // preview -- Safari's iOS print preview doesn't reliably do that for a
+  // page like this one, so what she saw was the app's own normal navy/
+  // gold UI (sidebar, buttons) bleeding into what should have been an
+  // isolated black-and-white docket. Toggling a real class synchronously,
+  // right before window.print(), makes the swap happen as normal CSS
+  // before the browser ever starts building a preview -- reliable
+  // regardless of whether that browser's print-media timing is. A brief
+  // on-screen flash to the docket-only view is the trade-off, gone the
+  // instant the print dialog closes (or after 5s if a browser never
+  // fires afterprint at all).
+  function printDocket() {
+    document.body.classList.add('printing-docket');
+    window.print();
+    const cleanup = () => document.body.classList.remove('printing-docket');
+    window.addEventListener('afterprint', cleanup, { once: true });
+    setTimeout(cleanup, 5000);
+  }
+
   async function confirmTopup(topupId) {
     await api.post(`/orders/${id}/topups/${topupId}/confirm`);
     load();
@@ -137,7 +159,7 @@ export default function OrderDetail() {
           </p>
         </div>
         <div className="button-row" style={{ gap: 8 }}>
-          <button className="secondary" onClick={() => window.print()} style={{ padding: '8px 14px' }}>
+          <button className="secondary" onClick={printDocket} style={{ padding: '8px 14px' }}>
             Print docket
           </button>
           <Link to="/" className="btn secondary" style={{ padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8 }}>
