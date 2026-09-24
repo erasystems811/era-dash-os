@@ -24,7 +24,7 @@ import {
   magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, UPSELL_GROUPS, categoryMatchesGroup } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, sendOutstandingBalanceLink, UPSELL_GROUPS, categoryMatchesGroup } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
@@ -1324,24 +1324,66 @@ router.post('/orders/:id/release', requireEditorApi, async (req, res) => {
 
 // Chidera, 2026-09-24: "in the dine in where is the space to type in cash
 // collected by staff so bot knows how much to expect?" -- "Mark paid" was
-// a single click with no payment method or amount captured. Its own route,
-// separate from /orders/:id/status just below -- payment method is a fact
-// about how an order got paid, recorded before that click actually closes
-// it out, not part of the status-advance itself (which every other
-// fulfilment type also uses, most of which never touch cash at all).
-// requireStaffApi, same tier as notify-ready/status -- a Tier 3 (PIN)
-// staff member closing out a dine-in table needs this same as any other
-// action on the floor.
+// a single click with no payment method or amount captured, and nothing
+// compared it against the order total either. Follow-up, same day: "if a
+// staff make paid with cash and put amount the bot would send a link for
+// transfer of outstanding balance na" -- confirmed no, so this does now,
+// via sendOutstandingBalanceLink (a shortfall-scoped version of the same
+// buildPayLine every other payment link already goes through).
+// closeAnyway is the explicit override for "staff mark close table with
+// outstanding" (Chidera's own words) -- default behavior on a real
+// shortfall is to leave the table in Awaiting payment (no status change
+// at all) so it can't quietly disappear from the board still unpaid;
+// closeAnyway is staff choosing to free the table while the balance stays
+// outstanding and chased separately via the link already sent.
+// payment_status only ever flips to 'confirmed' here when there's
+// genuinely no shortfall left -- Finance's own revenue figure (and every
+// other payment_status-gated figure in this app) must never count a
+// table that closed with real money still owed. requireStaffApi, same
+// tier as notify-ready/status -- a Tier 3 (PIN) staff member closing out
+// a dine-in table needs this same as any other action on the floor.
 router.post('/orders/:id/payment-method', requireStaffApi, async (req, res) => {
-  const { paymentMethod, cashCollected } = req.body || {};
+  const { paymentMethod, cashCollected, closeAnyway } = req.body || {};
   if (!['cash', 'card', 'transfer'].includes(paymentMethod)) {
     return res.status(400).json({ error: 'paymentMethod must be cash, card, or transfer.' });
   }
-  await pool.query(
-    `update "order" set payment_method = $1, cash_collected = $2 where id = $3`,
-    [paymentMethod, paymentMethod === 'cash' ? Number(cashCollected) || 0 : null, req.params.id]
-  );
-  res.json({ ok: true });
+  const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [req.params.id]);
+  const order = orderRows[0];
+  if (!order) return res.status(404).json({ error: 'Not found.' });
+
+  const collected = paymentMethod === 'cash' ? Number(cashCollected) || 0 : Number(order.total);
+  const shortfall = Math.max(0, Math.round(Number(order.total) - collected));
+
+  await pool.query(`update "order" set payment_method = $1, cash_collected = $2 where id = $3`, [
+    paymentMethod,
+    paymentMethod === 'cash' ? collected : null,
+    order.id,
+  ]);
+
+  if (shortfall > 0) {
+    const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+    if (custRows[0]) {
+      sendOutstandingBalanceLink(custRows[0], { ...order, cash_collected: collected }, shortfall).catch((err) =>
+        console.error(`Failed to send outstanding-balance link for order ${order.id}:`, err.message)
+      );
+    }
+    if (!closeAnyway) {
+      await logActivity(req, 'order_partial_cash', { entityType: 'order', entityId: order.id, detail: { collected, shortfall } });
+      return res.json({ ok: true, shortfall, closed: false });
+    }
+  } else {
+    await pool.query(`update "order" set payment_status = 'confirmed' where id = $1`, [order.id]);
+  }
+
+  await pool.query(`update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1`, [order.id]);
+  sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
+  if (order.session_id) {
+    closeTableSessionIfSettled(order.session_id, { closedBy: 'staff', staffId: req.staff.id }).catch((err) =>
+      console.error('closeTableSessionIfSettled failed:', err.message)
+    );
+  }
+  await logActivity(req, 'order_status_changed', { entityType: 'order', entityId: order.id, detail: { status: 'completed', paymentMethod, shortfall } });
+  res.json({ ok: true, shortfall, closed: true });
 });
 
 router.post('/orders/:id/status', requireStaffApi, async (req, res) => {

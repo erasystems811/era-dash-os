@@ -291,27 +291,36 @@ export default function Orders() {
 
   // Same payment-method capture as InHouse.jsx's own board -- see its
   // 2026-09-24 comment for why this exists (a plain "Mark paid" click had
-  // nowhere to record cash collected at all).
+  // nowhere to record cash collected at all), and its own shortfall
+  // comment for what happens when cash falls short (link sent, table
+  // stays open unless staff explicitly closes it anyway).
   const [payingOrderId, setPayingOrderId] = useState(null);
   const [cashAmount, setCashAmount] = useState('');
+  const [shortfall, setShortfall] = useState({});
 
   function startInHousePaid(e, order) {
     e.preventDefault();
     e.stopPropagation();
     setPayingOrderId(order.id);
     setCashAmount(String(Math.round(Number(order.total || 0))));
+    setShortfall((prev) => ({ ...prev, [order.id]: undefined }));
   }
 
-  async function markInHousePaid(e, orderId, paymentMethod) {
+  async function markInHousePaid(e, orderId, paymentMethod, closeAnyway = false) {
     e.preventDefault();
     e.stopPropagation();
-    await api.post(`/orders/${orderId}/payment-method`, {
+    const result = await api.post(`/orders/${orderId}/payment-method`, {
       paymentMethod,
       cashCollected: paymentMethod === 'cash' ? Number(cashAmount) || 0 : undefined,
+      closeAnyway,
     });
-    await api.post(`/orders/${orderId}/status`, { status: 'completed' });
+    if (result.shortfall > 0 && !result.closed) {
+      setShortfall((prev) => ({ ...prev, [orderId]: result.shortfall }));
+      return;
+    }
     setPayingOrderId(null);
     setCashAmount('');
+    setShortfall((prev) => ({ ...prev, [orderId]: undefined }));
     loadInHouse();
   }
 
@@ -511,7 +520,16 @@ export default function Orders() {
                     <div className="foot">
                       <span className="total mono">NGN {Number(o.total || 0).toLocaleString()}</span>
                     </div>
-                    {col.actionLabel === 'Mark paid' && payingOrderId === o.id ? (
+                    {col.actionLabel === 'Mark paid' && payingOrderId === o.id && shortfall[o.id] ? (
+                      <div style={{ marginTop: 8 }} onClick={(e) => e.preventDefault()}>
+                        <p className="hint" style={{ margin: '0 0 6px' }}>
+                          NGN {shortfall[o.id].toLocaleString()} still owed -- payment link sent to the customer. Table stays open until it's paid, unless you close it now.
+                        </p>
+                        <button style={{ width: '100%' }} className="secondary" onClick={(e) => markInHousePaid(e, o.id, 'cash', true)}>
+                          Close table anyway
+                        </button>
+                      </div>
+                    ) : col.actionLabel === 'Mark paid' && payingOrderId === o.id ? (
                       <div style={{ marginTop: 8 }} onClick={(e) => e.preventDefault()}>
                         <div className="button-row" style={{ gap: 6, marginBottom: 6 }}>
                           <button style={{ flex: 1 }} className="secondary" onClick={(e) => markInHousePaid(e, o.id, 'card')}>

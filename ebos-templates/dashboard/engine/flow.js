@@ -2283,6 +2283,32 @@ export async function sendPaymentInstructions(customer, order) {
   if (needsHandover) await handover(customer, 'Order ready for payment but no payment method is configured for this business yet', null, false);
 }
 
+// Chidera, 2026-09-24: "if a staff make paid with cash and put amount the
+// bot would send a link for transfer of outstanding balance na" -- a real
+// gap: cash_collected used to be purely a recorded number, nothing ever
+// compared it against the order total or told the customer anything.
+// Scoped to just the shortfall, not sendPaymentInstructions' whole flow --
+// no second invoice send (the table's already been served and invoiced),
+// just the amount still owed. Reuses buildPayLine, the same place every
+// other payment link in this file goes through, so whichever provider
+// this business has configured (Monnify/OPay/Paystack/bank-details/POS)
+// just works here too, automatically.
+export async function sendOutstandingBalanceLink(customer, order, amount) {
+  const { payLine, needsHandover, paymentUrl, posChoice } = await buildPayLine(order, customer, { amount, amountLabel: `${amount}` });
+  const intro = `You paid NGN ${Number(order.cash_collected || 0).toLocaleString()} in cash for order ${order.reference} -- there's still NGN ${amount} left to pay.`;
+  if (posChoice) {
+    await reply(customer, intro);
+    await sendPosPaymentChoice(customer, order);
+    return;
+  }
+  if (paymentUrl) {
+    await sendPaymentLinkButton(customer, paymentUrl, `${intro}\n\n${payLine}`);
+  } else {
+    await reply(customer, `${intro}\n\n${payLine}`);
+  }
+  if (needsHandover) await handover(customer, 'Dine-in table has an outstanding cash balance but no payment method is configured for this business yet', null, false);
+}
+
 // A customer nudging the bot while still unpaid ("where's the link", "resend
 // it") used to get a hardcoded "use the link I sent above" no matter what
 // was actually sent, or if nothing usable ever was -- a real lie if it was
