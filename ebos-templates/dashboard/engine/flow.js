@@ -94,6 +94,18 @@ async function logMessage({ customerId, direction, channel, sender, body, trigge
     [customerId, direction, channel, sender, body, trigger || null, platformMessageId || null, processed ? new Date() : null]
   );
   await pool.query(`update customers set last_message = $1, last_message_at = now() where id = $2`, [body, customerId]);
+  // Chidera, 2026-09-24: "even though a conversation is deleted it should
+  // be counted on my dash... the client dashboard shouldnt be what is
+  // used to count outbound but the bot itself." A real WhatsApp send
+  // genuinely happened and was genuinely billed regardless of whether
+  // this conversation survives to be looked at later -- DELETE
+  // /customers/:id (routes/api.js) hard-deletes `message` as a deliberate
+  // content cleanup, which used to silently erase this fact along with
+  // it. whatsapp_send_log is permanent and content-free on purpose (see
+  // its own migration comment) -- nothing ever deletes from it.
+  if (direction === 'outbound' && channel === 'whatsapp') {
+    await pool.query(`insert into whatsapp_send_log default values`);
+  }
 }
 
 // Instagram's send response carries the new message's own id (message_id).

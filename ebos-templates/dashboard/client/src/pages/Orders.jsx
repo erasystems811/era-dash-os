@@ -358,6 +358,22 @@ export default function Orders() {
     load();
   }, [scope]);
 
+  // Chidera, 2026-09-24: "it was not updating on the orders today
+  // dashboard" -- load() only ever ran once, on mount or a scope change,
+  // same shape InHouse.jsx's own comment already flagged as fine for a
+  // page a staff member is expected to tap-refresh, but Collected/
+  // Outstanding is exactly the number an auto-confirmed Paystack/Monnify
+  // payment changes in the background while this page just sits open --
+  // nobody's tapping anything for that to happen. Same 15s cadence
+  // InHouse.jsx already polls at for its own live queue.
+  useEffect(() => {
+    if (scope === 'all') return;
+    const t = setInterval(() => {
+      api.get(`/orders/stats/today${scopeQuery(scope)}`).then(setToday);
+    }, 15000);
+    return () => clearInterval(t);
+  }, [scope]);
+
   // Changing scope changes the page, not just filters it -- comparing
   // branches is a different kind of view (no order rail, see AllBranches),
   // not a filtered version of this one.

@@ -283,11 +283,13 @@ const FREE_MESSAGES_PER_NUMBER = 1000; // per WhatsApp number, per month
 router.get('/monitor/messaging-cost', requireEraAdmin, async (req, res) => {
   const days = Math.min(Number(req.query.days) || 30, 90);
   const [{ rows: outboundRows }, { rows: orderRows }, { rows: numberRows }] = await Promise.all([
-    pool.query(
-      `select count(*) as count from message
-       where direction = 'outbound' and channel = 'whatsapp' and created_at >= now() - $1::interval`,
-      [`${days} days`]
-    ),
+    // whatsapp_send_log, not `message` -- Chidera, 2026-09-24: "even
+    // though a conversation is deleted it should be counted on my dash"
+    // -- DELETE /customers/:id hard-deletes `message` for that customer
+    // as a deliberate content cleanup, which used to silently erase every
+    // real, already-billed send in it too. See the migration/logMessage
+    // comments for the full story.
+    pool.query(`select count(*) as count from whatsapp_send_log where created_at >= now() - $1::interval`, [`${days} days`]),
     pool.query(`select count(*) as count from "order" where created_at >= now() - $1::interval`, [`${days} days`]),
     pool.query(`select count(distinct phone_number_id) as count from branch_channel where channel = 'whatsapp' and phone_number_id is not null`),
   ]);
