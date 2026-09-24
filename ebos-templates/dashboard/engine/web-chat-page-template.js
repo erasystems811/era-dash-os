@@ -23,10 +23,18 @@
 // each shape carries).
 import { escapeHtml } from './menu-page-template.js';
 
-export function renderWebChatPage({ businessName, coverPhotoVersion, history, messagePath, mediaPath, tapPath, pollPath }) {
+export function renderWebChatPage({ businessName, coverPhotoVersion, waNumber, history, messagePath, mediaPath, tapPath, pollPath }) {
   const avatarStyle = coverPhotoVersion
     ? `background-image:url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : '';
+  // Chidera, 2026-09-24: "the < button beside the restaurant name should
+  // actually take customer back to bare chat and not just exist for
+  // fashion." Same digits-only wa.me shape every other real WhatsApp CTA
+  // on this page family already uses (see menu-page-template.js's own
+  // waDigits). No credentials configured yet (waNumber null/empty) means
+  // no real link to go back to -- stays a plain, inert arrow rather than
+  // linking to a broken wa.me/ with nothing after it.
+  const waDigits = String(waNumber || '').replace(/\D/g, '');
   return `<!doctype html>
 <html style="background:#efeae2"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>${escapeHtml(businessName)}</title>
@@ -42,18 +50,20 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
      their inputs never fall back to a hardcoded dark hex again either). */
   /* Chidera, 2026-09-24: "you made it too light o, it should have normal
      whatsapp look but just not like that dark mode, just make the header
-     that has the restaurant name and all darker." Real WhatsApp's actual
-     light theme: the chat body/bubbles are light (unchanged from the
-     first pass), but the top header bar is its own dark teal-green, not
-     light gray -- --header/--header-text are now specific to that one
-     bar; --composer-bg is the (still light) bottom input bar, which used
+     that has the restaurant name and all darker" -- then "make header
+     darker still not [light] green." #008069 (WhatsApp's current header
+     green) still read too light -- WhatsApp's older, noticeably darker
+     forest-green header (#075E54, still real and recognizable, not
+     invented) instead. Chat body/bubbles stay light (unchanged from the
+     first pass) -- --header/--header-text are specific to the top bar
+     only; --composer-bg is the (still light) bottom input bar, which used
      to share --header's value back when that was light too. */
-  :root{--bg:#efeae2;--header:#008069;--header-text:#ffffff;--composer-bg:#f0f2f5;--bubble-in:#ffffff;--bubble-out:#d9fdd3;--text:#111b21;--text2:#667781;--accent:#00a884;--divider:rgba(0,0,0,.08);--input:#ffffff;--panel:#ffffff;--surface2:#f0f2f5}
+  :root{--bg:#efeae2;--header:#075e54;--header-text:#ffffff;--composer-bg:#f0f2f5;--bubble-in:#ffffff;--bubble-out:#d9fdd3;--text:#111b21;--text2:#667781;--accent:#00a884;--divider:rgba(0,0,0,.08);--input:#ffffff;--panel:#ffffff;--surface2:#f0f2f5}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%;overflow:hidden;font-family:Inter,-apple-system,sans-serif;color:var(--text);background:var(--bg)}
   #app{display:flex;flex-direction:column;height:100%;position:relative}
   header{flex:none;background:var(--header);color:var(--header-text);padding:10px 14px;display:flex;align-items:center;gap:8px}
-  header .back{flex:none;color:var(--header-text);font-size:26px;line-height:1;padding:0 2px}
+  header .back{flex:none;color:var(--header-text);font-size:26px;line-height:1;padding:0 2px;text-decoration:none;display:inline-block}
   /* White circle + accent-colored initial -- an accent-green avatar (the
      old treatment) would nearly vanish against the header's own dark
      green now. */
@@ -183,8 +193,8 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
      :active (no JS, no round-trip wait), on every real tappable control
      on this page, so a tap always reads as "that registered" the moment
      it happens, not only once a reply eventually shows up. */
-  .actionrow,.linkbtn,.confirmbtn,.sheetrow-toggle,.qtybtn,#listSheetSend,#qSheetSend,.composer-icon,#sendBtn{transition:transform .08s ease}
-  .actionrow:active,.linkbtn:active,.confirmbtn:active,.sheetrow-toggle:active,.qtybtn:active,#listSheetSend:active,#qSheetSend:active,.composer-icon:active,#sendBtn:active{transform:scale(.94)}
+  .actionrow,.linkbtn,.confirmbtn,.sheetrow-toggle,.qtybtn,#listSheetSend,#qSheetSend,.composer-icon,#sendBtn,a.back{transition:transform .08s ease}
+  .actionrow:active,.linkbtn:active,.confirmbtn:active,.sheetrow-toggle:active,.qtybtn:active,#listSheetSend:active,#qSheetSend:active,.composer-icon:active,#sendBtn:active,a.back:active{transform:scale(.94)}
   /* Chidera, 2026-09-24: "the next text just appears, customer may not
      even notice its a new text... add the typing sign." A real WhatsApp-
      style three-dot bubble shown for 2s before a new bot message actually
@@ -199,7 +209,7 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, history, me
 <div id="app">
   <div id="banner"><span>&#10003;</span><span id="bannerText">Payment confirmed!</span></div>
   <header>
-    <div class="back">&#8249;</div>
+    ${waDigits ? `<a class="back" href="https://wa.me/${waDigits}">&#8249;</a>` : '<div class="back">&#8249;</div>'}
     <div class="avatar">${escapeHtml((businessName || '?').slice(0, 1).toUpperCase())}</div>
     <div><div class="name">${escapeHtml(businessName || 'Order')}</div><div class="status">online</div><div class="powered-by">Powered by ERA Systems</div></div>
   </header>

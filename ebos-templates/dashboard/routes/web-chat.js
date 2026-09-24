@@ -14,7 +14,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderWebChatPage } from '../engine/web-chat-page-template.js';
-import { resolveMenuBranding } from './dinein-menu.js';
+import { resolveMenuBranding, resolveWaNumber } from './dinein-menu.js';
 import {
   buildGreetingContent,
   buildDineinGreetingContent,
@@ -224,10 +224,18 @@ router.get('/:token', async (req, res) => {
   }
 
   const branding = await resolveMenuBranding();
+  // Chidera, 2026-09-24: "the < button beside the restaurant name should
+  // actually take customer back to bare chat and not just exist for
+  // fashion." Same wa.me link every real WhatsApp CTA on this page's own
+  // entry point already resolves (resolveWaNumber -- the exact reverse
+  // direction: bare WhatsApp sends them here via sendStartOrderLink, this
+  // is the way back).
+  const waNumber = await resolveWaNumber(customer.branch_id);
   res.set('Content-Type', 'text/html').send(
     renderWebChatPage({
       businessName: branding.business_name || '',
       coverPhotoVersion: branding.cover_photo_version,
+      waNumber,
       history,
       messagePath: `/wa/${req.params.token}/message`,
       mediaPath: `/wa/${req.params.token}/media`,
