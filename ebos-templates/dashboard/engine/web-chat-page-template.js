@@ -263,14 +263,22 @@ function appendMessage(m) {
   scroll.scrollTop = scroll.scrollHeight;
 }
 
-function renderAll() {
+// Chidera, 2026-09-24: "i need the pop in effect when a text is sent in."
+// A real bot reply landing (poll()'s own typing-dots reveal, and the
+// initial-load fresh-batch reveal below) rebuilds the WHOLE transcript via
+// this same renderAll(), so a plain per-row animate flag would replay on
+// every old bubble too. animateIds (a Set of just the freshly-landed
+// message ids) is how those two callers mark ONLY the new arrival(s) for
+// the bounce -- omitted (undefined) for an ordinary rebuild, where nothing
+// should re-animate at all.
+function renderAll(animateIds) {
   const scroll = document.getElementById('scroll');
   let html = '';
   let lastDay = null;
   HISTORY.forEach(function (m) {
     const day = fmtDay(m.created_at);
     if (day !== lastDay) { html += '<div class="daterow"><span class="datepill">' + esc(day) + '</span></div>'; lastDay = day; }
-    html += renderMessage(m);
+    html += renderMessage(m, Boolean(animateIds && animateIds.has(m.id)));
   });
   scroll.innerHTML = html;
   scroll.scrollTop = scroll.scrollHeight;
@@ -309,7 +317,10 @@ if (freshBatch.length) {
     hideTyping();
     HISTORY = HISTORY.concat(freshBatch);
     lastCursor = freshBatch[freshBatch.length - 1].created_at;
-    renderAll();
+    // freshBatch is entirely outbound by construction (the split above
+    // only ever collects a trailing run of outbound rows) -- every one of
+    // these just "arrived" as far as this page load is concerned.
+    renderAll(new Set(freshBatch.map(function (m) { return m.id; })));
     playReceiveSound();
     if (freshBatch.some(function (m) { return m.trigger === 'payment_confirmed'; })) {
       showBanner('Payment confirmed!');
@@ -567,13 +578,13 @@ async function poll() {
     const res = await fetch(url);
     const rows = await res.json();
     if (Array.isArray(rows) && rows.length) {
-      const applyRows = function () {
+      const applyRows = function (animateIds) {
         // Drop the optimistic local echo once the real logged row for it
         // arrives, so a customer's own typed message doesn't render twice.
         HISTORY = HISTORY.filter(function (m) { return typeof m.id !== 'string' || !m.id.startsWith('local-'); });
         HISTORY = HISTORY.concat(rows);
         lastCursor = rows[rows.length - 1].created_at;
-        renderAll();
+        renderAll(animateIds);
         if (rows.some(function (m) { return m.trigger === 'payment_confirmed'; })) {
           showBanner('Payment confirmed!');
         }
@@ -582,12 +593,19 @@ async function poll() {
       // seconds, so they know a new text has dropped." Only for a real bot
       // reply arriving (outbound) -- nothing to announce for the
       // customer's own message being echoed back.
-      if (rows.some(function (m) { return m.direction === 'outbound'; })) {
+      const outboundInBatch = rows.filter(function (m) { return m.direction === 'outbound'; });
+      if (outboundInBatch.length) {
         pendingTyping = true;
         showTyping();
         setTimeout(function () {
           hideTyping();
-          applyRows();
+          // Chidera, 2026-09-24: "i need the pop in effect when a text is
+          // sent in." Only the real bot reply(ies) in this batch bounce in
+          // -- the customer's own echoed-back message (if this same batch
+          // also carries one) already got its bounce the instant it was
+          // sent, via appendMessage; re-animating it here too would just
+          // double it.
+          applyRows(new Set(outboundInBatch.map(function (m) { return m.id; })));
           playReceiveSound();
           pendingTyping = false;
         }, 2000);
