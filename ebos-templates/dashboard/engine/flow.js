@@ -1269,14 +1269,19 @@ async function sendStartOrderLink(customer, { dineinTableLabel = null, dineinQrT
   // "tap below to get started" whether or not their own real "ready to
   // pay" bubble (notifyGuestsReadyToPay) was already sitting there
   // waiting -- nothing here signalled it was worth tapping through for.
+  // Chidera, 2026-09-25: "that greeing add Hello! at the begining" --
+  // said right after the 3x re-greet cap fix above, about this exact
+  // message. Doesn't undo the 2026-09-24 call above (a BARE "Hello!"
+  // alone was too generic/anonymous) -- this adds it as a warm opener
+  // ahead of the specific "Welcome to X" that already answers that.
   const tail = dineinTableLabel ? 'get started on your dine-in session.' : 'get started.';
   const shortGreeting = readyToPay
     ? (customer.name
         ? `Welcome back to ${bizName}, ${customer.name}! Your table's ready to pay -- tap below.`
         : `Welcome back to ${bizName}! Your table's ready to pay -- tap below.`)
     : (customer.name
-        ? `Welcome to ${bizName}, ${customer.name}! Tap below to ${tail}`
-        : `Welcome to ${bizName}! Tap below to ${tail}`);
+        ? `Hello! Welcome to ${bizName}, ${customer.name}! Tap below to ${tail}`
+        : `Hello! Welcome to ${bizName}! Tap below to ${tail}`);
   const token = await ensureMenuToken(customer);
   // Chidera, 2026-09-25: "let table dine in and online delivery have their
   // complete different web chat." Routes/web-chat.js's own ?table= is what
