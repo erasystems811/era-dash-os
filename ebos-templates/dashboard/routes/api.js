@@ -2325,8 +2325,17 @@ router.delete('/customers/:id', requireEditorApi, async (req, res) => {
     await client.query(`delete from delivery_offer where order_id in (select id from "order" where customer_id = $1)`, [id]);
     await client.query(`delete from booking where customer_id = $1`, [id]);
     await client.query(`delete from "order" where customer_id = $1`, [id]);
-    await client.query(`delete from table_session where customer_id = $1`, [id]);
+    // Chidera, 2026-09-25, real report: "im trying to delete a
+    // conversation on dashboard why isnt it deleting?" Same exact bug
+    // class as this whole block's own history above, freshly introduced
+    // by message.table_session_id (migration 0066, no cascade) --
+    // table_session used to go before message, so ANY customer with a
+    // dine-in message hit a foreign key violation here and the whole
+    // delete rolled back. message now goes first, same "clear the
+    // dependent table before the row it points at" fix as every other
+    // one of these.
     await client.query(`delete from message where customer_id = $1`, [id]);
+    await client.query(`delete from table_session where customer_id = $1`, [id]);
     await client.query(`delete from customers where id = $1`, [id]);
     await client.query('COMMIT');
     res.json({ ok: true });
