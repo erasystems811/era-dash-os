@@ -1,10 +1,13 @@
 // Chidera, 2026-09-25: "the bot ANT BE SILENT FOREVER AFTER THE FIRST FIVE
 // TIMES, AFTER 24 HOURS RENEW THE 5 TIMES TRIAL." Without a genuine web-
-// chat visit, needsChatRedirect's own 5-ping cap used to stay exhausted
-// permanently -- a customer who never once opens the web chat link would
-// have been silently ignored forever after their 5th bare text. 24h of
-// real silence since the last ping is now its own reset, same as a
-// genuine visit already was.
+// chat visit, needsChatRedirect's own ping cap (originally 5, later
+// dropped to 3 the same day -- "make it 3 now sef, 5 is much") used to
+// stay exhausted permanently -- a customer who never once opens the web
+// chat link would have been silently ignored forever after their last
+// bare text. 24h of real silence since the last ping is now its own
+// reset, same as a genuine visit already was. This test uses a count of
+// 5 throughout purely as "comfortably past any real cap", not the cap
+// value itself -- none of its assertions depend on the exact number.
 process.env.EBOS_TEST_PGLITE = '1';
 process.env.EBOS_SANDBOX = '1';
 process.env.PORT = '3980';

@@ -50,17 +50,18 @@ async function main() {
   // === 2. Same customer, texting again with no chat visit in between --
   // Chidera, 2026-09-24: "after the first greeting there should be a
   // second resend... before silent"; 2026-09-25: "let bot resend that
-  // greeting text to chat a max time of 5 cause that 2 is risky." Four
-  // more real resends still go out here (pings 2-5), then a bare text
-  // past the cap with still no visit is genuinely silent.
-  for (let i = 2; i <= 5; i++) {
+  // greeting text to chat a max time of 5 cause that 2 is risky" -- then,
+  // same day: "make it 3 now sef, 5 is much." Two more real resends still
+  // go out here (pings 2-3), then a bare text past the cap with still no
+  // visit is genuinely silent.
+  for (let i = 2; i <= 3; i++) {
     await flow.handlePendingBatch(await freshCustomer(pool, orderTextCustomer.id), `hello? (${i})`);
   }
   rows = await outboundRows(pool, orderTextCustomer.id);
-  assert(rows.length === 5, 'four more bare texts with no chat visit still get real resends, up to 5 total');
+  assert(rows.length === 3, 'two more bare texts with no chat visit still get real resends, up to 3 total');
   await flow.handlePendingBatch(await freshCustomer(pool, orderTextCustomer.id), 'still there?');
   rows = await outboundRows(pool, orderTextCustomer.id);
-  assert(rows.length === 5, 'a bare text past the cap with still no visit gets nothing at all -- five consecutive pings already spent');
+  assert(rows.length === 3, 'a bare text past the cap with still no visit gets nothing at all -- three consecutive pings already spent');
 
   // === 3. A plain "thanks"/"okay" ack from a whatsapp customer also
   // redirects now instead of getting an instant real "You're welcome!". ===

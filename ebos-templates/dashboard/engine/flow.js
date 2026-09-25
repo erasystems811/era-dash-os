@@ -1136,9 +1136,10 @@ export async function needsChatRedirect(customer) {
   // before silent, but this one only did first greeting and went quiet."
   // Chidera, 2026-09-25: "let bot resend that greeting text to chat a max
   // time of 5 cause that 2 is risky, going silent on a customer is
-  // risky." Up to 5 consecutive pings total before staying silent until
+  // risky" -- then, same day, on reflection: "make it 3 now sef, 5 is
+  // much." Up to 3 consecutive pings total before staying silent until
   // either a real visit or the 24h renewal above.
-  return (customer.chat_redirect_count || 0) < 5;
+  return (customer.chat_redirect_count || 0) < 3;
 }
 async function markChatRedirectSent(customer) {
   // A genuine visit since the last ping, 24h+ of real silence since the

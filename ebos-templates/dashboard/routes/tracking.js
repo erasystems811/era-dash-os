@@ -58,7 +58,7 @@ async function loadTrackingStatus(token) {
   const { rows } = await pool.query(
     `select o.status as offer_status, a.status as assignment_status, a.delivered_at, a.delivery_code,
             r.name as rider_name, r.phone as rider_phone,
-            ord.reference, z.name as zone_name, biz.name as business_name
+            ord.reference, ord.status as order_status, z.name as zone_name, biz.name as business_name
      from delivery_offer o
      join delivery_zone z on z.id = o.zone_id
      join "order" ord on ord.id = o.order_id
@@ -72,12 +72,27 @@ async function loadTrackingStatus(token) {
   if (!row) return null;
 
   const expired = row.delivered_at && new Date(row.delivered_at).getTime() < Date.now() - EXPIRY_HOURS * 60 * 60 * 1000;
-  const failed = row.assignment_status === 'FAILED' || row.offer_status === 'CANCELLED' || row.offer_status === 'EXPIRED';
+  // Chidera, 2026-09-25: "whenever an actual rider doesn't accept order,
+  // the tracking link marks it as could not be completed but let the
+  // tracking link be able to update based on if the stage is manually
+  // updated as well." A stuck OPEN offer nobody accepted gets dismissed
+  // from staff's own Needs Attention queue (routes/delivery.js's own
+  // /offers/:id/cancel, "staff handle the actual delivery outside this
+  // system from here -- the order itself is untouched") or retracted the
+  // moment staff hits "Mark in delivery" themselves (routes/api.js) --
+  // either way the ORDER keeps moving through its real pipeline
+  // (delivery -> in_transit -> completed) with no delivery_offer/
+  // delivery_assignment row left to read progress from. This link is the
+  // one thing the customer actually has open; it must keep following the
+  // order's own real status once staff take over manually, not freeze on
+  // a "contact us" dead end that's no longer true the moment they do.
+  const orderProgressed = row.order_status === 'in_transit' || row.order_status === 'completed';
+  const failed = !orderProgressed && (row.assignment_status === 'FAILED' || row.offer_status === 'CANCELLED' || row.offer_status === 'EXPIRED');
   return {
     reference: row.reference,
     businessName: row.business_name || '',
     zoneName: row.zone_name,
-    stageIndex: currentStageIndex(row),
+    stageIndex: orderProgressed ? (row.order_status === 'completed' ? 4 : Math.max(currentStageIndex(row), 2)) : currentStageIndex(row),
     rider: row.rider_name ? { name: row.rider_name, phone: row.rider_phone } : null,
     // Chidera, 2026-09-23: "usually they send 2, one with normal link and
     // one to track ride... so now i need it to be 1, the code should be in
