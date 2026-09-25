@@ -51,6 +51,19 @@ async function loadTopupForDocument(topupId) {
   return { order: topupOrder, items: topup.items, customer: customerRows[0] || {}, business: bizRows[0] || {} };
 }
 
+// Chidera, 2026-09-25: "how it was paid" for the receipt template below --
+// order.payment_method only ever gets set by the manual Mark-paid/POS
+// flow (routes/api.js's /orders/:id/payment-method); every automated
+// path (Paystack/Monnify/OPay/Moniepoint webhook) never sets it at all.
+// "Online payment" is the honest label for that case -- naming a specific
+// provider would be a guess this order row can't actually back up.
+function paymentMethodLabel(order) {
+  if (order.payment_method === 'cash') return 'Cash';
+  if (order.payment_method === 'card') return 'Card';
+  if (order.payment_method === 'transfer') return 'Bank transfer';
+  return 'Online payment';
+}
+
 // Picks readable text over an arbitrary brand colour instead of assuming
 // it's always dark -- a business that picks a pale brand colour would
 // otherwise get white-on-white header text.
@@ -171,6 +184,94 @@ function documentPage({ title, business, customer, order, items }) {
 </body></html>`;
 }
 
+// Chidera, 2026-09-25: "after payment is confirmed instead of the bare
+// payment received, send customer a receipt, but receipt shouldnt look
+// like invoice it is a receipt" -- deliberately NOT documentPage() reused
+// with a different title. A receipt is proof something already happened,
+// not a bill asking for money: no "Pay now" button, no bank-account box
+// (there's nothing left to pay), no "Billed to" framing. A green PAID
+// stamp up top and "Received from"/"How it was paid" replace the
+// invoice's own pending-payment language. Same items table/total
+// structure underneath since that part is genuinely just useful record-
+// keeping either way.
+function receiptPage({ business, customer, order, items }) {
+  const brand = business.brand_color || '#1C1815';
+  const onBrand = readableTextColor(brand);
+  const rows = items
+    .map(
+      (i) =>
+        `<tr><td>${esc(i.name)}</td><td>${i.quantity}</td><td>${Number(i.price).toFixed(2)}</td><td>${(Number(i.price) * i.quantity).toFixed(2)}</td></tr>`
+    )
+    .join('');
+  const deliveryFeeRow =
+    Number(order.delivery_fee) > 0
+      ? `<tr><td colspan="3">Delivery fee</td><td>${Number(order.delivery_fee).toFixed(2)}</td></tr>`
+      : '';
+
+  return `<!doctype html>
+<html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Receipt ${esc(order.reference)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap">
+<style>
+  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--paid:#2E7D5B;--paid-soft:rgba(46,125,91,0.12)}
+  *{box-sizing:border-box}
+  html,body{background:var(--paper)}
+  body { font-family: "Inter", system-ui, sans-serif; max-width: 640px; margin: 2.5rem auto; padding: 0 1rem 3rem; color: var(--ink); }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
+  .logo { max-height: 48px; max-width: 200px; margin-bottom: 6px; border-radius: 6px; }
+  .biz-name { font-family: "Fraunces", serif; font-weight: 700; font-size: 17px; }
+  .doc-title { font-family: "Fraunces", serif; font-size: 24px; font-weight: 700; text-align: right; letter-spacing: 0.01em; }
+  .paid-badge { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; background: var(--paid-soft); color: var(--paid); font-weight: 700; font-size: 11.5px; letter-spacing: 0.04em; padding: 4px 11px; border-radius: 999px; }
+  .doc-meta { text-align: right; font-size: 12.5px; color: var(--mid); margin-top: 8px; }
+  .received-from { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 18px 0; }
+  .received-from .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; }
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; background: #fff; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); }
+  th { background: ${brand}; color: ${onBrand}; text-align: left; padding: 10px 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
+  tr:last-child td { border-bottom: 0; }
+  .total-row { text-align: right; font-size: 17px; font-weight: 700; margin: 14px 4px 26px; color: var(--paid); }
+  .box { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .box .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; margin-bottom: 8px; }
+  .footer { text-align: center; color: var(--mid); font-size: 12px; margin-top: 32px; }
+  .era-mark { text-align: center; color: var(--mid); font-size: 10.5px; letter-spacing: 0.03em; margin-top: 8px; opacity: 0.65; }
+</style></head>
+<body>
+  <div class="header">
+    <div>
+      ${business.logo_data_url ? `<img class="logo" src="${esc(business.logo_data_url)}" alt="${esc(business.name)}">` : ''}
+      <div class="biz-name">${esc(business.name)}</div>
+    </div>
+    <div>
+      <div class="doc-title">RECEIPT</div>
+      <div class="paid-badge">&#10003; PAID</div>
+      <div class="doc-meta">Reference: ${esc(order.reference)}<br>Date: ${new Date().toLocaleDateString()}</div>
+    </div>
+  </div>
+
+  <div class="received-from">
+    <div class="label">RECEIVED FROM</div>
+    <strong>${esc(customer.name || customer.phone_number)}</strong>
+    ${customer.address ? `<br>${esc(customer.address)}` : ''}
+  </div>
+
+  <table>
+    <tr><th>Item</th><th>Qty</th><th>Price</th><th>Line total</th></tr>
+    ${rows}
+    ${deliveryFeeRow}
+  </table>
+  <div class="total-row">Total paid: NGN ${Number(order.total).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+
+  <div class="box">
+    <div class="label">HOW IT WAS PAID</div>
+    ${esc(paymentMethodLabel(order))}
+  </div>
+
+  <div class="footer">Thank you for your order &middot; ${esc(business.name)}</div>
+  <div class="era-mark">Powered by ERA Systems</div>
+</body></html>`;
+}
+
 // Gotenberg's Chromium route renders whatever HTML file is named
 // "index.html" in the multipart body -- that's Gotenberg's own requirement,
 // not a choice made here. Internal-only service (docker-compose.yml.template),
@@ -241,6 +342,23 @@ router.get('/topup/:topupId/pdf', async (req, res) => {
   noStore(res);
   res.set('Content-Type', 'application/pdf');
   res.set('Content-Disposition', `inline; filename="topup-${data.order.reference}.pdf"`);
+  res.send(pdf);
+});
+
+router.get('/receipt/:orderId', async (req, res) => {
+  const data = await loadOrderForDocument(req.params.orderId);
+  if (!data) return res.status(404).send('Not found.');
+  noStore(res);
+  res.send(receiptPage(data));
+});
+
+router.get('/receipt/:orderId/pdf', async (req, res) => {
+  const data = await loadOrderForDocument(req.params.orderId);
+  if (!data) return res.status(404).send('Not found.');
+  const pdf = await renderPdf(receiptPage(data));
+  noStore(res);
+  res.set('Content-Type', 'application/pdf');
+  res.set('Content-Disposition', `inline; filename="receipt-${data.order.reference}.pdf"`);
   res.send(pdf);
 });
 

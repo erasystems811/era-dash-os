@@ -11,7 +11,7 @@ import { askJson, askText } from './claude.js';
 import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
-import { createInvoice } from './documents.js';
+import { createInvoice, createReceipt } from './documents.js';
 import { initializePaystackTransaction, initializePaystackTopupTransaction, initializeMonnifyTransaction, initializeOpayTransaction, getPaymentConfig } from './payment.js';
 import { pushPaymentRequest, lookupTransactionByReference } from './moniepoint-api.js';
 import { createDelivery, estimateDeliveryFee } from './delivery.js';
@@ -3269,6 +3269,33 @@ export async function completePayment(orderId) {
   await pool.query(`update "order" set status = 'preparation', payment_status = 'confirmed' where id = $1`, [order.id]);
   await transitionOrder(order, 'fulfilment');
 
+  // Chidera, 2026-09-25: "after payment is confirmed instead of the bare
+  // payment received, send customer a receipt, but receipt shouldnt look
+  // like invoice it is a receipt" -- a real RECEIPT (routes/documents.js's
+  // own receiptPage, deliberately not the invoice template with a
+  // different title -- see its own comment) sent as a WhatsApp document,
+  // same resilient send-then-fallback-to-a-link shape sendPaymentInstructions
+  // already uses for the invoice. Replaces the bare "Payment received"
+  // opener; the delivery/pickup-specific operational info still follows.
+  const receiptPath = await createReceipt(order);
+  let receiptSent = false;
+  if (process.env.PUBLIC_URL) {
+    try {
+      const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
+      if (customer.channel === 'instagram') {
+        await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
+      } else {
+        await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
+      }
+      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
+      receiptSent = true;
+    } catch (err) {
+      console.error(`Failed to send receipt PDF, falling back to a text link: ${err.message}`);
+    }
+  }
+  const receiptUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${receiptPath}` : null;
+  const receiptLine = receiptSent ? 'Your receipt is attached above.' : receiptUrl ? `Here's your receipt: ${receiptUrl}` : 'Payment received.';
+
   if (order.fulfilment_type === 'delivery') {
     const delivery = await createDelivery(order, customer);
     const riderLine = delivery.riderName ? ` Your rider is ${delivery.riderName}.` : '';
@@ -3277,7 +3304,7 @@ export async function completePayment(orderId) {
     // but the tracking link is available immediately and is the thing
     // actually worth sending.
     const trackingLine = delivery.trackingUrl ? ` Track it here: ${delivery.trackingUrl}` : '';
-    await reply(customer, `Payment received. Your order is being prepared for delivery.${riderLine}${trackingLine}`);
+    await reply(customer, `${receiptLine} Your order is being prepared for delivery.${riderLine}${trackingLine}`);
   } else {
     const { rows: bizRows } = await pool.query('select address, phone_number from business limit 1');
     const biz = bizRows[0] || {};
@@ -3285,7 +3312,7 @@ export async function completePayment(orderId) {
     const b = branchRows[0] || {};
     await reply(
       customer,
-      `Payment received, I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
+      `${receiptLine} I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
     );
   }
 
