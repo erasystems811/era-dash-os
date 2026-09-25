@@ -109,6 +109,27 @@ export async function initializeOrderPaymentPaystackTransaction({ orderPayment, 
   return result.authorizationUrl;
 }
 
+// Chidera, 2026-09-25 (live report): "on dine in when i reach pay, its
+// not linked to the monify or the payment provider set for the
+// business?" Real gap: routes/dinein-menu.js's own GET /:qrToken/pay only
+// ever checked paymentConfig.provider for 'pos' or 'paystack' -- a
+// business set to Monnify (or OPay) fell through both branches entirely
+// and the dine-in pay page showed neither a checkout link nor account
+// details, just the generic "pay at the counter" fallback. Same shape as
+// initializeOrderPaymentPaystackTransaction right above, keyed to one
+// specific order_payment row (a split share or the whole table), reusing
+// its own payment_reference/payment_link_url columns -- the exact same
+// ones Paystack's dine-in transaction already writes to, so nothing
+// downstream (findOrderByPaymentReference, the webhook confirm path)
+// needs to know or care which of the two providers actually produced
+// this link.
+export async function initializeOrderPaymentMonnifyTransaction({ orderPayment, order, customer, amount, callbackUrl }) {
+  const result = await callMonnifyCheckoutLink({ customer, amount, referencePrefix: `${order.reference}-DP`, redirectUrl: callbackUrl });
+  if (!result) return null;
+  await pool.query('update order_payment set payment_reference = $1, payment_link_url = $2 where id = $3', [result.paymentReference, result.checkoutUrl, orderPayment.id]);
+  return result.checkoutUrl;
+}
+
 // Chidera, 2026-09-24: "the monnify account that was sent is unavailable
 // and invalid and cant it be a link like paystack? so the auto confirm can
 // be obvious." Was the dynamic bank-transfer ACCOUNT (no clickable link
