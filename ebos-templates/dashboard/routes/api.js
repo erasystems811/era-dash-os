@@ -1562,7 +1562,20 @@ router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
 // completePayment() the Paystack webhook uses -- receipt, delivery booking,
 // customer notification, all of it -- rather than a second, thinner path
 // that could drift out of sync with what a real automated payment does.
+// Chidera, 2026-09-25: "remove that confirm payment received button from
+// every other stage, it should only be in first confirmation stage, let
+// staff not be able to manually confirm payment at other stages except
+// confirmation stage." Enforced here, not just hidden client-side
+// (OrderDetail.jsx's own comment on this same request) -- completePayment
+// below also advances status/fires delivery+receipt side effects meant to
+// run exactly once, right when payment first clears, so a stale confirm
+// from a later stage risked re-running work already done.
 router.post('/orders/:id/confirm-payment', requireStaffApi, async (req, res) => {
+  const { rows: existing } = await pool.query('select status from "order" where id = $1', [req.params.id]);
+  if (!existing[0]) return res.status(404).json({ error: 'Not found.' });
+  if (existing[0].status !== 'confirmation') {
+    return res.status(409).json({ error: 'Payment can only be manually confirmed at the Confirmation stage.' });
+  }
   const { rows } = await pool.query(`update "order" set payment_status = 'confirmed' where id = $1 returning *`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'Not found.' });
   try {

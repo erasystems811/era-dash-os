@@ -288,9 +288,26 @@ export default function OrderDetail() {
             ) : (
               <p className="hint">No proof of payment submitted yet.</p>
             )}
-            {canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted' && (
+            {/* Chidera, 2026-09-25: "remove that confirm payment received
+                button from every other stage, it should only be in first
+                confirmation stage, let staff not be able to manually
+                confirm payment at other stages except confirmation
+                stage." completePayment() (called by this button) also
+                advances the order to preparation and fires delivery/
+                receipt side effects meant to happen exactly ONCE, right
+                when payment first clears -- letting staff re-trigger that
+                from a LATER stage (an order that's already moved on for
+                some other reason, payment_status somehow still not
+                confirmed) risked a stale confirm re-running work that's
+                already done. Confirmation is the only stage this is ever
+                a real action. */}
+            {canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted' && order.status === 'confirmation' && (
               <button onClick={confirmPayment}>Confirm payment received</button>
             )}
+            {canEdit(staff) &&
+              order.payment_status !== 'confirmed' &&
+              order.payment_status !== 'accepted' &&
+              order.status !== 'confirmation' && <p className="hint">Payment can only be manually confirmed at the Confirmation stage.</p>}
           </div>
         )}
 
