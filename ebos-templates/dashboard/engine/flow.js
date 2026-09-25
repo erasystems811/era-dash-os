@@ -5219,10 +5219,37 @@ export async function resetServedForAddOn(order) {
   const orderRecipients = await orderAlertRecipients();
   if (orderRecipients.length && order.table_id) {
     const { rows: tableRows } = await pool.query('select label from restaurant_table where id = $1', [order.table_id]);
-    const { itemLines } = await summariseOrder(order);
-    const alertText = `Table ${tableRows[0]?.label || '?'} added more after being served:\n${itemLines.join('\n')}`;
-    for (const { phoneNumber: to, staffId } of orderRecipients) {
-      await notifyStaff({ staffId, phoneNumber: to, title: 'Added after serving', body: alertText });
+    // Chidera, 2026-09-25: "let the add on only state the add on items not
+    // all the items" -- was summariseOrder's full itemLines (the WHOLE
+    // running bill). order_item has no stable row identity across a
+    // resubmit (the web review route deletes and reinserts every line
+    // each time -- see served_item_snapshot's own schema comment), so a
+    // timestamp-based diff can't tell new from old here. Reuses the exact
+    // same {product_id: quantity} snapshot + diff routes/dinein.js's own
+    // itemsWithServedDiff already computes for the InHouse kanban card's
+    // "NEW" badge -- one source of truth for what "just added on" means,
+    // correct regardless of whether the add-on came from the web menu or
+    // typed chat.
+    const { rows: currentItems } = await pool.query(
+      `select p.name, p.id as product_id, oi.quantity, oi.price,
+         coalesce(
+           (select string_agg(oa.answer, ', ' order by oa.created_at)
+            from order_item_answer oa where oa.order_item_id = oi.id),
+           ''
+         ) as answer_summary
+       from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
+      [order.id]
+    );
+    const snapshot = order.served_item_snapshot || {};
+    const itemLines = currentItems
+      .map((r) => ({ ...r, newQty: Math.max(0, r.quantity - Number(snapshot[r.product_id] || 0)) }))
+      .filter((r) => r.newQty > 0)
+      .map((r) => `${r.newQty}x ${r.name}${r.answer_summary ? ` (${r.answer_summary})` : ''}: NGN ${r.price}`);
+    if (itemLines.length) {
+      const alertText = `Table ${tableRows[0]?.label || '?'} added more after being served:\n${itemLines.join('\n')}`;
+      for (const { phoneNumber: to, staffId } of orderRecipients) {
+        await notifyStaff({ staffId, phoneNumber: to, title: 'Added after serving', body: alertText });
+      }
     }
   }
   return true;
