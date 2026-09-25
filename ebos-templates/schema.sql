@@ -562,6 +562,13 @@ create table if not exists "order" (
   -- window instead of the normal root greeting -- see engine/flow.js's
   -- recentlyCompletedOrder.
   completed_at timestamptz,
+  -- migrations/0063_payment_method_cash_collected.sql -- only ever set by
+  -- the dine-in "Mark paid" flow (payment_method='cash' pairs with a real
+  -- cash_collected amount; card/transfer have no separate amount to
+  -- record). What GET /dinein/stats/today (routes/dinein.js) sums for the
+  -- In House dashboard's cash/card/transfer breakdown.
+  payment_method text,
+  cash_collected numeric,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
