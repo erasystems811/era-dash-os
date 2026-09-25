@@ -283,11 +283,16 @@ const FREE_MESSAGES_PER_NUMBER = 1000; // per WhatsApp number, per month
 router.get('/monitor/messaging-cost', requireEraAdmin, async (req, res) => {
   const days = Math.min(Number(req.query.days) || 30, 90);
   const [{ rows: outboundRows }, { rows: orderRows }, { rows: numberRows }] = await Promise.all([
-    pool.query(
-      `select count(*) as count from message
-       where direction = 'outbound' and channel = 'whatsapp' and created_at >= now() - $1::interval`,
-      [`${days} days`]
-    ),
+    // migrations/0065_whatsapp_send_log.sql -- a permanent, content-free,
+    // append-only log written alongside every real outbound WhatsApp send,
+    // immune to DELETE /customers/:id's hard-delete of `message`. Counting
+    // from `message` directly here would make this figure drop the moment
+    // a conversation with real WhatsApp sends is deleted -- exactly the
+    // "why did the outbound count drop" bug this table exists to prevent.
+    // Confirmed live 2026-09-25: era-demo's own data had 73 real send-log
+    // rows even after a delete, but this route was still reading `message`
+    // and under-reporting.
+    pool.query(`select count(*) as count from whatsapp_send_log where created_at >= now() - $1::interval`, [`${days} days`]),
     pool.query(`select count(*) as count from "order" where created_at >= now() - $1::interval`, [`${days} days`]),
     pool.query(`select count(distinct phone_number_id) as count from branch_channel where channel = 'whatsapp' and phone_number_id is not null`),
   ]);

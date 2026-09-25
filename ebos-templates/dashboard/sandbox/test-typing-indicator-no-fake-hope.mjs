@@ -42,12 +42,14 @@ async function main() {
   const afterFirstPing = await freshCustomer(pool, firstContact.id);
   assert((await flow.shouldSkipTypingIndicator(afterFirstPing, 'whatsapp', 'hello?')) === false, 'second bare text (the one real resend): typing still shows');
 
-  // === 3. THE REAL BUG: third bare text, still no visit -- the gate is
-  // genuinely exhausted (2 consecutive pings already sent) and will stay
-  // completely silent. Typing must NOT show -- no fake hope. ===
-  await pool.query('update customers set chat_redirect_count = 2 where id = $1', [firstContact.id]);
+  // === 3. THE REAL BUG: a bare text after the cap, still no visit -- the
+  // gate is genuinely exhausted (Chidera, 2026-09-25: "let bot resend that
+  // greeting text to chat a max time of 5" -- 5 consecutive pings already
+  // sent) and will stay completely silent. Typing must NOT show -- no
+  // fake hope. ===
+  await pool.query('update customers set chat_redirect_count = 5 where id = $1', [firstContact.id]);
   const afterSecondPing = await freshCustomer(pool, firstContact.id);
-  assert((await flow.shouldSkipTypingIndicator(afterSecondPing, 'whatsapp', 'still there?')) === true, 'third bare text with no visit: gate is exhausted, typing must NOT show');
+  assert((await flow.shouldSkipTypingIndicator(afterSecondPing, 'whatsapp', 'still there?')) === true, 'bare text past the cap with no visit: gate is exhausted, typing must NOT show');
 
   // === 4. Customer genuinely visited the chat since the last ping -- the
   // count resets, a fresh real ping IS coming, typing is honest again.
@@ -77,7 +79,7 @@ async function main() {
   // === 6. Same exhausted-gate customer, but NOT a pure ack ("ok" with no
   // open order at all this time) -- genuinely silent, typing must NOT show. ===
   const noOrderCustomer = await flow.findOrCreateCustomer({ phoneNumber: '2348012370003', channel: 'whatsapp' });
-  await pool.query('update customers set chat_redirect_sent_at = now(), chat_redirect_count = 2 where id = $1', [noOrderCustomer.id]);
+  await pool.query('update customers set chat_redirect_sent_at = now(), chat_redirect_count = 5 where id = $1', [noOrderCustomer.id]);
   const noOrder = await freshCustomer(pool, noOrderCustomer.id);
   assert((await flow.shouldSkipTypingIndicator(noOrder, 'whatsapp', 'ok')) === true, 'a plain "ok" ack with no open order at all falls through to the exhausted redirect gate -- silent, no fake typing');
 

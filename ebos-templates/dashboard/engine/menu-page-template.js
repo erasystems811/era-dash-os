@@ -1420,7 +1420,7 @@ setInterval(async function () {
 // language, same auto-confirm mechanism (order_payment +
 // matchPosTransactionToPayment), reached via routes/menu-page.js's
 // /:token/pay.
-export function renderSingleOrderPayPage({ businessName, amount, confirmed, posTransfer, statusPath, claimPath, dynamicExpiresAt = null, dynamicReadyAt = null }) {
+export function renderSingleOrderPayPage({ businessName, amount, confirmed, posTransfer, statusPath, claimPath, dynamicExpiresAt = null, dynamicReadyAt = null, webChatPath = null }) {
   return `<!doctype html>
 <html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>${escapeHtml(businessName)}</title>
@@ -1443,13 +1443,16 @@ export function renderSingleOrderPayPage({ businessName, amount, confirmed, posT
   .copyBtn{flex-shrink:0;background:var(--ink);color:var(--paper);border:0;font-family:inherit;font-weight:600;font-size:11.5px;padding:5px 10px;border-radius:999px;touch-action:manipulation}
   .secondaryBtn{width:100%;margin-top:12px;background:#fff;color:var(--ink);border:1px solid var(--line);font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
   .done{margin:16px;background:var(--ok);color:#fff;border-radius:14px;padding:18px;text-align:center;font-family:"Fraunces",serif;font-size:17px;font-weight:700}
+  .done .backToChat{display:inline-block;margin-top:12px;background:#fff;color:var(--ok);font-family:"Inter",sans-serif;font-weight:600;font-size:13.5px;padding:9px 18px;border-radius:999px;text-decoration:none}
 </style></head>
 <body>
 <div class="top">
   <div class="nm">${escapeHtml(businessName)}</div>
   <div class="mt">Ready to pay</div>
 </div>
-<div id="doneBanner" class="done" ${confirmed ? '' : 'hidden'}>Payment confirmed. Thank you!</div>
+<div id="doneBanner" class="done" ${confirmed ? '' : 'hidden'}>Payment confirmed. Thank you!${
+  webChatPath ? `<br><a class="backToChat" href="${escapeHtml(webChatPath)}">Back to chat</a>` : ''
+}</div>
 <div id="amountCard" class="payAmount" ${confirmed ? 'hidden' : ''}>
   <div style="color:var(--mid);font-size:13px">${posTransfer ? 'Please transfer to the account below' : 'Please pay this amount at the counter or on the POS terminal'}</div>
   <div class="big">NGN ${Number(amount).toLocaleString()}</div>

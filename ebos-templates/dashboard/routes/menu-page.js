@@ -300,6 +300,11 @@ router.get('/:token/pay', async (req, res) => {
       dynamicReadyAt,
       statusPath: `/m/${req.params.token}/pay/status`,
       claimPath: `/m/${req.params.token}/pay/claim`,
+      // Chidera, 2026-09-25: "when a payment is made and successful,
+      // customer get stuck at payment successful, it should re route them
+      // back to web chat." Same isViaWebChat gate every other back-to-chat
+      // link on this page family already uses.
+      webChatPath: isViaWebChat(customer) ? `/wa/${req.params.token}` : null,
     })
   );
 });

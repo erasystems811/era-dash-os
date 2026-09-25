@@ -58,6 +58,18 @@ async function main() {
      select $1, 'outbound', 'whatsapp', 'bot', 'msg ' || gs from generate_series(1, 1050) gs`,
     [customer.id]
   );
+  // Chidera, 2026-09-25, real live incident: DELETE /customers/:id hard-
+  // deletes `message`, but this route must keep counting real outbound
+  // WhatsApp sends even after that -- that's the whole point of
+  // whatsapp_send_log (migration 0065), a permanent, content-free,
+  // append-only log written by logMessage alongside every real send.
+  // Confirmed live on era-demo: this route had regressed back to counting
+  // `message` directly, so a deleted conversation's real sends silently
+  // vanished from the cost figure. The test above bypasses logMessage
+  // (a raw insert into message, for setup speed), so it never populated
+  // whatsapp_send_log either -- has to be seeded here too, matching what
+  // the real production path actually writes.
+  await pool.query(`insert into whatsapp_send_log (id) select gen_random_uuid() from generate_series(1, 1050)`);
   // Must NOT be counted: inbound (customer never billed) and a non-WhatsApp outbound channel.
   await pool.query(`insert into message (customer_id, direction, channel, sender, body) values ($1, 'inbound', 'whatsapp', 'customer', 'hi')`, [customer.id]);
   await pool.query(`insert into message (customer_id, direction, channel, sender, body) values ($1, 'outbound', 'instagram', 'bot', 'hi')`, [customer.id]);
@@ -77,6 +89,21 @@ async function main() {
   assert(data.freeAllowance === 1000, 'first 1,000/month per number stays free (got ' + data.freeAllowance + ')');
   assert(data.billableMessages === 50, `only the 50 messages past the free tier are billable (got ${data.billableMessages})`);
   assert(data.projectedCostNaira === 700, `50 billable messages x NGN14 = NGN700 (got ${data.projectedCostNaira})`);
+
+  // === 4. Chidera, 2026-09-25, real live incident: the count must survive
+  // deleting the very conversation those sends belonged to -- that's the
+  // whole reason whatsapp_send_log (content-free, no customer_id at all)
+  // exists instead of counting `message` directly. ===
+  const loginRes = await fetch(`${BASE}/api/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'owner@samplerestaurant.test', password: 'testpass123' }),
+  });
+  const cookie = loginRes.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+  const delRes = await fetch(`${BASE}/api/customers/${customer.id}`, { method: 'DELETE', headers: { cookie } });
+  assert(delRes.status === 200, 'the customer/conversation delete itself succeeds');
+  const afterDeleteRes = await fetch(`${BASE}/api/monitor/messaging-cost`, { headers: { 'x-era-admin-token': 'testadmin' } });
+  const afterDelete = await afterDeleteRes.json();
+  assert(afterDelete.outboundWhatsapp === 1050, `the real send count is UNCHANGED after deleting the conversation those sends came from (got ${afterDelete.outboundWhatsapp})`);
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

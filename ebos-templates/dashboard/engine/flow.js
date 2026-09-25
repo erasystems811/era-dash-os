@@ -1042,10 +1042,12 @@ async function needsChatRedirect(customer) {
   // No visit at all since the last ping -- Chidera, 2026-09-24: "i said
   // after the first greeting there should be a second resend of the tap
   // here to chat to redirect customer again before silent, but this one
-  // only did first greeting and went quiet." Up to 2 consecutive pings
-  // total (the entry ping, then one real resend) before staying fully
-  // silent -- not just the one this used to stop at.
-  return (customer.chat_redirect_count || 0) < 2;
+  // only did first greeting and went quiet." Chidera, 2026-09-25: "let bot
+  // resend that greeting text to chat a max time of 5 cause that 2 is
+  // risky, going silent on a customer is risky." Up to 5 consecutive
+  // pings total before staying fully silent -- not just the 2 this used
+  // to stop at.
+  return (customer.chat_redirect_count || 0) < 5;
 }
 async function markChatRedirectSent(customer) {
   // A genuine visit since the last ping (or this being the very first
@@ -1956,6 +1958,33 @@ export async function finishItemsCollection(customer, order, prefix = '', { auto
   if (order.engine_state !== 'collect_info') {
     const { total } = await summariseOrder(order);
     await pool.query('update "order" set total = $1 where id = $2', [total, order.id]);
+    // Chidera, 2026-09-25, real live incident: a plain "New total: NGN X"
+    // text here left two real problems for an order already past
+    // collect_info -- (1) any order_confirm_asked bubble already sent
+    // silently stops responding: handleOrderConfirmYesTap's own guard
+    // requires engine_state === 'confirm_order', which this late add never
+    // touches, so a tap on an OLDER confirm_order-stage bubble's buttons
+    // (or, worse, one from BEFORE this add, now showing a stale total)
+    // does nothing; (2) if payment instructions/an invoice were already
+    // sent once (confirm_payment), that link is now for the WRONG, stale
+    // amount. "whenever the new total is updated, instead of just typing
+    // new total resend me the invoice and paynow thing." Same reset-then-
+    // resend shape applyOrderModifications' own wasAlreadyConfirmed branch
+    // already uses for a typed "add X" -- this is the same fix for a
+    // TAPPED add (an older upsell bubble) instead.
+    if (order.engine_state === 'confirm_payment') {
+      await pool.query('update "order" set confirmed_at = null where id = $1', [order.id]);
+      order.confirmed_at = null;
+      await sendPaymentInstructions(customer, order);
+      return;
+    }
+    if (order.engine_state === 'confirm_order') {
+      await pool.query('update "order" set confirmed_at = null where id = $1', [order.id]);
+      order.confirmed_at = null;
+      const { itemLines: freshLines, total: freshTotal } = await summariseOrder(order);
+      await sendConfirmButtons(customer, `Got it, your order:\n${freshLines.join('\n')}\nNew total: NGN ${freshTotal}.`, 'order_confirm_asked');
+      return;
+    }
     await reply(customer, `${prefix}New total: NGN ${total}.`.trim(), 'upsell_late_add');
     return;
   }
