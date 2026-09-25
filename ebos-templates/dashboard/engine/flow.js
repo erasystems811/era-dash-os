@@ -4172,7 +4172,23 @@ export async function completePayment(orderId) {
     // the exact same reason. Staff reading what to prepare deserves the
     // same structured format, not a regression back to the paragraph.
     const { itemLines, total } = await summariseOrder(order);
-    const alertText = `Payment confirmed, ready to prepare: ${displayNameFor(customer)} (${order.fulfilment_type || 'pickup'})\n${itemLines.join('\n')}\nTotal: NGN ${total}`;
+    // Chidera, 2026-09-25: "on the handover whatsapp text to inform on what
+    // has been paid and placed, if its delivery let the delivery area and
+    // address also be in the text" -- staff reading this to prep/dispatch
+    // shouldn't have to open the dashboard just to find out where it's
+    // going. Area only applies to own_riders (delivery_zone_id is null for
+    // Chowdeck/manual -- see its own schema comment); address always comes
+    // from customer.address, the same field createDelivery already reads.
+    let deliveryLines = '';
+    if (order.fulfilment_type === 'delivery') {
+      const zoneRows = order.delivery_zone_id ? (await pool.query('select name from delivery_zone where id = $1', [order.delivery_zone_id])).rows : [];
+      const zoneName = zoneRows[0]?.name;
+      const lines = [];
+      if (zoneName) lines.push(`Area: ${zoneName}`);
+      if (customer.address) lines.push(`Address: ${customer.address}`);
+      if (lines.length) deliveryLines = `\n${lines.join('\n')}`;
+    }
+    const alertText = `Payment confirmed, ready to prepare: ${displayNameFor(customer)} (${order.fulfilment_type || 'pickup'})${deliveryLines}\n${itemLines.join('\n')}\nTotal: NGN ${total}`;
     const credentials = await getWhatsAppCredentials(order.branch_id);
     for (const { phoneNumber: to, staffId } of orderRecipients) {
       // Chidera, 2026-09-17: "the link is meant to open the specific
