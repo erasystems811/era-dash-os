@@ -1239,7 +1239,7 @@ export async function sendChatRedirectPing(customer, pingText, { trigger = 'chat
 // moves to the web-chat page's own first bubble (routes/web-chat.js),
 // never sent over the real Cloud API -- only this short line + one CTA
 // button is.
-async function sendStartOrderLink(customer, { dineinTableLabel = null, dineinQrToken = null } = {}) {
+async function sendStartOrderLink(customer, { dineinTableLabel = null, dineinQrToken = null, readyToPay = false } = {}) {
   if (!process.env.PUBLIC_URL) {
     const { message } = await buildGreetingContent(customer);
     await reply(customer, message, 'greeting');
@@ -1262,10 +1262,21 @@ async function sendStartOrderLink(customer, { dineinTableLabel = null, dineinQrT
   // session." A table scanner already knows exactly why they're texting
   // (they just scanned a table's QR code) -- the one real WhatsApp message
   // they get should say so, not the generic online-order wording.
+  // Chidera, 2026-09-25 (live report): "i just realized in dine in that
+  // served you can pay now is inside web and they may not see it" --
+  // rescanning the table's own QR is the only way back for a guest who
+  // closed the web chat tab, and it used to say the exact same generic
+  // "tap below to get started" whether or not their own real "ready to
+  // pay" bubble (notifyGuestsReadyToPay) was already sitting there
+  // waiting -- nothing here signalled it was worth tapping through for.
   const tail = dineinTableLabel ? 'get started on your dine-in session.' : 'get started.';
-  const shortGreeting = customer.name
-    ? `Welcome to ${bizName}, ${customer.name}! Tap below to ${tail}`
-    : `Welcome to ${bizName}! Tap below to ${tail}`;
+  const shortGreeting = readyToPay
+    ? (customer.name
+        ? `Welcome back to ${bizName}, ${customer.name}! Your table's ready to pay -- tap below.`
+        : `Welcome back to ${bizName}! Your table's ready to pay -- tap below.`)
+    : (customer.name
+        ? `Welcome to ${bizName}, ${customer.name}! Tap below to ${tail}`
+        : `Welcome to ${bizName}! Tap below to ${tail}`);
   const token = await ensureMenuToken(customer);
   // Chidera, 2026-09-25: "let table dine in and online delivery have their
   // complete different web chat." Routes/web-chat.js's own ?table= is what
@@ -4871,7 +4882,18 @@ async function handleDineinScan(customer, text) {
   // real dine-in welcome (table label, "join an active order" wording,
   // the actual menu link) becomes the free first bubble on /wa/:token
   // instead (routes/web-chat.js's own dine-in branch).
-  await sendStartOrderLink(customer, { dineinTableLabel: table.label, dineinQrToken: table.qr_token });
+  // Chidera, 2026-09-25 (live report): "i just realized in dine in that
+  // served you can pay now is inside web and they may not see it" --
+  // rescanning the QR is this guest's only way back once they've closed
+  // the web chat tab; if their own real "ready to pay" bubble
+  // (notifyGuestsReadyToPay) is already sitting there, the one real
+  // WhatsApp message this scan produces should say so, not the generic
+  // "get started" line a first-timer with nothing to pay yet still gets.
+  const { rows: readyToPayRows } = await pool.query(
+    `select 1 from "order" where session_id = $1 and served_at is not null and status not in ('completed', 'cancelled') limit 1`,
+    [session.id]
+  );
+  await sendStartOrderLink(customer, { dineinTableLabel: table.label, dineinQrToken: table.qr_token, readyToPay: readyToPayRows.length > 0 });
   return true;
 }
 
@@ -5144,12 +5166,19 @@ export async function notifyGuestsReadyToPay(order) {
   const { rows: tableRows } = await pool.query('select label, qr_token, branch_id from restaurant_table where id = $1', [order.table_id]);
   const table = tableRows[0];
   if (!table) return;
+  // Chidera, 2026-09-25 (live report): "the whole ready to pay should come
+  // on bare chat once only for people who actually placed an order not
+  // just everyone on the table" -- real gap: every guest who'd EVER
+  // scanned or joined this table's session got notified, even one who
+  // never actually added a single item (came along, never ordered). Only
+  // customers who genuinely have their own order_item lines on THIS order
+  // get a "ready to pay" bubble/ping -- there's nothing for anyone else
+  // here to pay for.
   const { rows: guests } = await pool.query(
-    `select c.* from customers c where c.id in (
-       select customer_id from table_session_guest where session_id = $1
-       union select customer_id from table_session where id = $1
-     )`,
-    [order.session_id]
+    `select distinct c.* from customers c
+       join order_item oi on oi.added_by_customer_id = c.id
+     where oi.order_id = $1`,
+    [order.id]
   );
   if (!guests.length) return;
   const { total } = await summariseOrder(order);

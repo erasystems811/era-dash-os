@@ -176,11 +176,21 @@ router.get('/orders/pending', async (req, res) => {
 // /orders/:id/status {status:'completed'} (same close-out every other
 // order already gets, not a second parallel path) -- reaching 'completed'
 // from here is what /tables/:id/close below actually waits on.
+// Chidera, 2026-09-25 (live report): "when bot auto confirm i think the
+// kanban card should have a paid sign if not staff may not know how to
+// confirm that they have paid" -- a split/joint payment that auto-
+// confirms via a real Paystack/Monnify/Moniepoint webhook (confirmOrderPayment,
+// never a staff click) only moves the WHOLE order to status='completed'
+// (and off this board entirely) once every last split is confirmed -- a
+// partially-confirmed order stays right here with nothing at all showing
+// that part of it is already real, paid money. confirmedAmount is the
+// running total of exactly that, so the card can say so.
 router.get('/orders/serving', async (req, res) => {
   const { rows } = await pool.query(
     `select o.*, rt.label as table_label,
             (select coalesce(json_agg(json_build_object('name', p.name, 'product_id', oi.product_id, 'quantity', oi.quantity)), '[]')
-             from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items
+             from order_item oi join product p on p.id = oi.product_id where oi.order_id = o.id) as items,
+            (select coalesce(sum(op.amount), 0) from order_payment op where op.order_id = o.id and op.status = 'confirmed') as confirmed_amount
      from "order" o
      join restaurant_table rt on rt.id = o.table_id
      where o.channel = 'dinein' and o.status not in ('completed', 'cancelled') and o.served_at is not null

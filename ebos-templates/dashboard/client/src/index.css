@@ -1034,6 +1034,22 @@ label {
   color: var(--warn);
   font-weight: 600;
 }
+/* Chidera, 2026-09-25: "when bot auto confirm i think the kanban card
+   should have a paid sign if not staff may not know how to confirm that
+   they have paid" -- a split payment auto-confirmed via a real Paystack/
+   Monnify/Moniepoint webhook, never a staff click, with nothing on the
+   card itself saying so before this. */
+.paid-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--success);
+  background: var(--success-soft);
+  border-radius: 999px;
+  padding: 2px 8px;
+  margin-top: 6px;
+}
 .addon-section-head td {
   padding-top: 14px !important;
   font-size: 12px;
