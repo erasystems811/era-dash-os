@@ -61,6 +61,9 @@ async function main() {
   await newTableWithOrder('S3', { paymentMethod: 'transfer', paymentStatus: 'confirmed' });
   // Auto-confirmed via a real payment link/POS match -- payment_method never gets set for this path.
   await newTableWithOrder('S4', { paymentStatus: 'confirmed' });
+  // Still awaiting payment -- not collected, but must still count toward
+  // outstanding (a cancelled order's own value is deliberately excluded).
+  await newTableWithOrder('S5', { paymentStatus: 'pending' });
   // A non-dinein order must never leak into these numbers.
   await pool.query(
     `insert into "order" (customer_id, reference, branch_id, channel, fulfilment_type, engine_state, status, total, payment_status, payment_method, cash_collected)
@@ -74,8 +77,9 @@ async function main() {
   assert(stats.transfer === 1000, `transfer collected counted (got ${stats.transfer})`);
   assert(stats.other === 1000, `auto-confirmed (no payment_method) counted as "other" (got ${stats.other})`);
   assert(stats.collected === 4000, `total collected is dine-in only, excludes the NGN5000 online order (got ${stats.collected})`);
+  assert(stats.outstanding === 1000, `the still-pending table counts as outstanding, excludes the paid online order (got ${stats.outstanding})`);
   assert(stats.cash + stats.card + stats.transfer + stats.other === stats.collected, 'the four figures sum to exactly the total, no drift');
-  assert(stats.tablesServed === 4, `4 dine-in tables counted today (got ${stats.tablesServed})`);
+  assert(stats.tablesServed === 5, `5 dine-in tables counted today (got ${stats.tablesServed})`);
 
   // === 2. Cancelling a table's ONLY order closes the table automatically ===
   const solo = await newTableWithOrder('C1');

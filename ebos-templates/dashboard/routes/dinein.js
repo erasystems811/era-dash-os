@@ -203,6 +203,7 @@ router.get('/stats/today', async (req, res) => {
   const { rows } = await pool.query(
     `select count(*) as orders,
             coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as collected,
+            coalesce(sum(total) filter (where status != 'cancelled'), 0) as total_value,
             coalesce(sum(cash_collected) filter (where payment_method = 'cash'), 0) as cash,
             coalesce(sum(total) filter (where payment_method = 'card' and payment_status in ('confirmed', 'accepted')), 0) as card,
             coalesce(sum(total) filter (where payment_method = 'transfer' and payment_status in ('confirmed', 'accepted')), 0) as transfer,
@@ -221,6 +222,10 @@ router.get('/stats/today', async (req, res) => {
     orders: Number(r.orders),
     tablesServed: Number(r.tables),
     collected,
+    // Same definition /orders/stats/today already uses -- every today
+    // order's own total minus what's actually landed, a cancelled order's
+    // value excluded so it's never counted as still-owed forever.
+    outstanding: Math.max(0, Number(r.total_value) - collected),
     cash,
     card,
     transfer,

@@ -229,6 +229,10 @@ export default function InHouse() {
               <strong className="mono">{naira(stats.collected)}</strong>
             </div>
             <div className="fig">
+              <span>Outstanding</span>
+              <strong className="mono">{naira(stats.outstanding)}</strong>
+            </div>
+            <div className="fig">
               <span>Cash</span>
               <strong className="mono">{naira(stats.cash)}</strong>
             </div>

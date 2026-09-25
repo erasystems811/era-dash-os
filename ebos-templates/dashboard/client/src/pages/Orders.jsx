@@ -478,6 +478,10 @@ export default function Orders() {
               <strong className="mono">{naira(inHouseStats.collected)}</strong>
             </div>
             <div className="fig">
+              <span>Outstanding</span>
+              <strong className="mono">{naira(inHouseStats.outstanding)}</strong>
+            </div>
+            <div className="fig">
               <span>Cash</span>
               <strong className="mono">{naira(inHouseStats.cash)}</strong>
             </div>
