@@ -11,7 +11,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderComplaintFormPage } from '../engine/complaint-form-template.js';
 import { resolveMenuBranding } from './dinein-menu.js';
-import { logInboundWebsiteMessage, handover, currentDineinSession } from '../engine/flow.js';
+import { logInboundWebsiteMessage, handover, currentDineinSession, logMetric } from '../engine/flow.js';
 
 export const router = express.Router();
 
@@ -58,6 +58,14 @@ router.post('/:token/submit', async (req, res) => {
     `insert into complaint (customer_id, branch_id, message) values ($1, $2, $3)`,
     [customer.id, customer.branch_id, text]
   );
+  // Chidera, 2026-09-25: "make sure complaint and abandonment are
+  // functioning" -- this insert above is the real, authoritative moment a
+  // complaint exists (the same row the dashboard's own Complaints tab
+  // lists) -- see business_metrics_log's own migration (0064) for why
+  // this is logged permanently here, immune to a later conversation
+  // delete, instead of at engine/flow.js's earlier intent-classification
+  // moment (a customer sent this link doesn't always actually submit it).
+  await logMetric('complaint');
   await handover(
     customer,
     'Customer submitted a complaint via the complaint form',
