@@ -50,6 +50,15 @@ async function main() {
   assert(complaintRows[0].message === 'My food arrived cold.', 'with the customer\'s real words');
   assert(complaintRows[0].status === 'open', 'starting in the open status');
 
+  // Chidera, 2026-09-25: "make sure complaint and abandonment are
+  // functioning" -- real bug found: business_metrics_log used to log
+  // 'complaint' at AI intent-classification time (engine/flow.js, before
+  // this form even existed), never here at the real submission -- so a
+  // real complaint like this one was never actually counted on My
+  // Dashboard. Now logged right here, the one moment that's actually true.
+  const { rows: metricRows } = await pool.query(`select count(*)::int as count from business_metrics_log where metric = 'complaint'`);
+  assert(metricRows[0].count === 1, `the real complaint submission logged exactly one 'complaint' metric (got ${metricRows[0].count})`);
+
   // === 2. It shows up on the dashboard's own /complaints list. ===
   const list = await (await authed(`${BASE}/api/complaints`)).json();
   const listedComplaint = list.find((c) => c.id === complaintRows[0].id);

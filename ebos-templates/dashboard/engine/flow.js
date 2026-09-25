@@ -153,7 +153,12 @@ async function logMessage({ customerId, direction, channel, sender, body, trigge
   messageEvents.emit('message', { customerId });
 }
 
-async function logMetric(metric) {
+// Exported so routes/complaint.js can log the real thing it creates (a
+// row in `complaint`) at the one place that's actually true, instead of
+// this file guessing at complaint intent before a customer even submits
+// anything -- see this file's own complaint-metric comment further down
+// for the full story.
+export async function logMetric(metric) {
   await pool.query(`insert into business_metrics_log (metric) values ($1)`, [metric]);
 }
 
@@ -5339,12 +5344,16 @@ export async function handlePendingBatch(customer, text) {
 
   const { intent, wantsHuman } = isPureGreeting(text) ? { intent: 'greeting', wantsHuman: false } : await classifyIntent(text);
   if (wantsHuman || intent === 'complaint') {
-    if (intent === 'complaint') {
-      // See business_metrics_log's own migration (0064) -- permanent, so a
-      // later conversation delete can't retroactively un-count this month's
-      // complaint rate.
-      await logMetric('complaint');
-    }
+    // Chidera, 2026-09-25: "make sure complaint and abandonment are
+    // functioning" -- real bug found: this used to log the 'complaint'
+    // metric right here, the moment AI classified the message as a
+    // complaint -- but that's only ever an intent, not a real complaint.
+    // sendComplaintLink below just sends the customer a link to the real
+    // complaint FORM (routes/complaint.js); they might never actually
+    // fill it out. Logging here counted intent, not the thing the
+    // dashboard's own Complaints tab actually lists -- a real row in the
+    // `complaint` table, which routes/complaint.js's own submit handler
+    // now logs instead, at the one moment that's actually true.
     await sendComplaintLink(customer);
     return;
   }
