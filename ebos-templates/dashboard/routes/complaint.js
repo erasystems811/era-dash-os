@@ -11,7 +11,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderComplaintFormPage } from '../engine/complaint-form-template.js';
 import { resolveMenuBranding } from './dinein-menu.js';
-import { logInboundWebsiteMessage, handover } from '../engine/flow.js';
+import { logInboundWebsiteMessage, handover, currentDineinSession } from '../engine/flow.js';
 
 export const router = express.Router();
 
@@ -24,12 +24,20 @@ router.get('/:token', async (req, res) => {
   const customer = await resolveCustomer(req.params.token);
   if (!customer) return res.status(404).send('Link not found.');
   const branding = await resolveMenuBranding();
+  // Chidera, 2026-09-25: "the feedback web page and complaint web page
+  // should have the back to chat thing too." Table-scoped for a dine-in
+  // guest currently mid a real table session, same as feedback's own fix
+  // -- otherwise this would hand them back to the generic online thread
+  // instead of their own table's separate one.
+  const dineinSession = await currentDineinSession(customer);
+  let chatUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${req.params.token}` : null;
+  if (chatUrl && dineinSession) chatUrl += `?table=${dineinSession.qr_token}`;
   res.set('Content-Type', 'text/html').send(
     renderComplaintFormPage({
       businessName: branding.business_name || '',
       submitted: false,
       submitPath: `/c/${req.params.token}/submit`,
-      chatUrl: process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${req.params.token}` : null,
+      chatUrl,
     })
   );
 });

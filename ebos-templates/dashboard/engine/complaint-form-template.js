@@ -30,6 +30,7 @@ export function renderComplaintFormPage({ businessName, submitted, submitPath, c
   .done{text-align:center;padding:70px 20px}
   .done h2{font-family:"Fraunces",serif;font-size:22px;margin-bottom:8px}
   .done p{color:var(--mid);font-size:14px}
+  .done .backToChat{display:inline-block;margin-top:18px;background:var(--wa);color:#fff;font-family:"Inter",sans-serif;font-weight:600;font-size:14px;padding:11px 22px;border-radius:999px;text-decoration:none}
 </style></head>
 <body>
 <div class="wrap">
@@ -72,8 +73,14 @@ if (submitBtn) {
       });
       const data = await res.json().catch(function () { return {}; });
       if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+      // Chidera, 2026-09-25: "the feedback web page and complaint web page
+      // should have the back to chat thing too" -- a real visible button,
+      // not just the invisible auto-redirect, in case that's ever blocked
+      // or the guest wants to tap it themselves.
       document.getElementById('content').innerHTML = '<div class="done"><h2>Thank you!</h2><p>We\\'ve received your message'
-        + (CHAT_URL ? ' and will get back to you shortly.<br>Taking you back to the chat\\u2026' : ' and will get back to you shortly.') + '</p></div>';
+        + (CHAT_URL ? ' and will get back to you shortly.<br>Taking you back to the chat\\u2026' : ' and will get back to you shortly.') + '</p>'
+        + (CHAT_URL ? '<a class="backToChat" href="' + CHAT_URL + '">Back to chat</a>' : '')
+        + '</div>';
       // Chidera, 2026-09-24: same "hand them back, don't leave them
       // stranded" reasoning as the invoice/feedback pages -- back to the
       // SAME chat tab, not real WhatsApp, since that's where they came

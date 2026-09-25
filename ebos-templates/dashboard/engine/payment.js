@@ -118,8 +118,8 @@ export async function initializeOrderPaymentPaystackTransaction({ orderPayment, 
 // findOrderByPaymentReference below and buildPayLine's own paymentUrl
 // handling both resolve either provider identically, no special-casing
 // needed anywhere downstream.
-export async function initializeMonnifyTransaction({ order, customer, amount }) {
-  const result = await callMonnifyCheckoutLink({ customer, amount, referencePrefix: order.reference });
+export async function initializeMonnifyTransaction({ order, customer, amount, callbackUrl }) {
+  const result = await callMonnifyCheckoutLink({ customer, amount, referencePrefix: order.reference, redirectUrl: callbackUrl });
   if (!result) return null;
   await pool.query('update "order" set payment_reference = $1, payment_link_url = $2 where id = $3', [result.paymentReference, result.checkoutUrl, order.id]);
   return result.checkoutUrl;

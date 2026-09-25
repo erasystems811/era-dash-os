@@ -2757,7 +2757,12 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       // details rendered into the text -- same "using the button below"
       // wording Paystack's own branch uses, same paymentUrl handling in
       // sendPaymentInstructions (sendPaymentLinkButton), no special-casing.
-      const url = await initializeMonnifyTransaction({ order, customer, amount });
+      // Chidera, 2026-09-25: "why isnt customer auto taken back to web
+      // chat after payment with monify?" -- same callbackUrl fix
+      // Paystack's own branch below already has.
+      const monnifyMenuToken = await ensureMenuToken(customer);
+      const monnifyCallbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${monnifyMenuToken}` : undefined;
+      const url = await initializeMonnifyTransaction({ order, customer, amount, callbackUrl: monnifyCallbackUrl });
       if (url) {
         return {
           payLine: `Please pay NGN ${amountLabel} using the button below.\n\nYour order moves to preparation automatically the moment payment goes through -- no need to send proof.`,

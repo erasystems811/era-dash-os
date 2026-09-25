@@ -34,6 +34,7 @@ function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 let initTransactionCallCount = 0;
 let bankTransferCallCount = 0;
 const generatedReferences = [];
+let lastInitTransactionBody = null;
 
 async function main() {
   const realFetch = global.fetch;
@@ -46,6 +47,7 @@ async function main() {
       initTransactionCallCount += 1;
       const body = JSON.parse(opts.body);
       generatedReferences.push(body.paymentReference);
+      lastInitTransactionBody = body;
       return new Response(
         JSON.stringify({ responseBody: { transactionReference: `TXN-${body.paymentReference}`, checkoutUrl: `https://sandbox.monnify.com/checkout/${body.paymentReference}` } }),
         { status: 200 }
@@ -101,6 +103,13 @@ async function main() {
     const { rows: orderAfterInit } = await pool.query(`select payment_reference, payment_link_url from "order" where id = $1`, [order.id]);
     assert(orderAfterInit[0].payment_reference === generatedReferences[0], "the order's own payment_reference matches what Monnify was actually given");
     assert(orderAfterInit[0].payment_link_url?.startsWith('https://sandbox.monnify.com/checkout/'), 'a real, tappable checkout link is saved on the order -- same payment_link_url column Paystack uses');
+
+    // Chidera, 2026-09-25: "why isnt customer auto taken back to web chat
+    // after payment with monify?" -- same callback_url fix Paystack's own
+    // initializePaystackTransaction already had; Monnify's init-transaction
+    // call never got the same redirectUrl parameter.
+    const token = await flow.ensureMenuToken(customer);
+    assert(lastInitTransactionBody?.redirectUrl === `http://localhost:3960/wa/${token}`, `Monnify's own init-transaction call now carries a real redirectUrl back to the web chat (got ${lastInitTransactionBody?.redirectUrl})`);
 
     // === 2. THE REAL ASK: the real Monnify webhook still auto-confirms payment off that same reference ===
     const reference = orderAfterInit[0].payment_reference;

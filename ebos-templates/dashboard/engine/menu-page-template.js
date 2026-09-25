@@ -120,7 +120,7 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
      chat to go back to (webChatPath, same gate the post-submit
      auto-redirect below already uses) -- a customer who reached this page
      some other way (a fresh WhatsApp CTA, Instagram) sees nothing extra. */
-  .back-to-chat{display:inline-flex;align-items:center;gap:2px;color:#B3A597;font-size:12.5px;text-decoration:none;margin-bottom:6px}
+  .back-to-chat{display:inline-flex;align-items:center;gap:2px;background:rgba(255,255,255,.16);color:#fff;font-weight:600;font-size:12.5px;text-decoration:none;padding:5px 12px;border-radius:999px;margin-bottom:8px}
   .back-to-chat:active{opacity:.7}
   .scroll{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain}
   .cats{position:sticky;top:0;background:#fff;display:flex;gap:7px;padding:11px 14px;overflow-x:auto;border-bottom:1px solid var(--line);z-index:3;-webkit-overflow-scrolling:touch}
