@@ -75,6 +75,7 @@ const Feedback = lazyWithRetry(() => import('./pages/Feedback.jsx'));
 const Customers = lazyWithRetry(() => import('./pages/Customers.jsx'));
 const Crm = lazyWithRetry(() => import('./pages/Crm.jsx'));
 const Finance = lazyWithRetry(() => import('./pages/Finance.jsx'));
+const Pos = lazyWithRetry(() => import('./pages/Pos.jsx'));
 
 // Every path a PIN-tier (Tier 3) session is allowed to land on -- matches
 // Layout.jsx's PIN_NAV exactly. Not just a nav-hiding trick: this actually
@@ -137,6 +138,7 @@ export default function App() {
           <Route path="/customers" element={<Customers />} />
           <Route path="/crm" element={<Crm />} />
           <Route path="/finance" element={<Finance />} />
+          <Route path="/pos" element={<Pos />} />
           <Route path="/in-house" element={<InHouse />} />
           <Route path="/conversations" element={<Conversations />} />
           <Route path="/conversations/:id" element={<ConversationDetail />} />

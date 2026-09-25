@@ -42,12 +42,13 @@ const BASE_NAV = [
   { to: '/documents', label: 'Documents' },
   { to: '/feedback', label: 'Feedback' },
   // Chidera, 2026-09-24: "the way its looking we need a finance dashboard"
-  // -- was the POS tab, spliced in below only once Moniepoint POS sync was
-  // switched on (addOnItems' own old posEnabled entry). Cash/revenue/
-  // outstanding apply to every business regardless of whether Moniepoint
-  // sync is even in use, so this is core nav now, not an add-on -- the POS
-  // terminal-sales section inside Finance.jsx still gates itself on that
-  // same toggle for its own content.
+  // -- was the POS tab, briefly folded into this page the next day, then
+  // split back out (2026-09-25: "seperate pos and finance dashboard
+  // then, i dont think pos sync is even possible") -- POS is its own
+  // add-on tab again below, gated on posEnabled same as Delivery/Voice/
+  // Dine-in/CRM. Cash/revenue/outstanding apply to every business
+  // regardless of whether Moniepoint sync is even in use, so Finance
+  // itself stays core nav, not an add-on.
   { to: '/finance', label: 'Finance' },
   { to: '/staff', label: 'Roles and numbers' },
   { to: '/activity-log', label: 'Activity log' },
@@ -103,6 +104,11 @@ export default function Layout() {
   // Customer database (CRM) add-on -- same "genuinely inert while off"
   // rule as the other add-ons above.
   const [crmEnabled, setCrmEnabled] = useState(false);
+  // POS sync (Moniepoint terminal transactions) -- Chidera, 2026-09-25:
+  // "seperate pos and finance dashboard then" -- back to its own add-on
+  // tab (same shape as before the 2026-09-24 Finance-dashboard merge),
+  // same "genuinely inert while off" rule as the other add-ons above.
+  const [posEnabled, setPosEnabled] = useState(false);
   const location = useLocation();
   // Zero DOM below one branch, not just hidden -- a single-location
   // business must not be able to tell this feature exists at all. Also
@@ -122,6 +128,7 @@ export default function Layout() {
     // crmEnabled toggle covers both; there's no separate add-on for just
     // one of them.
     ...(crmEnabled ? [{ to: '/crm', label: 'CRM' }, { to: '/customers', label: 'Customers' }] : []),
+    ...(posEnabled ? [{ to: '/pos', label: 'POS' }] : []),
   ];
   // Staff/Settings/Activity log stay owner-or-manager-visible in the nav
   // even when branch-locked; requireEditorApi on their write routes already
@@ -161,6 +168,7 @@ export default function Layout() {
     api.get('/voice-config').then((c) => setVoiceEnabled(Boolean(c?.enabled)));
     api.get('/dinein-config').then((c) => setDineinEnabled(Boolean(c?.enabled)));
     api.get('/crm-config').then((c) => setCrmEnabled(Boolean(c?.enabled)));
+    api.get('/pos-sync-config').then((c) => setPosEnabled(Boolean(c?.enabled)));
   }, []);
 
   // A route change is the clearest signal the user picked something on
