@@ -1,6 +1,6 @@
-// Chidera, 2026-09-24: "the monnify account that was sent is unavailable
-// and invalid and cant it be a link like paystack? so the auto confirm can
-// be obvious." Monnify's own dynamic bank-transfer ACCOUNT (a second
+// Chidera: "the monnify account that was sent is unavailable and invalid
+// and cant it be a link like paystack? so the auto confirm can be
+// obvious." Monnify's own dynamic bank-transfer ACCOUNT (a second
 // bank-transfer/init-payment call chained after init-transaction) kept
 // coming back unusable live -- replaced with the real hosted checkout link
 // init-transaction's own response already carries (checkoutUrl), same
@@ -8,14 +8,17 @@
 // returns a real tappable paymentUrl (not account details rendered into
 // text), the order's payment_link_url/payment_reference are saved exactly
 // like Paystack's, and the real Monnify webhook still auto-confirms
-// payment off that same reference, unchanged.
+// payment off that same reference, unchanged. (Ported from the same fix
+// on main -- this branch's own monnify-api.js/payment.js had drifted back
+// to the old account-only flow since era-demo started running this branch
+// instead of main.)
 import crypto from 'node:crypto';
 
 process.env.EBOS_TEST_PGLITE = '1';
 process.env.EBOS_SANDBOX = '1';
-process.env.PORT = '3956';
+process.env.PORT = '3960';
 process.env.SESSION_SECRET = 'testsecret';
-process.env.PUBLIC_URL = 'http://localhost:3956';
+process.env.PUBLIC_URL = 'http://localhost:3960';
 process.env.EBOS_ADMIN_TOKEN = 'testadmin';
 process.env.MONNIFY_API_KEY = 'MK_TEST_FAKEKEY';
 process.env.MONNIFY_SECRET_KEY = 'fake_monnify_secret';
@@ -31,6 +34,7 @@ function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 let initTransactionCallCount = 0;
 let bankTransferCallCount = 0;
 const generatedReferences = [];
+let lastInitTransactionBody = null;
 
 async function main() {
   const realFetch = global.fetch;
@@ -43,6 +47,7 @@ async function main() {
       initTransactionCallCount += 1;
       const body = JSON.parse(opts.body);
       generatedReferences.push(body.paymentReference);
+      lastInitTransactionBody = body;
       return new Response(
         JSON.stringify({ responseBody: { transactionReference: `TXN-${body.paymentReference}`, checkoutUrl: `https://sandbox.monnify.com/checkout/${body.paymentReference}` } }),
         { status: 200 }
@@ -74,7 +79,7 @@ async function main() {
 
     const { rows: prodRows } = await pool.query(`select id, price from product where name = 'Jollof Rice and Chicken'`);
     const jollof = prodRows[0];
-    const customer = await flow.findOrCreateCustomer({ phoneNumber: '2348012369001', channel: 'whatsapp' });
+    const customer = await flow.findOrCreateCustomer({ phoneNumber: '2348012369201', channel: 'whatsapp' });
     const { rows: orderRows } = await pool.query(
       `insert into "order" (customer_id, reference, fulfilment_type, total, status, payment_status, engine_state)
        values ($1, 'REF-MONNIFYLINK', 'pickup', $2, 'new', 'pending', 'confirm_payment') returning *`,
@@ -98,6 +103,13 @@ async function main() {
     const { rows: orderAfterInit } = await pool.query(`select payment_reference, payment_link_url from "order" where id = $1`, [order.id]);
     assert(orderAfterInit[0].payment_reference === generatedReferences[0], "the order's own payment_reference matches what Monnify was actually given");
     assert(orderAfterInit[0].payment_link_url?.startsWith('https://sandbox.monnify.com/checkout/'), 'a real, tappable checkout link is saved on the order -- same payment_link_url column Paystack uses');
+
+    // Chidera, 2026-09-25: "why isnt customer auto taken back to web chat
+    // after payment with monify?" -- same callback_url fix Paystack's own
+    // initializePaystackTransaction already had; Monnify's init-transaction
+    // call never got the same redirectUrl parameter.
+    const token = await flow.ensureMenuToken(customer);
+    assert(lastInitTransactionBody?.redirectUrl === `http://localhost:3960/wa/${token}`, `Monnify's own init-transaction call now carries a real redirectUrl back to the web chat (got ${lastInitTransactionBody?.redirectUrl})`);
 
     // === 2. THE REAL ASK: the real Monnify webhook still auto-confirms payment off that same reference ===
     const reference = orderAfterInit[0].payment_reference;

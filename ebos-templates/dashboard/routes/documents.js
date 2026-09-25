@@ -12,7 +12,7 @@ async function loadOrderForDocument(orderId) {
     `select p.name, oi.quantity, oi.price from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`,
     [orderId]
   );
-  const { rows: customerRows } = await pool.query('select name, phone_number, address from customers where id = $1', [order.customer_id]);
+  const { rows: customerRows } = await pool.query('select name, phone_number, address, menu_token from customers where id = $1', [order.customer_id]);
   const { rows: bizRows } = await pool.query(
     'select name, address, phone_number, bank_name, bank_account_number, bank_account_name, logo_data_url, brand_color from business limit 1'
   );
@@ -31,7 +31,7 @@ async function loadTopupForDocument(topupId) {
   const { rows: orderRows } = await pool.query('select * from "order" where id = $1', [topup.order_id]);
   const order = orderRows[0];
   if (!order) return null;
-  const { rows: customerRows } = await pool.query('select name, phone_number, address from customers where id = $1', [order.customer_id]);
+  const { rows: customerRows } = await pool.query('select name, phone_number, address, menu_token from customers where id = $1', [order.customer_id]);
   const { rows: bizRows } = await pool.query(
     'select name, address, phone_number, bank_name, bank_account_number, bank_account_name, logo_data_url, brand_color from business limit 1'
   );
@@ -109,6 +109,16 @@ function documentPage({ title, business, customer, order, items }) {
       ? `<tr><td colspan="3">Delivery fee</td><td>${Number(order.delivery_fee).toFixed(2)}</td></tr>`
       : '';
 
+  // Chidera, 2026-09-23, live report: "when i open an invoice it seems
+  // like im stuck i cant go back to the web whatsapp i have to go back to
+  // main chat." This page is reached by tapping the invoice bubble's link
+  // ON the /wa chat page -- a normal same-tab navigation, which replaces
+  // the chat page in whatever browser (often WhatsApp's own in-app one)
+  // is showing it, with nothing here pointing back. Only shown when this
+  // customer actually has a menu_token (i.e. genuinely reached via the
+  // web-chat flow) -- a customer who got their real invoice PDF over
+  // WhatsApp/Instagram directly has no chat page to return to, so no link
+  // that would go nowhere useful.
   return `<!doctype html>
 <html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} ${esc(order.reference)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -136,9 +146,27 @@ function documentPage({ title, business, customer, order, items }) {
   .box .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; margin-bottom: 8px; }
   .pay-btn { display: inline-block; margin-top: 10px; background: ${brand}; color: ${onBrand}; text-decoration: none; padding: 9px 16px; border-radius: 999px; font-weight: 600; font-size: 13.5px; }
   .footer { text-align: center; color: var(--mid); font-size: 12px; margin-top: 32px; }
+  /* Chidera: "let my invoices now have a powered by era systems imprint
+     like a branking not too shouty or attention seeking." Small, muted,
+     below the business's own footer -- their own name/address/phone stays
+     the primary thing a customer reads, this is a quiet mark underneath
+     it, not a second brand competing for attention. Ported from main
+     (fd5a018) -- this branch's own routes/documents.js never had it. */
   .era-mark { text-align: center; color: var(--mid); font-size: 10.5px; letter-spacing: 0.03em; margin-top: 8px; opacity: 0.65; }
+  /* Chidera, 2026-09-24: "that back to chat in invoice is not visibly
+     obvious." Was plain small gray text, easy to miss above the header --
+     a real chip button now, same white-card-on-paper weight as .bill-to/
+     .box already use elsewhere on this page, so it actually reads as a
+     tappable control. */
+  .back-link { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 18px; background: #fff; border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-weight: 600; font-size: 13.5px; padding: 9px 16px 9px 12px; border-radius: 999px; }
+  .back-link:active { background: var(--paper); }
 </style></head>
 <body>
+  ${
+    customer.menu_token && process.env.PUBLIC_URL
+      ? `<a class="back-link" href="${esc(process.env.PUBLIC_URL)}/wa/${esc(customer.menu_token)}">&#8249; Back to chat</a>`
+      : ''
+  }
   <div class="header">
     <div>
       ${business.logo_data_url ? `<img class="logo" src="${esc(business.logo_data_url)}" alt="${esc(business.name)}">` : ''}

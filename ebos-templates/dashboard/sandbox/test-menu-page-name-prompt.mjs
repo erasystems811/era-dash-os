@@ -76,12 +76,14 @@ async function main() {
   const html3 = await page3.text();
   assert(html3.includes('SHOW_NAME_PROMPT = false'), 'name prompt stops showing once a name is on file');
 
-  // handleGreeting reads it back -- "Hello [Name]!" -- via a real inbound
-  // "hi" message (handleInboundMessage's own debounce, same pattern as
-  // sandbox/test-conversation.mjs), not calling the internal function
-  // directly (it isn't exported). A FRESH customer, not the one above --
-  // that one already has an in-progress order/conversation, so "hi" from
-  // them gets a context-aware reply, not the cold-open greeting.
+  // sendStartOrderLink reads it back -- "Welcome to <biz>, [Name]! Tap
+  // below to get started." (Chidera, 2026-09-25: "that first text should
+  // still have the welcome to <restaurant name>, tap below to get
+  // started") -- via a real inbound "hi" message (handleInboundMessage's
+  // own debounce, same pattern as sandbox/test-conversation.mjs). A FRESH
+  // customer, not the one above -- that one already has an in-progress
+  // order/conversation, so "hi" from them gets a context-aware reply, not
+  // the cold-open greeting.
   const greetCustomer = await flow.findOrCreateCustomer({ phoneNumber: '2348088880000', channel: 'whatsapp' });
   await pool.query('update customers set name = $1 where id = $2', ['Ada', greetCustomer.id]);
   await flow.handleInboundMessage({ phoneNumber: '2348088880000', text: 'hi', channel: 'whatsapp' });
@@ -90,7 +92,7 @@ async function main() {
     `select body from message where customer_id = $1 and trigger = 'greeting' order by created_at desc limit 1`,
     [greetCustomer.id]
   );
-  assert(greetRows[0]?.body?.startsWith('Hello Ada!'), 'bot greeting actually uses the saved name');
+  assert(greetRows[0]?.body?.includes(', Ada!'), 'bot greeting actually uses the saved name');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

@@ -329,6 +329,18 @@ create unique index if not exists customers_menu_token_idx on customers (menu_to
 -- normal WhatsApp flow).
 alter table customers add column if not exists web_chat_active_at timestamptz;
 
+-- Chidera, 2026-09-24: "the customer should get a one time we are trying
+-- to reach out to you tap here to text... if they text bare again, leave
+-- it stay silent." Shared by sendStaffReply and handlePendingBatch's own
+-- bare-WhatsApp redirect -- see 0063_chat_redirect_sent_at.sql.
+alter table customers add column if not exists chat_redirect_sent_at timestamptz;
+-- migrations/0064_chat_redirect_count.sql -- "after the first greeting
+-- there should be a second resend... before silent." How many consecutive
+-- pings have gone out since the customer's last real chat visit -- resets
+-- to 0 on a genuine visit, so this only ever counts a run, never
+-- accumulates across visits.
+alter table customers add column if not exists chat_redirect_count integer not null default 0;
+
 create table if not exists product (
   id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -977,7 +989,11 @@ alter table message add column if not exists interactive jsonb;
 -- sends (engine/flow.js's logMessage), written once per send and never
 -- deleted by anything, customer-delete included. No customer_id/body/
 -- content at all on purpose -- this is a billing count, not a second copy
--- of the conversation.
+-- of the conversation. (This branch's own equivalent migration, 0065,
+-- built the identical table independently before this merge -- both
+-- files' DDL is the same idempotent create, kept as two files rather than
+-- one renumbered, so neither client's already-applied migration history
+-- breaks.)
 create table if not exists whatsapp_send_log (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz not null default now()
@@ -1232,6 +1248,17 @@ create table if not exists table_session (
 create unique index if not exists table_session_one_open_idx on table_session (table_id) where closed_at is null;
 create index if not exists table_session_branch_idx on table_session (branch_id);
 
+-- migrations/0066_message_table_session.sql -- "let table dine in and
+-- online delivery have their complete different web chat so a person can
+-- be doing both at same time in 2 different web chats." NULL means "the
+-- existing /wa/:token online thread"; a real id means "this bubble
+-- belongs to that table's own chat thread" (routes/dinein-menu.js's
+-- /t/:qrToken/chat) -- table_session comes after message in this file's
+-- own declaration order, so this alter lives here instead of inline on
+-- message's own create table.
+alter table message add column if not exists table_session_id uuid references table_session(id);
+create index if not exists message_table_session_idx on message (table_session_id) where table_session_id is not null;
+
 -- Chidera, 2026-09-20: joint dine-in ordering -- who's currently part of
 -- an open table sitting, recorded the first time each guest actually
 -- interacts with the table (scans, or the shared order page loads for
@@ -1314,6 +1341,26 @@ create table if not exists order_feedback (
 );
 create unique index if not exists order_feedback_order_idx on order_feedback (order_id);
 create index if not exists order_feedback_branch_created_idx on order_feedback (branch_id, created_at desc);
+
+-- Chidera, 2026-09-24: "there is also nowhere for complaint to go to,
+-- there is no database table" -- a complaint submitted via routes/
+-- complaint.js used to only ever exist as a real WhatsApp handover() alert
+-- (ephemeral, no persistent record). order_id is deliberately absent --
+-- a complaint doesn't require an existing order (a customer can complain
+-- before ever placing one).
+create table if not exists complaint (
+  id uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references customers(id),
+  branch_id uuid references branch(id),
+  message text not null,
+  status text not null default 'open' check (status in ('open', 'replied', 'resolved')),
+  staff_reply text,
+  replied_by_staff_id uuid references staff(id),
+  replied_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists complaint_customer_idx on complaint (customer_id);
+create index if not exists complaint_status_idx on complaint (status);
 
 -- A dine-in order's own channel/fulfilment shape -- settled at the table,
 -- never delivered or collected, no payment confirmation step.
@@ -1467,6 +1514,11 @@ create table if not exists payment_config (
 -- start preparing (kitchen/ops), separate from handover_alerts (customer-
 -- service escalations). Chidera, 2026-09-16.
 alter table staff add column if not exists order_alerts boolean not null default false;
+
+-- Staff PWA + push notifications (0061_staff_push_notifications.sql) --
+-- same shape as rider.push_subscription above, reusing the ERA-wide VAPID
+-- keys already configured for the rider app.
+alter table staff add column if not exists push_subscription jsonb;
 
 -- ERA's own prepaid message wallet (engine/wallet.js) -- WhatsApp gives no
 -- self-service spending cap, so this enforces one in code. Deliberately

@@ -8,7 +8,7 @@
 // cta_url button (engine/flow.js's sendFeedbackRequest), no Meta approval
 // needed for any of it. Same warm paper/Fraunces/Inter app-shell as those
 // two pages, not a bare form.
-export function renderFeedbackFormPage({ businessName, reference, submitted, submitPath, waNumber }) {
+export function renderFeedbackFormPage({ businessName, reference, submitted, submitPath, waNumber, webChatPath = null }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
   return `<!doctype html>
 <html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -40,6 +40,7 @@ export function renderFeedbackFormPage({ businessName, reference, submitted, sub
   .done{text-align:center;padding:70px 20px}
   .done h2{font-family:"Fraunces",serif;font-size:22px;margin-bottom:8px}
   .done p{color:var(--mid);font-size:14px}
+  .done .backToChat{display:inline-block;margin-top:18px;background:var(--wa);color:#fff;font-family:"Inter",sans-serif;font-weight:600;font-size:14px;padding:11px 22px;border-radius:999px;text-decoration:none}
 </style></head>
 <body>
 <div class="wrap">
@@ -47,7 +48,9 @@ export function renderFeedbackFormPage({ businessName, reference, submitted, sub
   <div id="content">
     ${
       submitted
-        ? `<div class="done"><h2>Thank you!</h2><p>You've already rated this order.</p></div>`
+        ? `<div class="done"><h2>Thank you!</h2><p>You've already rated this order.</p>${
+            webChatPath ? `<br><a class="backToChat" href="${escapeHtml(webChatPath)}">Back to chat</a>` : ''
+          }</div>`
         : `
     <h1>Rate your order</h1>
     <p class="sub">Tap to rate each one, 1 to 5 stars.</p>
@@ -64,6 +67,7 @@ export function renderFeedbackFormPage({ businessName, reference, submitted, sub
 <script>
 const SUBMIT_PATH = ${JSON.stringify(submitPath)};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
+const WEB_CHAT_PATH = ${JSON.stringify(webChatPath)};
 const ratings = { experience: 0, food: 0, service: 0 };
 document.querySelectorAll('.stars').forEach(function (row) {
   const field = row.dataset.field;
@@ -99,14 +103,20 @@ if (submitBtn) {
       });
       const data = await res.json().catch(function () { return {}; });
       if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+      // Chidera, 2026-09-25: "after feedback take customer back to web
+      // chat ... feedback should have a back to chat thing." Prefers the
+      // real /wa/:token thread over bare WhatsApp (wa.me) now -- a
+      // visible button, not just the auto-redirect, in case that's ever
+      // blocked or the guest wants to tap it themselves.
       document.getElementById('content').innerHTML = '<div class="done"><h2>Thank you!</h2><p>Your feedback has been sent'
-        + (WA_DIGITS ? '.<br>Taking you back to the chat\\u2026' : '.') + '</p></div>';
-      // Hands the guest straight back to the WhatsApp thread instead of
-      // leaving them stranded here -- same wa.me trick the web menu page
-      // already uses (WhatsApp's own in-app browser intercepts it and
-      // swaps back to the chat). Chidera 2026-09-11: "after feedback, take
-      // them back to chat automatically."
-      if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
+        + (WEB_CHAT_PATH || WA_DIGITS ? '.<br>Taking you back to the chat\\u2026' : '.') + '</p>'
+        + (WEB_CHAT_PATH ? '<a class="backToChat" href="' + WEB_CHAT_PATH + '">Back to chat</a>' : '')
+        + '</div>';
+      if (WEB_CHAT_PATH) {
+        setTimeout(function () { window.location.href = WEB_CHAT_PATH; }, 900);
+      } else if (WA_DIGITS) {
+        setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
+      }
     } catch (err) {
       errEl.textContent = err.message || 'Could not submit -- please check your connection and try again.';
       errEl.style.display = 'block';

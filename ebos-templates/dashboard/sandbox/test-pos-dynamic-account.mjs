@@ -183,7 +183,7 @@ async function main() {
     const { rows: confirmedNow } = await pool.query(`select status, confirmed_at from order_payment where id = $1`, [payment.id]);
     assert(confirmedNow[0].status === 'confirmed' && confirmedNow[0].confirmed_at, 'THE REAL ASK: tapping "I\'ve sent it" auto-confirms instantly once Moniepoint shows it paid -- how Paystack does it');
     assert(!claimLogsAfter.some((l) => l.includes('2348099990003') && l.includes('POS transfer')), 'no staff alert sent this time -- it auto-confirmed, nothing for a person to check');
-    assert(claimLogsAfter.some((l) => l.includes('2348013330001') && l.includes('Payment received')), 'the customer gets their own real payment-received message, same as any other confirm path');
+    assert(claimLogsAfter.some((l) => l.includes('2348013330001') && (l.includes('Payment received') || l.includes('receipt'))), 'the customer gets their own real payment-received message, same as any other confirm path');
 
     console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
     process.exit(process.exitCode === 1 ? 1 : 0);

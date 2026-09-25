@@ -52,8 +52,9 @@
 // (engine/flow.js) never even asks delivery/pickup for one, so asking here
 // too would be a real, unwanted new question. Only routes/menu-page.js
 // (general ordering) passes askFulfilment: true.
-export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthdayPrompt, namePath, showNamePrompt, businessName, subtitle, coverPhotoVersion, waNumber, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
+export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthdayPrompt, namePath, showNamePrompt, businessName, subtitle, coverPhotoVersion, waNumber, channel = 'whatsapp', instagramHandle, webChatPath, products, pendingOrder, initialCategory, askFulfilment, deliveryMode, deliveryZones, deliveryQuotePath }) {
   const waDigits = String(waNumber || '').replace(/\D/g, '');
+  const igHandle = String(instagramHandle || '').replace(/^@/, '').trim();
   const lightProducts = products.map((p) => ({
     id: p.id,
     name: p.name,
@@ -114,6 +115,19 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
      quiet-mark shape as documents.js's own .era-mark for invoices -- never
      competing with the business's own name/subtitle above it. */
   .mtop .pb{font-size:9.5px;color:#B3A597;opacity:.6;letter-spacing:.3px;margin-top:2px}
+  /* Chidera, 2026-09-24: "the web menu should have a back to chat that
+     takes back to web chat." Chidera, 2026-09-25 (twice): "why cant i see
+     the back to chat on web menu" / "the back to chat should be like the
+     one in invoice and i dont want header too big like that" -- was
+     rendered INSIDE .mtop as thin/translucent text, easy to lose against
+     a cover-photo header and taller than the header used to be. Moved
+     outside the header entirely, same real white-card chip
+     documents.js's own .back-link already proved readable for invoices
+     ("that back to chat in invoice is not visibly obvious" -- fixed
+     there first) -- sits on the page's own paper background, never
+     inflating .mtop's own height at all. */
+  .back-to-chat{flex:0 0 auto;display:inline-flex;align-self:flex-start;align-items:center;gap:4px;margin:10px 16px 0;background:#fff;border:1px solid var(--line);color:var(--ink);text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px 8px 11px;border-radius:999px}
+  .back-to-chat:active{background:var(--paper)}
   .scroll{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain}
   .cats{position:sticky;top:0;background:#fff;display:flex;gap:7px;padding:11px 14px;overflow-x:auto;border-bottom:1px solid var(--line);z-index:3;-webkit-overflow-scrolling:touch}
   .cats::-webkit-scrollbar{display:none}
@@ -174,6 +188,7 @@ export function renderMenuPage({ reviewPath, pollPath, birthdayPath, showBirthda
   .primaryBtn{width:100%;padding:14px;border-radius:10px;border:0;background:var(--ink);color:#fff;font-family:inherit;font-size:15.5px;font-weight:600;touch-action:manipulation}
 </style></head>
 <body>
+${webChatPath ? `<a class="back-to-chat" href="${escapeHtml(webChatPath)}">&#8249; Back to chat</a>` : ''}
 <div class="mtop${coverPhotoVersion ? ' photo' : ''}" style="${headerStyle}"><div class="nm">${escapeHtml(businessName)}</div><div class="mt">${escapeHtml(subtitle)}</div><div class="pb">Powered by ERA Systems</div></div>
 <div class="scroll">
   <div id="cats" class="cats"></div>
@@ -247,6 +262,9 @@ const SHOW_BIRTHDAY_PROMPT = ${JSON.stringify(Boolean(showBirthdayPrompt))};
 const NAME_PATH = ${JSON.stringify(namePath || null)};
 const SHOW_NAME_PROMPT = ${JSON.stringify(Boolean(showNamePrompt))};
 const WA_DIGITS = ${JSON.stringify(waDigits)};
+const CHANNEL = ${JSON.stringify(channel)};
+const IG_HANDLE = ${JSON.stringify(igHandle)};
+const WEB_CHAT_PATH = ${JSON.stringify(webChatPath || null)};
 const ASK_FULFILMENT = ${JSON.stringify(Boolean(askFulfilment))};
 const DELIVERY_MODE = ${JSON.stringify(deliveryMode || null)};
 const DELIVERY_ZONES = ${JSON.stringify(deliveryZones || [])};
@@ -848,10 +866,28 @@ async function submitOrder() {
   }
   if (!res.ok) { goBtn.textContent = originalLabel; alert(data.error || 'Something went wrong.'); return; }
   document.body.innerHTML = '<div style="padding:60px 20px;text-align:center;font-family:Inter,sans-serif;"><h2 style="font-family:Fraunces,serif;">Order sent!</h2><p style="color:#6E6156;margin-top:8px;">Taking you back to the chat\\u2026</p></div>';
-  // Hands the guest straight back to the WhatsApp thread instead of
-  // leaving them stranded on this page -- wa.me is what WhatsApp's own
-  // in-app browser intercepts and swaps back to the chat for.
-  if (WA_DIGITS) setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
+  // Chidera, 2026-09-21, real live report: "after i closed web from
+  // instagram it took me on whatsapp not back to ig where i placed the
+  // order" -- this redirect was built WhatsApp-only from the start (wa.me
+  // is what WhatsApp's own in-app browser intercepts and swaps back to
+  // the chat for), then fired unconditionally for every channel once
+  // Instagram customers started reaching this same page tonight.
+  // ig.me/m/<handle> is Instagram's own equivalent -- opens a DM thread
+  // with the business account the same way wa.me does for WhatsApp.
+  // Voice has no browser session to redirect at all, so it's left with
+  // no redirect (falls through to just showing "Order sent!"), same as
+  // WhatsApp with no number configured has always done.
+  // Chidera, 2026-09-22: the web-chat page (routes/web-chat.js) sends
+  // customers here to actually pick items -- once they submit, they
+  // belong back in that chat transcript (the next bubble, confirm-order or
+  // straight to payment if autoConfirm fired), never out to real WhatsApp.
+  if (CHANNEL === 'website' && WEB_CHAT_PATH) {
+    setTimeout(function () { window.location.href = WEB_CHAT_PATH; }, 900);
+  } else if (CHANNEL === 'instagram' && IG_HANDLE) {
+    setTimeout(function () { window.location.href = 'https://ig.me/m/' + IG_HANDLE; }, 900);
+  } else if (CHANNEL !== 'instagram' && WA_DIGITS) {
+    setTimeout(function () { window.location.href = 'https://wa.me/' + WA_DIGITS; }, 900);
+  }
 }
 
 // Chidera, 2026-09-17: "why is it restoring previous delivery choice? it
@@ -1391,7 +1427,7 @@ setInterval(async function () {
 // language, same auto-confirm mechanism (order_payment +
 // matchPosTransactionToPayment), reached via routes/menu-page.js's
 // /:token/pay.
-export function renderSingleOrderPayPage({ businessName, amount, confirmed, posTransfer, statusPath, claimPath, dynamicExpiresAt = null, dynamicReadyAt = null }) {
+export function renderSingleOrderPayPage({ businessName, amount, confirmed, posTransfer, statusPath, claimPath, dynamicExpiresAt = null, dynamicReadyAt = null, webChatPath = null }) {
   return `<!doctype html>
 <html style="background:#F6F1E8"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>${escapeHtml(businessName)}</title>
@@ -1414,13 +1450,16 @@ export function renderSingleOrderPayPage({ businessName, amount, confirmed, posT
   .copyBtn{flex-shrink:0;background:var(--ink);color:var(--paper);border:0;font-family:inherit;font-weight:600;font-size:11.5px;padding:5px 10px;border-radius:999px;touch-action:manipulation}
   .secondaryBtn{width:100%;margin-top:12px;background:#fff;color:var(--ink);border:1px solid var(--line);font-family:inherit;font-weight:600;font-size:14.5px;padding:12px;border-radius:999px;touch-action:manipulation}
   .done{margin:16px;background:var(--ok);color:#fff;border-radius:14px;padding:18px;text-align:center;font-family:"Fraunces",serif;font-size:17px;font-weight:700}
+  .done .backToChat{display:inline-block;margin-top:12px;background:#fff;color:var(--ok);font-family:"Inter",sans-serif;font-weight:600;font-size:13.5px;padding:9px 18px;border-radius:999px;text-decoration:none}
 </style></head>
 <body>
 <div class="top">
   <div class="nm">${escapeHtml(businessName)}</div>
   <div class="mt">Ready to pay</div>
 </div>
-<div id="doneBanner" class="done" ${confirmed ? '' : 'hidden'}>Payment confirmed. Thank you!</div>
+<div id="doneBanner" class="done" ${confirmed ? '' : 'hidden'}>Payment confirmed. Thank you!${
+  webChatPath ? `<br><a class="backToChat" href="${escapeHtml(webChatPath)}">Back to chat</a>` : ''
+}</div>
 <div id="amountCard" class="payAmount" ${confirmed ? 'hidden' : ''}>
   <div style="color:var(--mid);font-size:13px">${posTransfer ? 'Please transfer to the account below' : 'Please pay this amount at the counter or on the POS terminal'}</div>
   <div class="big">NGN ${Number(amount).toLocaleString()}</div>

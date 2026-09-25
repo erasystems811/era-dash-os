@@ -85,6 +85,10 @@ async function main() {
     [waCustomer.id]
   );
   assert(waGreetingMsgs[0]?.trigger === 'greeting', 'the WhatsApp greeting still fires its own real trigger (a real CTA-URL button send), unaffected by the Instagram fallback');
+  // Chidera, 2026-09-25: a plain online "hi" (no table scan) must keep the
+  // generic wording -- only a real dine-in QR scan (test-dinein-web-chat.mjs)
+  // gets the "dine-in session" wording.
+  assert(!/dine-in session/i.test(waGreetingMsgs[0]?.body || ''), 'and a plain online greeting does NOT get the dine-in-specific wording');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

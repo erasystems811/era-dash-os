@@ -24,7 +24,7 @@
 // Postgres (schema.sql applied automatically, seeds a sample restaurant).
 import { pool } from '../lib/db.js';
 import { startVoiceCall, handleCallerUtterance } from '../engine/voice.js';
-import { checkOperatingHours } from '../engine/voice-hours.js';
+import { checkOperatingHours } from '../engine/hours.js';
 import { seedSampleRestaurant } from './seed-sample-restaurant.mjs';
 
 async function enableHandoverAlerts() {

@@ -17,7 +17,9 @@ import { router as documentRoutes } from './routes/documents.js';
 import { router as trackingRoutes } from './routes/tracking.js';
 import { router as dineinMenuRoutes } from './routes/dinein-menu.js';
 import { router as menuPageRoutes } from './routes/menu-page.js';
+import { router as webChatRoutes } from './routes/web-chat.js';
 import { router as feedbackFormRoutes } from './routes/feedback-form.js';
+import { router as complaintRoutes } from './routes/complaint.js';
 import { router as productPhotoRoutes } from './routes/product-photo.js';
 import { router as riderApiRoutes } from './routes/rider.js';
 import { router as whatsappWebhook } from './engine/webhook-whatsapp.js';
@@ -26,7 +28,7 @@ import { router as paystackWebhook } from './engine/webhook-paystack.js';
 import { router as moniepointWebhook } from './engine/webhook-moniepoint.js';
 import { router as monnifyWebhook } from './engine/webhook-monnify.js';
 import { router as opayWebhook } from './engine/webhook-opay.js';
-import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications, refreshExpiringPaymentLinks } from './engine/flow.js';
+import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications, refreshExpiringPaymentLinks, sweepAbandonedWebChatOrders, sweepAbandonedChatCustomers } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -83,9 +85,19 @@ app.use('/t', dineinMenuRoutes);
 // Public web menu page for regular (non-dine-in) ordering -- same page,
 // resolved by a per-customer token instead of a table.
 app.use('/m', menuPageRoutes);
+// The WhatsApp-look chat transcript (routes/web-chat.js) -- one real
+// WhatsApp message (flow.js's sendStartOrderLink) sends a customer here;
+// everything else happens as bubbles on this page instead of billed
+// messages. Same public, token-authenticated trust boundary as /m.
+app.use('/wa', webChatRoutes);
 // The rating form sent by engine/flow.js's sendFeedbackRequest -- public,
 // no login, order_feedback.id itself is the link's token.
 app.use('/f', feedbackFormRoutes);
+// The complaint form (routes/complaint.js) -- reached from the web chat's
+// own first-choice bubble ("Give feedback") or a real WhatsApp complaint
+// redirect (flow.js's sendComplaintLink). Same public, token-authenticated
+// trust boundary as every other page keyed off menu_token.
+app.use('/c', complaintRoutes);
 // A product's photo, served as a real image response instead of the raw
 // data: URI -- see routes/product-photo.js for why.
 app.use('/photo', productPhotoRoutes);
@@ -216,4 +228,21 @@ app.listen(port, () => {
   setInterval(() => {
     sweepOpeningNotifications().catch((err) => console.error('sweepOpeningNotifications failed:', err));
   }, 60_000);
+  // Web-chat abandonment nudge (Phase 2, engine/flow.js's own comment on
+  // sweepAbandonedWebChatOrders) -- checked every 5 minutes, tight enough
+  // that PAYMENT_NUDGE_MINUTES (20) actually means 20-25 minutes in
+  // practice, not "sometime in the next hour" the way closeStaleOrders'
+  // own interval would make it. Same inert-until-needed shape as every
+  // other sweep here -- a single cheap read, a no-op most ticks.
+  setInterval(() => {
+    sweepAbandonedWebChatOrders().catch((err) => console.error('sweepAbandonedWebChatOrders failed:', err));
+  }, 5 * 60_000);
+  // Chidera, 2026-09-25: "retext them... 10 mins after abandonment" -- a
+  // tighter tick than the payment nudge's above, since its own threshold
+  // (ORDER_ABANDONMENT_NUDGE_MINUTES, 10) is half that one's. 2 minutes
+  // keeps it "10-12 minutes in practice", same reasoning as every other
+  // sweep's own comment here.
+  setInterval(() => {
+    sweepAbandonedChatCustomers().catch((err) => console.error('sweepAbandonedChatCustomers failed:', err));
+  }, 2 * 60_000);
 });

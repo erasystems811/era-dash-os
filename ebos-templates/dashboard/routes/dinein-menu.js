@@ -14,6 +14,18 @@ import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
 
 export const router = express.Router();
 
+// Same pattern as routes/menu-page.js's own isViaWebChat -- a dine-in
+// guest's /review submission reaches finishItemsCollection/reply() with
+// customer.channel still whatever's stored (almost always 'whatsapp'),
+// which would silently send every item-question/upsell/confirm message as
+// a real, billable WhatsApp send. Flipping it in-memory here, right before
+// those calls, is what actually makes "dine in through web chat" true for
+// the messages that make up the bulk of an order's real cost.
+const WEB_CHAT_ACTIVE_WINDOW_MS = 30 * 60 * 1000;
+function isViaWebChat(customer) {
+  return Boolean(customer.web_chat_active_at) && new Date(customer.web_chat_active_at) > new Date(Date.now() - WEB_CHAT_ACTIVE_WINDOW_MS);
+}
+
 async function resolveTable(qrToken) {
   const { rows } = await pool.query(
     `select rt.*, b.name as branch_name, biz.name as business_name,
@@ -358,6 +370,15 @@ router.post('/:qrToken/review', async (req, res) => {
       .filter((item) => item.addedQty > 0)
       .map((item) => `${item.addedQty}x ${item.name}`);
     await restartItemsCollection(order);
+    if (isViaWebChat(customer)) {
+      customer.channel = 'website';
+      // Chidera, 2026-09-25: dine-in's own separate web chat -- without
+      // this, these bubbles would log with table_session_id null and show
+      // up on the generic online /wa/:token thread instead of this table's
+      // own /wa/:token?table=... one.
+      customer.tableSessionId = session.id;
+      await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
+    }
     await finishItemsCollection(customer, order, '', { deltaLines });
     res.json({ ok: true });
     return;
@@ -370,6 +391,17 @@ router.post('/:qrToken/review', async (req, res) => {
   // own comment for why this is a deliberate reset, not a bug being
   // papered over.
   await restartItemsCollection(order);
+
+  // In-memory only -- see isViaWebChat's own comment above. Without this,
+  // every one of the item-question/upsell/confirm messages this produces
+  // below would go out as a real WhatsApp send instead of a free bubble.
+  if (isViaWebChat(customer)) {
+    customer.channel = 'website';
+    // Chidera, 2026-09-25: dine-in's own separate web chat -- see the
+    // isRepeatAddOn branch above's own comment.
+    customer.tableSessionId = session.id;
+    await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
+  }
 
   // The read-back happens in the chat, not on this page (spec 5.1/5.2) --
   // this page's own job is done once the order + items exist; dispatch()
@@ -473,6 +505,13 @@ router.get('/:qrToken', async (req, res) => {
   // guest actually interacts with the table."
   const actingCustomer = session ? await resolveActingCustomer(session, req) : null;
   if (session && actingCustomer) await upsertTableGuest(session.id, actingCustomer.id);
+  // Same breadcrumb refresh menu-page.js's own GET route does -- keeps the
+  // web-chat window alive for a guest who takes a while building their
+  // basket here, so /review's own isViaWebChat check further down doesn't
+  // go stale on them.
+  if (actingCustomer && isViaWebChat(actingCustomer)) {
+    await pool.query('update customers set web_chat_active_at = now() where id = $1', [actingCustomer.id]);
+  }
   const [products, waNumber, pendingOrder] = await Promise.all([
     menuForBranch(table.branch_id),
     resolveWaNumber(table.branch_id),
@@ -495,11 +534,27 @@ router.get('/:qrToken', async (req, res) => {
     renderMenuPage({
       reviewPath: `/t/${req.params.qrToken}/review${qs()}`,
       pollPath: session ? `/t/${req.params.qrToken}/menu.json${qs()}` : null,
+      // Chidera, 2026-09-24: "the web menu should have a back to chat that
+      // takes back to web chat." Same isViaWebChat gate /review's own
+      // channel flip already uses -- only real when this guest actually
+      // has a chat thread to go back to.
+      // Chidera, 2026-09-25: "let table dine in and online delivery have
+      // their complete different web chat" -- this table's own separate
+      // thread (routes/web-chat.js's ?table=), not the now online-only
+      // bare /wa/:token, or this link would silently drop the guest into
+      // the wrong (empty, for a dine-in-only guest) thread.
+      webChatPath: actingCustomer && isViaWebChat(actingCustomer) ? `/wa/${guestToken}?table=${req.params.qrToken}` : null,
+      // Chidera, 2026-09-24, real report: "when i tapped place order, it
+      // took me back to bare chat not web chat." This route never passed
+      // `channel` at all (defaults to 'whatsapp' in renderMenuPage), so
+      // submitOrder()'s own post-submit redirect always fell through to
+      // its wa.me fallback -- same fix routes/menu-page.js's own GET
+      // route already has for the online flow, just missing here.
+      channel: actingCustomer && isViaWebChat(actingCustomer) ? 'website' : (actingCustomer?.channel || 'whatsapp'),
       businessName: table.business_name,
       subtitle: `Table ${table.label} · ${table.branch_name}`,
       coverPhotoVersion: table.cover_photo_version,
       waNumber,
-      channel: actingCustomer?.channel,
       products,
       pendingOrder,
       initialCategory: req.query.cat || null,
@@ -635,6 +690,13 @@ router.get('/:qrToken/pay', async (req, res) => {
   const order = await findOpenOrderForSession(session);
   if (!order) return res.status(404).send('No open order for this table right now.');
   const actingCustomer = await resolveActingCustomer(session, req);
+  // Same breadcrumb as the /:qrToken GET above -- completePayment (fired
+  // later from a webhook or staff's POS claim tap, no live customer object
+  // in hand) checks this freshness to decide whether the payment-confirmed
+  // message can be a free bubble instead of a real send.
+  if (actingCustomer && isViaWebChat(actingCustomer)) {
+    await pool.query('update customers set web_chat_active_at = now() where id = $1', [actingCustomer.id]);
+  }
   const status = await payStatusPayload(order, session, actingCustomer?.id || null);
   const guestToken = actingCustomer ? await ensureMenuToken(actingCustomer) : null;
   const qs = guestToken ? `?g=${guestToken}` : '';

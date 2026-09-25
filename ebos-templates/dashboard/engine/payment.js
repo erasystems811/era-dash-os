@@ -25,7 +25,15 @@ function emailFor(customer) {
 // initializePaystackTopupTransaction below -- one real call to Paystack's
 // API, one place that decides what a genuinely unique reference looks
 // like. Throws on a real failure; callers decide their own fallback.
-async function callPaystackInitialize({ customer, amount, referencePrefix }) {
+// Chidera, 2026-09-23: "when i click pay now and go to pay stack i cant
+// see back to chat so it takes me back to main chat which shouldnt."
+// Paystack's own checkout has no idea /wa/:token exists unless told --
+// with no callback_url at all, a completed (or cancelled) payment left the
+// customer stranded on Paystack's own generic page. `callbackUrl` is
+// optional and additive: a caller with nowhere sensible to send the
+// customer back to (dine-in's own split-payment page, a different
+// surface entirely) can simply omit it and nothing changes for them.
+async function callPaystackInitialize({ customer, amount, referencePrefix, callbackUrl }) {
   const secretKey = process.env.PAYMENT_SECRET_KEY;
   if (process.env.PAYMENT_PROVIDER !== 'paystack' || !secretKey) return null; // caller falls back to bank transfer instructions
 
@@ -49,15 +57,20 @@ async function callPaystackInitialize({ customer, amount, referencePrefix }) {
   const res = await fetch('https://api.paystack.co/transaction/initialize', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${secretKey}` },
-    body: JSON.stringify({ email: emailFor(customer), amount: Math.round(amount * 100), reference }),
+    body: JSON.stringify({
+      email: emailFor(customer),
+      amount: Math.round(amount * 100),
+      reference,
+      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+    }),
   });
   if (!res.ok) throw new Error(`Paystack initialize failed ${res.status}: ${await res.text()}`);
   const data = await res.json();
   return { reference: data.data.reference, authorizationUrl: data.data.authorization_url };
 }
 
-export async function initializePaystackTransaction({ order, customer, amount }) {
-  const result = await callPaystackInitialize({ customer, amount, referencePrefix: order.reference });
+export async function initializePaystackTransaction({ order, customer, amount, callbackUrl }) {
+  const result = await callPaystackInitialize({ customer, amount, referencePrefix: order.reference, callbackUrl });
   if (!result) return null;
   // Persisted, not just returned -- the invoice page (routes/documents.js)
   // needs its own "Pay now" link, not only the one sent once in chat. This
@@ -76,8 +89,8 @@ export async function initializePaystackTransaction({ order, customer, amount })
 // per attempt (callPaystackInitialize above), that's no longer a real
 // blocker -- the topup gets its own genuine Paystack transaction, keyed
 // off its own row (topupId), never the order's.
-export async function initializePaystackTopupTransaction({ topupId, order, customer, amount }) {
-  const result = await callPaystackInitialize({ customer, amount, referencePrefix: `${order.reference}-TU` });
+export async function initializePaystackTopupTransaction({ topupId, order, customer, amount, callbackUrl }) {
+  const result = await callPaystackInitialize({ customer, amount, referencePrefix: `${order.reference}-TU`, callbackUrl });
   if (!result) return null;
   await pool.query('update order_topup set payment_reference = $1, payment_link_url = $2 where id = $3', [result.reference, result.authorizationUrl, topupId]);
   return result.authorizationUrl;
@@ -105,9 +118,11 @@ export async function initializeOrderPaymentPaystackTransaction({ orderPayment, 
 // payment_link_url/payment_reference columns Paystack already uses, so
 // findOrderByPaymentReference below and buildPayLine's own paymentUrl
 // handling both resolve either provider identically, no special-casing
-// needed anywhere downstream.
-export async function initializeMonnifyTransaction({ order, customer, amount }) {
-  const result = await callMonnifyCheckoutLink({ customer, amount, referencePrefix: order.reference });
+// needed anywhere downstream. callbackUrl -- Chidera, 2026-09-25: "why
+// isnt customer auto taken back to web chat after payment with monify?"
+// -- same real gap Paystack's own callbackUrl already got fixed for.
+export async function initializeMonnifyTransaction({ order, customer, amount, callbackUrl }) {
+  const result = await callMonnifyCheckoutLink({ customer, amount, referencePrefix: order.reference, redirectUrl: callbackUrl });
   if (!result) return null;
   // monnify_account_expires_at -- reused from the old dynamic-account
   // flow's own column (never dropped), now driving engine/flow.js's

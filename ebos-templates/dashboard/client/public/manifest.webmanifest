@@ -1,0 +1,10 @@
+{
+  "name": "EBOS Dashboard",
+  "short_name": "EBOS",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#edf0f4",
+  "theme_color": "#edf0f4",
+  "orientation": "portrait"
+}

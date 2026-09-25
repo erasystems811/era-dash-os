@@ -12,11 +12,22 @@ export async function seedSampleRestaurant() {
   await pool.query(`insert into staff (name, email, password_hash, role) values ('Chidera Owner', 'owner@samplerestaurant.test', $1, 'owner')`, [
     await bcrypt.hash('testpass123', 10),
   ]);
+  // Chidera, 2026-09-23, testing the local web-chat demo: "i didnt see any
+  // upsell and thats important." Root cause -- not a bug in the upsell
+  // feature itself (already real and tested, sandbox/test-web-chat-
+  // ordering.mjs), but THIS seed data: none of these three products ever
+  // had a category set, and nextUpsellGroup (flow.js) only offers an
+  // upsell from a category it can actually match against UPSELL_GROUPS'
+  // own keywords (drink/protein/snack) -- with every product's category
+  // null, it could never fire here no matter what got ordered. A drink
+  // now exists so ordering any of the mains actually shows the real
+  // upsell list bubble.
   await pool.query(
-    `insert into product (name, description, price, availability_type) values
-     ('Jollof Rice and Chicken', 'Smoky party jollof with grilled chicken', 4500, 'stock'),
-     ('Fried Rice and Beef', 'Fried rice with sauteed vegetables and beef', 4800, 'stock'),
-     ('Suya Wrap', 'Spicy grilled beef wrap', 3000, 'stock')`
+    `insert into product (name, description, price, category, availability_type) values
+     ('Jollof Rice and Chicken', 'Smoky party jollof with grilled chicken', 4500, 'Mains', 'stock'),
+     ('Fried Rice and Beef', 'Fried rice with sauteed vegetables and beef', 4800, 'Mains', 'stock'),
+     ('Suya Wrap', 'Spicy grilled beef wrap', 3000, 'Mains', 'stock'),
+     ('Chapman', 'Chilled house Chapman', 1500, 'Drinks', 'stock')`
   );
   await pool.query(
     `insert into bot_field (key, label, question, type, choices, examples, required_for_state) values

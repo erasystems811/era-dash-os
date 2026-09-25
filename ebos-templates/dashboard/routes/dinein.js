@@ -30,7 +30,13 @@ async function whatsappNumberForBranch(branchId) {
 
 async function qrDataUrlFor(table, whatsappNumber) {
   if (!whatsappNumber) return null;
-  const text = encodeURIComponent(`Menu Table ${table.label}`);
+  // Chidera, 2026-09-25: "when qr is scanned instead of just menu table i
+  // want a menu table 1(send this to proceed)." A prefilled WhatsApp
+  // message still needs an explicit tap on Send before it actually goes
+  // anywhere -- a bare "Menu Table 1" read as already sent to guests who'd
+  // never used a wa.me link before. flow.js's handleDineinScan strips this
+  // exact parenthetical back off before matching the table label.
+  const text = encodeURIComponent(`Menu Table ${table.label}(send this to proceed)`);
   // _r isn't read by wa.me (it only recognizes "text") and never shows up
   // in the customer's prefilled message -- it exists purely so the QR
   // code's own encoded bytes, and so the image, actually change when

@@ -3,6 +3,48 @@ import { api } from './api.js';
 
 const StaffContext = createContext(null);
 
+// The Push API needs the VAPID public key as raw bytes, not the base64url
+// string the server hands back -- same conversion rider-pwa/src/App.jsx
+// already uses.
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+// Chidera, 2026-09-23: "make the dashboard pwa so staff can get push
+// notification or something" -- registers the service worker and
+// subscribes to real push, replacing/supplementing real WhatsApp staff
+// alerts (see engine/push-notify.js's pushToStaff and flow.js's
+// notifyStaff). Best-effort and silent on purpose, unlike rider-pwa's own
+// version (which blocks going on duty over a denied/unsupported push --
+// Chidera's own call there, "make allow notification a prerequisite"):
+// there's no equivalent hard gate for staff, and nagging every login with
+// a permission prompt would be worse than just falling back to WhatsApp
+// server-side (flow.js's notifyStaff already does that) for anyone who
+// never grants it.
+async function subscribeToPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try {
+    const { publicKey } = await api.get('/push-public-key');
+    if (!publicKey) return; // this deployment hasn't got VAPID keys set up yet
+    const registration = await navigator.serviceWorker.register('/sw.js');
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') return;
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+    }
+    await api.post('/push-subscribe', { subscription: subscription.toJSON() });
+  } catch (err) {
+    console.error('Push subscription failed:', err);
+  }
+}
+
 export function StaffProvider({ children }) {
   const [staff, setStaff] = useState(undefined); // undefined = still loading
 
@@ -12,6 +54,10 @@ export function StaffProvider({ children }) {
       .then((d) => setStaff(d.staff))
       .catch(() => setStaff(null));
   }, []);
+
+  useEffect(() => {
+    if (staff?.id) subscribeToPush();
+  }, [staff?.id]);
 
   async function login(email, password) {
     const { staff } = await api.post('/login', { email, password });

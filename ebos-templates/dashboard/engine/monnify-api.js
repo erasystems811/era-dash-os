@@ -55,7 +55,7 @@ function emailFor(customer) {
 // directly against Monnify's docs, not guessed -- same shape as Paystack's
 // authorization_url, so this drops the second call entirely instead of
 // trying to fix the account-only flow.
-export async function callMonnifyCheckoutLink({ customer, amount, referencePrefix }) {
+export async function callMonnifyCheckoutLink({ customer, amount, referencePrefix, redirectUrl }) {
   const contractCode = process.env.MONNIFY_CONTRACT_CODE;
   const accessToken = await getAccessToken();
   if (!accessToken || !contractCode) return null; // caller falls back to bank transfer instructions
@@ -81,6 +81,15 @@ export async function callMonnifyCheckoutLink({ customer, amount, referencePrefi
       // matching the old account-only flow) -- the hosted checkout page
       // shows whatever's enabled on the contract (card, transfer, USSD),
       // same "let Monnify's own page handle it" idea as Paystack's page.
+      // Chidera, 2026-09-25: "why isnt customer auto taken back to web
+      // chat after payment with monnify?" -- same real gap Paystack's own
+      // callback_url already got fixed for (2026-09-23: "i click pay now
+      // and go to pay stack i cant see back to chat"), just never ported
+      // to Monnify's own init-transaction call. Optional/additive --
+      // omitted entirely when the caller has nowhere sensible to send the
+      // customer back to (dine-in's own split-payment page), same as
+      // Paystack's callbackUrl already does.
+      ...(redirectUrl ? { redirectUrl } : {}),
     }),
   });
   if (!initRes.ok) throw new Error(`Monnify init-transaction failed ${initRes.status}: ${await initRes.text()}`);

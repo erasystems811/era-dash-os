@@ -24,7 +24,7 @@ import {
   magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, sendOutstandingBalanceLink, UPSELL_GROUPS, categoryMatchesGroup } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, sendOutstandingBalanceLink, UPSELL_GROUPS, categoryMatchesGroup, notifyComplaintReply } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
@@ -289,7 +289,10 @@ router.get('/monitor/messaging-cost', requireEraAdmin, async (req, res) => {
     // -- DELETE /customers/:id hard-deletes `message` for that customer
     // as a deliberate content cleanup, which used to silently erase every
     // real, already-billed send in it too. See the migration/logMessage
-    // comments for the full story.
+    // comments for the full story. Confirmed live 2026-09-25: era-demo's
+    // own data had 73 real send-log rows even after a delete, at a point
+    // this branch's own copy of this route had drifted back to reading
+    // `message` directly and under-reporting.
     pool.query(`select count(*) as count from whatsapp_send_log where created_at >= now() - $1::interval`, [`${days} days`]),
     pool.query(`select count(*) as count from "order" where created_at >= now() - $1::interval`, [`${days} days`]),
     pool.query(`select count(distinct phone_number_id) as count from branch_channel where channel = 'whatsapp' and phone_number_id is not null`),
@@ -915,6 +918,22 @@ router.post('/branch-channels/whatsapp', requireEraAdmin, async (req, res) => {
 router.use(requireStaffApi);
 router.use(scopeToBranch);
 router.use(scopeToWorkArea);
+
+// Staff PWA push -- same shape as routes/rider.js's own push-public-key/
+// push-subscribe (engine/push-notify.js's own comment on why this reuses
+// the ERA-wide VAPID keys rather than a new per-business secret). Any
+// logged-in staff role can subscribe, not just owner/manager -- there's no
+// reason a PIN-tier counter/kitchen account shouldn't get real-time order
+// alerts too, same as they already can today over WhatsApp.
+router.get('/push-public-key', (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY || '' });
+});
+router.post('/push-subscribe', async (req, res) => {
+  const subscription = req.body?.subscription;
+  if (!subscription?.endpoint) return res.status(400).json({ error: 'A real push subscription is required.' });
+  await pool.query('update staff set push_subscription = $1 where id = $2', [JSON.stringify(subscription), req.staff.id]);
+  res.json({ ok: true });
+});
 
 router.use('/delivery', deliveryRoutes);
 router.use('/voice', voiceRoutes);
@@ -1681,6 +1700,54 @@ router.get('/feedback/monthly', requireEditorApi, async (req, res) => {
   res.json(rows);
 });
 
+// --- Complaints ---------------------------------------------------------
+// Chidera, 2026-09-24: "in that feedback tab in dashboard create a tab for
+// complaint." Own table (complaint), separate from order_feedback (star
+// ratings tied to a completed order) -- a complaint has no rating and
+// doesn't require an order at all.
+
+router.get('/complaints', requireEditorApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select c.*, cu.name as customer_name, cu.phone_number as customer_phone
+     from complaint c
+     join customers cu on cu.id = c.customer_id
+     where ($1::uuid is null or c.branch_id = $1)
+     order by c.created_at desc limit 200`,
+    [req.branchId]
+  );
+  res.json(rows);
+});
+
+// Chidera, 2026-09-24: "if they want to reply, let reply not come to the
+// bare chat let the customer be pinged with a you have a message from our
+// manager, with tap here to chat button" -- notifyComplaintReply (not the
+// generic sendStaffReply /conversations/:id/send uses) logs the real
+// reply as a free website bubble and sends a short, generic real WhatsApp
+// ping pointing back to it, rather than the reply itself landing as a
+// real send or silently sitting unnoticed in a chat the customer has
+// likely already left.
+router.post('/complaints/:id/reply', requireEditorApi, async (req, res) => {
+  const text = (req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'A reply is required.' });
+  const { rows } = await pool.query(
+    `update complaint set staff_reply = $1, replied_by_staff_id = $2, replied_at = now(), status = 'replied'
+     where id = $3 returning customer_id`,
+    [text, req.staff.id, req.params.id]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Complaint not found.' });
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [rows[0].customer_id]);
+  if (custRows[0]) await notifyComplaintReply(custRows[0], text);
+  await logActivity(req, 'complaint_replied', { entityType: 'complaint', entityId: req.params.id });
+  res.json({ ok: true });
+});
+
+router.post('/complaints/:id/resolve', requireEditorApi, async (req, res) => {
+  const { rows } = await pool.query(`update complaint set status = 'resolved' where id = $1 returning id`, [req.params.id]);
+  if (!rows.length) return res.status(404).json({ error: 'Complaint not found.' });
+  await logActivity(req, 'complaint_resolved', { entityType: 'complaint', entityId: req.params.id });
+  res.json({ ok: true });
+});
+
 // --- Catalogue --------------------------------------------------------
 
 router.get('/catalogue', async (req, res) => {
@@ -2174,11 +2241,16 @@ async function computeUpsellStats(dateWhereSql, dateParams) {
     // Only one offer per order going forward (Chidera, 2026-09-20: "only
     // upsell once"), but upsell_offered is still an array for older orders
     // from before that -- the last entry is the one that was actually
-    // left standing when the order completed.
+    // left standing when the order completed. That entry can itself now
+    // name more than one group at once (e.g. 'drink+protein', Chidera
+    // 2026-09-24's "could be 3 or 2 upsells... push customer to buy
+    // more") -- accepted if the final order picked up ANY of the
+    // categories that single combined offer covered, not just an exact
+    // one-group match.
     const key = row.upsell_offered[row.upsell_offered.length - 1];
-    const group = UPSELL_GROUPS.find((g) => g.key === key);
-    if (!group) continue;
-    if (row.item_categories.some((c) => categoryMatchesGroup(c, group.keywords))) accepted++;
+    const groups = UPSELL_GROUPS.filter((g) => key.split('+').includes(g.key));
+    if (!groups.length) continue;
+    if (groups.some((g) => row.item_categories.some((c) => categoryMatchesGroup(c, g.keywords)))) accepted++;
   }
   const offered = rows.length;
   return {
@@ -2593,8 +2665,17 @@ router.delete('/customers/:id', requireEditorApi, async (req, res) => {
     await client.query(`delete from delivery_offer where order_id in (select id from "order" where customer_id = $1)`, [id]);
     await client.query(`delete from booking where customer_id = $1`, [id]);
     await client.query(`delete from "order" where customer_id = $1`, [id]);
-    await client.query(`delete from table_session where customer_id = $1`, [id]);
+    // Chidera, 2026-09-25, real report: "im trying to delete a
+    // conversation on dashboard why isnt it deleting?" Same exact bug
+    // class as this whole block's own history above, freshly introduced
+    // by message.table_session_id (migration 0066, no cascade) --
+    // table_session used to go before message, so ANY customer with a
+    // dine-in message hit a foreign key violation here and the whole
+    // delete rolled back. message now goes first, same "clear the
+    // dependent table before the row it points at" fix as every other
+    // one of these.
     await client.query(`delete from message where customer_id = $1`, [id]);
+    await client.query(`delete from table_session where customer_id = $1`, [id]);
     await client.query(`delete from customers where id = $1`, [id]);
     await client.query('COMMIT');
     res.json({ ok: true });
@@ -2981,17 +3062,35 @@ router.post('/staff/:id/branch', requireEditorApi, async (req, res) => {
 // nothing, so that's rejected here rather than failing quietly later.
 // Same branch scoping as /staff/:id/status above -- a branch manager can
 // only toggle this for staff in their own branch.
+// Chidera, 2026-09-23: "im thinking handover be limited to 2 numbers max
+// so no business can set more than 2 handover number" -- handoverRecipients
+// (flow.js) has no branch scoping at all (every staff with handover_alerts
+// = true, business-wide, gets every handover alert), so this cap is
+// business-wide too, not per-branch -- a branch manager toggling a 3rd
+// person on in their own branch would still be adding a 3rd business-wide
+// recipient. Only checked when actually turning it ON for someone who
+// doesn't already have it -- redundant re-saves and turning it off are
+// always allowed regardless of the current count.
+const MAX_HANDOVER_ALERT_STAFF = 2;
+
 router.post('/staff/:id/handover-alerts', requireEditorApi, async (req, res) => {
-  const { rows: existing } = await pool.query('select phone_number, branch_id from staff where id = $1', [req.params.id]);
+  const { rows: existing } = await pool.query('select phone_number, branch_id, handover_alerts from staff where id = $1', [req.params.id]);
   if (!existing[0]) return res.status(404).json({ error: 'Staff member not found.' });
   if (req.branchId && existing[0].branch_id !== req.branchId) {
     return res.status(403).json({ error: 'You can only manage staff in your own branch.' });
   }
-  if (req.body.handover_alerts && !existing[0].phone_number) {
+  const turningOn = Boolean(req.body.handover_alerts);
+  if (turningOn && !existing[0].phone_number) {
     return res.status(400).json({ error: 'Add a phone number for this staff member first.' });
   }
+  if (turningOn && !existing[0].handover_alerts) {
+    const { rows: countRows } = await pool.query(`select count(*)::int as n from staff where handover_alerts = true`);
+    if (countRows[0].n >= MAX_HANDOVER_ALERT_STAFF) {
+      return res.status(400).json({ error: `Only ${MAX_HANDOVER_ALERT_STAFF} staff can receive handover alerts at once. Turn it off for someone else first.` });
+    }
+  }
   const { rows } = await pool.query('update staff set handover_alerts = $1 where id = $2 returning id, handover_alerts', [
-    !!req.body.handover_alerts,
+    turningOn,
     req.params.id,
   ]);
   res.json(rows[0]);

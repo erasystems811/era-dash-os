@@ -53,7 +53,21 @@ async function main() {
     [customerRows[0].id]
   );
   assert(msgRows[0]?.trigger !== 'dinein_ask_table', 'bot did NOT fall back to "what table are you at" for a real, correctly-labelled scan');
-  assert(/Table 7/.test(msgRows[0]?.body || ''), 'bot sent the real dine-in welcome naming the actual table');
+  // Chidera, 2026-09-24: "now we need dine in to go through web chat too."
+  // The real WhatsApp reply is now the same universal single-CTA send
+  // every first contact gets, with no table label in it -- that context
+  // now lives in the free dine-in greeting bubble on /wa/:token, checked
+  // below (this is still a genuine end-to-end proof that the table was
+  // correctly resolved for a branch_id-less customer, just a page fetch
+  // away from a real message body now).
+  assert(msgRows[0]?.trigger === 'greeting' && /tap below to get started/i.test(msgRows[0]?.body || ''), 'bot sent the universal single-CTA scan reply');
+  const chatPageRes = await fetch(`http://localhost:${process.env.PORT}/wa/${customerRows[0].menu_token}`);
+  assert(chatPageRes.status === 200, 'the chat page loads for this branch_id-less customer');
+  const { rows: greetingRows } = await pool.query(
+    `select body from message where customer_id = $1 and trigger = 'dinein_greeting' order by created_at desc limit 1`,
+    [customerRows[0].id]
+  );
+  assert(/Table 7/.test(greetingRows[0]?.body || ''), 'and the chat page\'s own dine-in greeting correctly names the real table -- the branch_id-less lookup genuinely resolved it');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

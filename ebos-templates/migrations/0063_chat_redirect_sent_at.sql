@@ -1,0 +1,12 @@
+-- Chidera, 2026-09-24: "even any text going out to the customer, the
+-- customer should get a one time we are trying to reach out to you tap
+-- here to text... bot must not answer every reply customer makes on bare
+-- chat, just resend them the place to text once ... if they text bare
+-- again, leave it stay silent." One shared timestamp, two callers: staff's
+-- own "Text customer" send (routes/api.js's /conversations/:id/send) and
+-- a customer texting real WhatsApp while an order's in progress
+-- (flow.js's handlePendingBatch) both check/set this before deciding
+-- whether a real "tap here to text" redirect is actually worth sending
+-- again, or whether the customer's already been pointed at the chat once
+-- and hasn't come back since.
+alter table customers add column if not exists chat_redirect_sent_at timestamptz;
