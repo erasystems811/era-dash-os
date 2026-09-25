@@ -313,7 +313,16 @@ function renderActions(interactive) {
     // behind it. "See menu"/other in-app links stay same-tab on purpose
     // (their own page already navigates back here once done).
     var linkAttrs = interactive.newTab ? ' target="_blank" rel="noopener"' : '';
-    return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '"' + linkAttrs + '><span class="icon">&#8663;</span>' + esc(interactive.buttonText || 'Open') + '</a><span class="linkcaption">' + (interactive.newTab ? 'Opens in a new tab -- come back here after' : 'Tap to open') + '</span></div>';
+    var mainBtn = '<a class="linkbtn" href="' + esc(interactive.url) + '"' + linkAttrs + '><span class="icon">&#8663;</span>' + esc(interactive.buttonText || 'Open') + '</a>';
+    // Chidera, 2026-09-25: "in dine in where bot sends the pay now, let
+    // them add a menu button since it was suggested that they can still
+    // order more so 2 buttons in that text" -- secondaryUrl is optional
+    // (every other cta_url bubble on this page still has just the one).
+    var secondaryBtn = interactive.secondaryUrl
+      ? '<a class="linkbtn" href="' + esc(interactive.secondaryUrl) + '" style="margin-top:8px;background:transparent;border:1.5px solid var(--accent);color:var(--accent)"><span class="icon">&#9776;</span>' + esc(interactive.secondaryLabel || 'Menu') + '</a>'
+      : '';
+    var caption = interactive.newTab ? 'Opens in a new tab -- come back here after' : 'Tap to open';
+    return '<div class="linkwrap">' + mainBtn + secondaryBtn + '<span class="linkcaption">' + caption + '</span></div>';
   }
   if (interactive.type === 'document') {
     // Chidera, 2026-09-25: "when i said invoice and pay now in same chat i

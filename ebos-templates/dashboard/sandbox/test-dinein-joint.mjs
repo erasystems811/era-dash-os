@@ -224,6 +224,12 @@ async function main() {
   );
   assert(pay1Rows[0]?.channel === 'website' && pay1Rows[0]?.interactive?.url?.includes('/pay?g='), 'guest 1 got their own free Ready-to-pay bubble, linking to their own pay page');
   assert(pay2Rows[0]?.channel === 'website' && pay2Rows[0]?.interactive?.url?.includes('/pay?g='), 'guest 2 got their own free Ready-to-pay bubble, linking to their own pay page');
+  // Chidera, 2026-09-25: "in dine in where bot sends the pay now, let them
+  // add a menu button since it was suggested that they can still order
+  // more so 2 buttons in that text" -- the bubble's own body already says
+  // this, now the second real button matches it.
+  assert(pay1Rows[0]?.interactive?.secondaryUrl?.includes(`/t/qrtest5?g=`), `guest 1's bubble also carries a real Menu button back to their table's own order page (got "${pay1Rows[0]?.interactive?.secondaryUrl}")`);
+  assert(pay1Rows[0]?.interactive?.secondaryLabel === 'Menu', 'labelled "Menu"');
   // Chidera, 2026-09-25, real report: "why is one number having 2 seperate
   // table 1 conversation?" Root cause: this bubble never carried
   // tableSessionId at all, landing with table_session_id null -- the

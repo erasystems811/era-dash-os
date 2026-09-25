@@ -846,6 +846,20 @@ async function submitOrder() {
   // dine-in's own unchanged one-tap flow, the sheet's own Confirm button
   // for the general-ordering review flow above.
   const goBtn = ASK_FULFILMENT ? document.getElementById('sheetConfirm') : document.getElementById('go');
+  // Chidera, 2026-09-25 (live report): "in dine in when i added on an
+  // order, bot replied me twice and why did staff get a handover text for
+  // that? handover is only for deduction of an already placed order" --
+  // the label changed to "Sending..." but the button itself was never
+  // actually disabled, so a real double-tap could fire this POST twice.
+  // routes/dinein-menu.js's own whole-basket-replace design compares the
+  // resubmitted basket against whatever's in the DB right now -- a second,
+  // overlapping submit built from the same pre-tap basket snapshot but
+  // landing AFTER the first one's already-applied add reads as items
+  // having gone missing, tripping the "already gone to the kitchen"
+  // handover for what was really just one genuine add, plus a second,
+  // spurious reply on top of the real one.
+  if (goBtn.disabled) return;
+  goBtn.disabled = true;
   const originalLabel = goBtn.textContent;
   goBtn.textContent = 'Sending...';
   const payload = { items: items };
@@ -860,11 +874,13 @@ async function submitOrder() {
     res = await fetch(REVIEW_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     data = await res.json();
   } catch (err) {
+    goBtn.disabled = false;
     goBtn.textContent = originalLabel;
     alert('Could not reach the connection. Please check your network and try again.');
     return;
   }
   if (!res.ok) {
+    goBtn.disabled = false;
     goBtn.textContent = originalLabel;
     alert(data.error || 'Something went wrong.');
     // Chidera, 2026-09-25 (live report): "it didnt take the customer out

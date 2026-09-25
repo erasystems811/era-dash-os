@@ -5127,6 +5127,12 @@ export async function notifyGuestsReadyToPay(order) {
     try {
       const token = await ensureMenuToken(guest);
       const url = `${process.env.PUBLIC_URL}/t/${table.qr_token}/pay?g=${token}`;
+      // Chidera, 2026-09-25: "in dine in where bot sends the pay now, let
+      // them add a menu button since it was suggested that they can still
+      // order more so 2 buttons in that text" -- same /t/:qrToken shop
+      // page every other dine-in menu link already points at
+      // (sendDineinGreeting's own menuUrl, same shape).
+      const menuUrl = `${process.env.PUBLIC_URL}/t/${table.qr_token}?g=${token}`;
       // Chidera, 2026-09-24: "now we need dine in to go through web chat
       // too... reduce my cost." Used to be a real send to every single
       // guest at the table, every time -- the real "ready to pay" content
@@ -5161,7 +5167,7 @@ export async function notifyGuestsReadyToPay(order) {
         sender: 'bot',
         body: `Your order has been served! When you're ready to pay, come back here and tap the button below to pay. You can still add to your order before making your final payment.`,
         trigger: 'dinein_ready_to_pay',
-        interactive: { type: 'cta_url', buttonText: 'Pay now', url },
+        interactive: { type: 'cta_url', buttonText: 'Pay now', url, secondaryUrl: menuUrl, secondaryLabel: 'Menu' },
       });
       if (await needsChatRedirect(guest)) {
         await sendChatRedirectPing(guest, `Your table is ready to pay.`, { trigger: 'dinein_ready_to_pay_ping' });
