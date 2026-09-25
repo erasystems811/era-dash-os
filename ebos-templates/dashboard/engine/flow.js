@@ -1196,7 +1196,7 @@ export async function notifyComplaintReply(customer, replyText) {
   await sendChatRedirectPing(customer, `You have a message from our manager.`, { trigger: 'complaint_reply_ping' });
 }
 
-async function handleGreeting(customer, text) {
+export async function handleGreeting(customer, text) {
   // Chidera, 2026-09-21: "look at my instagram flow... how does instagram
   // catch up to our current state" -- found live: an Instagram customer
   // got this bare greeting with NO menu link at all, ever, anywhere in
@@ -1223,13 +1223,32 @@ async function handleGreeting(customer, text) {
     return;
   }
   if (customer.channel === 'website') {
-    // Shouldn't normally be reached -- the real first bubble on the
-    // web-chat page is rendered directly by routes/web-chat.js calling
-    // buildGreetingContent itself, not by dispatching through here. Safe
-    // fallback (a plain bubble) in case a fresh greeting is ever
-    // classified mid-session while already on this channel.
-    const { message } = await buildGreetingContent(customer);
-    await reply(customer, message, 'greeting');
+    // Chidera, 2026-09-25, real report: "i texted hi and it replied me
+    // welcome what would you like to order? in just text it didnt send
+    // the menu attached to it." This branch WAS reachable -- typing free
+    // text like "hi" directly into an already-open web chat (not tapping
+    // a button) goes through dispatch()'s normal intent classification,
+    // which lands here -- the old comment's "shouldn't normally be
+    // reached" was wrong. Used to send buildGreetingContent's bare
+    // message with no menu link at all; now a real bubble with a "See
+    // menu" button, same shape sendOrderGreeting (routes/web-chat.js's
+    // own first-visit greeting) and the Instagram branch above already use.
+    const { message, specialsCategory } = await buildGreetingContent(customer);
+    const token = await ensureMenuToken(customer);
+    const menuUrl = `${process.env.PUBLIC_URL}/m/${token}`;
+    const body = specialsCategory
+      ? `${message}\n\nToday's specials: ${menuUrl}?cat=${encodeURIComponent(specialsCategory)}`
+      : message;
+    await logMessage({
+      customerId: customer.id,
+      tableSessionId: customer.tableSessionId,
+      direction: 'outbound',
+      channel: 'website',
+      sender: 'bot',
+      body,
+      trigger: 'greeting',
+      interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl },
+    });
     return;
   }
   await sendStartOrderLink(customer);
@@ -3132,7 +3151,22 @@ export async function sweepAbandonedChatCustomers() {
        and c.last_message_at < now() - make_interval(mins => $1)
        and c.channel in ('whatsapp', 'instagram')
        and (c.web_chat_active_at is null or c.web_chat_active_at < now() - make_interval(mins => $1))
-       and (c.chat_redirect_sent_at is null or c.web_chat_active_at > c.chat_redirect_sent_at or c.last_message_at > c.chat_redirect_sent_at)
+       -- Chidera, 2026-09-25, real live incident: two customers whose
+       -- 24h WhatsApp session window was closed got the same nudge
+       -- resent every ~2 minutes, chat_redirect_count climbing forever.
+       -- Root cause: logMessage touches last_message_at for EVERY
+       -- message, including the system's OWN outbound sends -- when a
+       -- send failed and engine/flow.js's retryFailedSendAsTemplate
+       -- retried it (webhook-whatsapp.js's status handler, error 131047),
+       -- THAT retry's own logMessage call pushed last_message_at past
+       -- chat_redirect_sent_at, which this guard misread as "the
+       -- customer engaged again" -- rearming itself using a signal the
+       -- system's own retry had just touched, not anything the customer
+       -- did. web_chat_active_at is the only signal here that's NEVER
+       -- touched by an outbound send (only a genuine page visit) --
+       -- needsChatRedirect's own, already-correct guard only ever used
+       -- this one signal too, never last_message_at.
+       and (c.chat_redirect_sent_at is null or c.web_chat_active_at > c.chat_redirect_sent_at)
        and not exists (
          select 1 from "order" o where o.customer_id = c.id and o.engine_state in ('confirm_payment', 'fulfilment', 'completed')
        )

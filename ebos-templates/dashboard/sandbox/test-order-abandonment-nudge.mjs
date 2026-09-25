@@ -86,6 +86,16 @@ async function main() {
   // a fresh nudge is warranted. ===
   const pingedThenReturned = await makeCustomer('2348013380008', { lastMessageMinutesAgo: 15, webChatActiveMinutesAgo: 11, chatRedirectSentMinutesAgo: 40 });
 
+  // === 9. Chidera, 2026-09-25, real live incident: pinged before, and
+  // last_message_at is NEWER than chat_redirect_sent_at (exactly what
+  // engine/flow.js's retryFailedSendAsTemplate produces when a failed
+  // send is retried -- logMessage touches last_message_at for that
+  // retry too, not just a genuine customer reply) -- but web_chat_active_at
+  // never moved. Must NOT re-nudge; this used to loop forever in
+  // production, chat_redirect_count climbing every sweep tick. ===
+  const retryTouchedLastMessage = await makeCustomer('2348013380009', { lastMessageMinutesAgo: 15, chatRedirectSentMinutesAgo: 12 });
+  await pool.query(`update customers set last_message_at = now() - interval '10 minutes' where id = $1`, [retryTouchedLastMessage.id]);
+
   await flow.sweepAbandonedChatCustomers();
 
   async function lastOutbound(customerId) {
@@ -120,6 +130,9 @@ async function main() {
 
   const m8 = await lastOutbound(pingedThenReturned.id);
   assert(m8?.trigger === 'order_abandonment_nudge', 'pinged before, but genuinely came back (web_chat_active_at newer than the old ping) and went quiet again -- a fresh nudge fires');
+
+  const m9 = await lastOutbound(retryTouchedLastMessage.id);
+  assert(!m9, 'the infinite-loop bug: last_message_at newer than the old ping (from the system\'s own retry, not the customer) must NOT count as re-engagement');
 
   // Running the sweep again right away must never double-send the one it just sent.
   const beforeSecondSweep = (await pool.query(`select count(*)::int as n from message where customer_id = $1 and direction = 'outbound'`, [abandoned.id])).rows[0].n;
