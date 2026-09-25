@@ -2673,6 +2673,12 @@ router.get('/finance/summary', requireFullAccessApi, async (req, res) => {
       params
     ),
     pool.query(`select coalesce(sum(cash_collected), 0) as cash from "order" o where payment_method = 'cash' ${dateFilter}`, params),
+    // Chidera, 2026-09-25: "i never said top sellers by revenue i said how
+    // much revenue top sellers have generated, its different cause the top
+    // sellers are different price and highest seller may not be the most
+    // revenue" -- "top seller" means most sold (quantity), not most
+    // earned; the revenue column stays, it's just showing what THOSE items
+    // (ranked by units sold) brought in, not re-ranking by it.
     pool.query(
       `select p.name, sum(oi.quantity)::int as quantity, sum(oi.quantity * oi.price) as revenue
        from order_item oi
@@ -2680,7 +2686,7 @@ router.get('/finance/summary', requireFullAccessApi, async (req, res) => {
          join "order" o on o.id = oi.order_id
        where o.payment_status in ('confirmed', 'accepted') ${dateFilter}
        group by p.name
-       order by revenue desc
+       order by quantity desc
        limit 10`,
       params
     ),
