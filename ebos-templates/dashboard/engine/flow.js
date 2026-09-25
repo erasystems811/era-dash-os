@@ -3044,6 +3044,13 @@ export async function sendPaymentInstructions(customer, order) {
   // slip would.
   const { payLine, needsHandover, paymentUrl, posChoice } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
   if (customer.channel === 'website' && invoiceWebsiteUrl) {
+    // Chidera, 2026-09-25: "when i said invoice and pay now in same chat i
+    // meant itll have 2 buttons not just the pay now in the invoice" --
+    // a real, separate "Pay now" button right on this bubble (not only
+    // the invoice page's own embedded one) whenever there's an actual
+    // online payment link to pay with. POS (Transfer/Card) has no single
+    // paymentUrl to attach here -- it keeps its own separate choice
+    // message right after, same as before.
     await logMessage({
       customerId: customer.id,
       tableSessionId: customer.tableSessionId,
@@ -3052,7 +3059,12 @@ export async function sendPaymentInstructions(customer, order) {
       sender: 'bot',
       body: posChoice ? invoiceLine : `${invoiceLine}\n\n${payLine}`,
       trigger: 'invoice_pdf',
-      interactive: { type: 'document', filename: `invoice-${order.reference}`, url: invoiceWebsiteUrl },
+      interactive: {
+        type: 'document',
+        filename: `invoice-${order.reference}`,
+        url: invoiceWebsiteUrl,
+        ...(paymentUrl && !posChoice ? { payUrl: paymentUrl, payLabel: 'Pay now' } : {}),
+      },
     });
     if (posChoice) await sendPosPaymentChoice(customer, order);
   } else if (posChoice) {

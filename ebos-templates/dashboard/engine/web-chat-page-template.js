@@ -304,7 +304,18 @@ function renderActions(interactive) {
     return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '"' + linkAttrs + '><span class="icon">&#8663;</span>' + esc(interactive.buttonText || 'Open') + '</a><span class="linkcaption">' + (interactive.newTab ? 'Opens in a new tab -- come back here after' : 'Tap to open') + '</span></div>';
   }
   if (interactive.type === 'document') {
-    return '<div class="linkwrap"><a class="linkbtn" href="' + esc(interactive.url) + '" target="_blank" rel="noopener"><span class="icon">&#128196;</span>' + esc(interactive.filename || 'View document') + '</a><span class="linkcaption">Tap to view</span></div>';
+    // Chidera, 2026-09-25: "when i said invoice and pay now in same chat i
+    // meant itll have 2 buttons not just the pay now in the invoice" -- a
+    // real second button right here, not just relying on the invoice
+    // page's own embedded Pay Now once they open it. payUrl is optional
+    // (the receipt bubble, for instance, never has one -- nothing left to
+    // pay by then).
+    var docBtn = '<a class="linkbtn" href="' + esc(interactive.url) + '" target="_blank" rel="noopener"><span class="icon">&#128196;</span>' + esc(interactive.filename || 'View document') + '</a>';
+    var payBtn = interactive.payUrl
+      ? '<a class="linkbtn" href="' + esc(interactive.payUrl) + '" target="_blank" rel="noopener" style="margin-top:8px"><span class="icon">&#8663;</span>' + esc(interactive.payLabel || 'Pay now') + '</a>'
+      : '';
+    var caption = interactive.payUrl ? 'Tap to view, or pay now' : 'Tap to view';
+    return '<div class="linkwrap">' + docBtn + payBtn + '<span class="linkcaption">' + caption + '</span></div>';
   }
   if (interactive.type === 'item_question') {
     // Chidera, 2026-09-24: "can i have it as a dropdown they can choose,
