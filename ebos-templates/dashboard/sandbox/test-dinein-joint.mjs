@@ -204,7 +204,13 @@ async function main() {
   // decided first order (see flow.js's finishItemsCollection/
   // handleOrderModification, wasAlreadyConfirmed).
   await pool.query(`update "order" set status = 'preparation', confirmed_at = now() where id = $1`, [order.id]);
-  const { rows: servedRows } = await pool.query(`update "order" set served_at = now() where id = $1 returning *`, [order.id]);
+  // served_item_snapshot -- same {product_id: quantity} capture the real
+  // POST /dinein/orders/:id/served route takes (routes/dinein.js), needed
+  // here so resetServedForAddOn's own delta-only alert (further below) has
+  // a real baseline to diff the post-serve add-on against.
+  const { rows: snapshotRows } = await pool.query(`select product_id, sum(quantity) as quantity from order_item where order_id = $1 group by product_id`, [order.id]);
+  const servedSnapshot = Object.fromEntries(snapshotRows.map((r) => [r.product_id, Number(r.quantity)]));
+  const { rows: servedRows } = await pool.query(`update "order" set served_at = now(), served_item_snapshot = $2 where id = $1 returning *`, [order.id, JSON.stringify(servedSnapshot)]);
   const servedOrder = servedRows[0];
 
   // Chidera, 2026-09-24: "now we need dine in to go through web chat too."
@@ -302,7 +308,16 @@ async function main() {
 
   const { rows: orderRowsAfterYes } = await pool.query(`select served_at from "order" where id = $1`, [order.id]);
   assert(orderRowsAfterYes[0].served_at === null, 'served_at reset back to null once the add-on is actually confirmed');
-  assert(logs.some((l) => l.includes('added more after being served')), 'staff got pinged about the post-serve add-on, on the yes tap');
+  const addonAlert = logs.find((l) => l.includes('added more after being served'));
+  assert(Boolean(addonAlert), 'staff got pinged about the post-serve add-on, on the yes tap');
+  // Chidera, 2026-09-25: "for the hand over text of add on, let the add on
+  // only state the add on items not all the items" -- the alert used to
+  // restate the WHOLE running bill (summariseOrder's own itemLines); now
+  // it's scoped to just what's new since the last serve (3 more zobo),
+  // via served_item_snapshot -- guest 1's own unchanged Jollof Rice line
+  // must NOT appear at all.
+  assert(addonAlert?.includes('3x Zobo Drink'), `the alert states exactly the new quantity added (3 more zobo), not the running total of 5 (got "${addonAlert}")`);
+  assert(!addonAlert?.includes('Jollof Rice'), `the alert does NOT restate Jollof Rice -- that line never changed since being served (got "${addonAlert}")`);
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

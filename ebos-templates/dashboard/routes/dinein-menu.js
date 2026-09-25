@@ -7,7 +7,7 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderPayPage } from '../engine/menu-page-template.js';
 import { createOrderPayment, ensureDynamicPosAccount, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, handover, notifyCustomerClaimedPosPayment, reply, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
-import { getPaymentConfig, initializeOrderPaymentPaystackTransaction } from '../engine/payment.js';
+import { getPaymentConfig, initializeOrderPaymentPaystackTransaction, initializeOrderPaymentMonnifyTransaction } from '../engine/payment.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
 import { getWaDisplayNumber } from '../engine/whatsapp-send.js';
@@ -793,6 +793,26 @@ router.get('/:qrToken/pay', async (req, res) => {
           return null;
         }));
     }
+  } else if (paymentConfig?.provider === 'monnify' && actingCustomer) {
+    // Chidera, 2026-09-25 (live report): "on dine in when i reach pay,
+    // its not linked to the monify or the payment provider set for the
+    // business?" -- this whole branch never existed, same gap
+    // "LET DINE IN SUPPORT PAYSTACK O" already closed for Paystack,
+    // Monnify was just never given the same treatment.
+    const myPending = await findMyPendingPayment(order, actingCustomer.id);
+    if (myPending) {
+      paystackUrl = myPending.payment_link_url
+        || (await initializeOrderPaymentMonnifyTransaction({
+          orderPayment: myPending,
+          order,
+          customer: actingCustomer,
+          amount: Number(myPending.amount),
+          callbackUrl: `${process.env.PUBLIC_URL}/wa/${await ensureMenuToken(actingCustomer)}?table=${req.params.qrToken}`,
+        }).catch((err) => {
+          console.error('initializeOrderPaymentMonnifyTransaction failed:', err.message);
+          return null;
+        }));
+    }
   }
   res.set('Content-Type', 'text/html').send(
     renderPayPage({
@@ -864,6 +884,20 @@ router.post('/:qrToken/pay/create', async (req, res) => {
       // whole table), keyed to order_payment, not the order as a whole.
       paystackUrl = await initializeOrderPaymentPaystackTransaction({ orderPayment: payment, order, customer: actingCustomer, amount: Number(payment.amount) }).catch((err) => {
         console.error('initializeOrderPaymentPaystackTransaction failed:', err.message);
+        return null;
+      });
+    } else if (paymentConfig?.provider === 'monnify') {
+      // Chidera, 2026-09-25 (live report): same Monnify gap as the GET
+      // /pay route above -- this is where a guest's FIRST payment request
+      // actually generates the real checkout link.
+      paystackUrl = await initializeOrderPaymentMonnifyTransaction({
+        orderPayment: payment,
+        order,
+        customer: actingCustomer,
+        amount: Number(payment.amount),
+        callbackUrl: `${process.env.PUBLIC_URL}/wa/${await ensureMenuToken(actingCustomer)}?table=${req.params.qrToken}`,
+      }).catch((err) => {
+        console.error('initializeOrderPaymentMonnifyTransaction failed:', err.message);
         return null;
       });
     }

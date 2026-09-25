@@ -1,7 +1,7 @@
 import express from 'express';
 import { verifyMonnifySignature } from './monnify-api.js';
-import { findOrderByPaymentReference } from './payment.js';
-import { completePayment } from './flow.js';
+import { findOrderByPaymentReference, findOrderPaymentByPaymentReference } from './payment.js';
+import { completePayment, confirmOrderPayment } from './flow.js';
 
 export const router = express.Router();
 
@@ -19,11 +19,17 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
     if (event.eventType !== 'SUCCESSFUL_TRANSACTION') return;
     const reference = event.eventData?.paymentReference;
     if (!reference) return;
-    // Order-level only for now -- engine/payment.js's
-    // initializeMonnifyTransaction is the only caller that ever writes a
-    // Monnify reference anywhere (no topup/dine-in Monnify support yet).
-    // Extend here the same way webhook-paystack.js grew: only once Monnify
-    // is actually wired into those flows too.
+    // Chidera, 2026-09-25 (live report): "on dine in when i reach pay,
+    // its not linked to the monify or the payment provider set for the
+    // business?" -- engine/payment.js's initializeOrderPaymentMonnifyTransaction
+    // now writes dine-in's own Monnify reference into order_payment, same
+    // narrower-first check webhook-paystack.js already does (a dine-in
+    // payment's own reference never matches a real "order" row either).
+    const orderPayment = await findOrderPaymentByPaymentReference(reference);
+    if (orderPayment) {
+      await confirmOrderPayment(orderPayment.id);
+      return;
+    }
     const order = await findOrderByPaymentReference(reference);
     if (order) await completePayment(order.id);
   } catch (err) {
