@@ -7,7 +7,20 @@
     # cache forever), meaning a repeat visit re-downloaded the same bytes
     # from scratch every time. Both fixed here, not in Express, since Caddy
     # already sits in front of every request and does this in one line.
-    encode gzip zstd
+    # Chidera, 2026-09-25: "that customer reply coming in and staff seeing
+    # it pop in live without refreshing it" -- confirmed live on dee: with
+    # encode applying to EVERY response, routes/api.js's SSE routes
+    # (/api/conversations/stream, /api/conversations/:id/stream) sat
+    # buffered behind Caddy's own gzip writer, so the very first byte
+    # (and the response headers themselves) didn't reach the browser
+    # until the first ~20s keep-alive ping finally forced enough through
+    # to flush -- the opposite of instant. @notstream excludes just those
+    # two paths so the rest of the dashboard keeps the compression win
+    # above untouched.
+    @notstream {
+        not path /api/conversations/stream /api/conversations/*/stream
+    }
+    encode @notstream gzip zstd
 
     handle_path /rest/v1/* {
         reverse_proxy postgrest:3000
