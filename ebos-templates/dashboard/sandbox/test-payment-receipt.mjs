@@ -33,7 +33,7 @@ async function main() {
     try { await fetch(BASE + '/'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
 
-  await pool.query(`update business set bank_name='GTBank', bank_account_number='0123456789', bank_account_name='Test Biz'`);
+  await pool.query(`update business set bank_name='GTBank', bank_account_number='0123456789', bank_account_name='Test Biz', brand_color='#7A2E8F'`);
   const { rows: prodRows } = await pool.query(`insert into product (name, price) values ('Jollof Rice', 2500) returning id`);
   const customer = await flow.findOrCreateCustomer({ phoneNumber: '2348066660007', channel: 'whatsapp' });
 
@@ -57,6 +57,7 @@ async function main() {
   assert(html.includes('Paid via'), 'shows how it was paid');
   assert(html.includes('Card'), 'shows the real payment method, card (checked substring "Card")');
   assert(html.includes('NGN 2,500.00'), 'shows the paid amount, formatted');
+  assert(html.includes('#7A2E8F'), 'checkmark/headline use the business\'s own brand_color, not a fixed green');
   assert(!html.includes('<table>'), 'does NOT use the invoice\'s wide bordered item table -- a plain list instead');
   assert(!html.includes('BILLED TO'), 'does NOT say "Billed to" (invoice-only language)');
   assert(!html.includes('Pay now'), 'does NOT show a Pay now button -- it is already paid');

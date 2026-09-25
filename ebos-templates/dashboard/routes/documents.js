@@ -64,6 +64,22 @@ function paymentMethodLabel(order) {
   return 'Online payment';
 }
 
+// Chidera, 2026-09-25: "let it have the business branding colour just the
+// look of a receipt" -- the receipt's own checkmark/headline accent below
+// needs a soft TINTED version of an arbitrary brand hex (badge background),
+// not just the solid colour -- this is that tint, at whatever alpha the
+// caller wants, computed from the same hex readableTextColor already
+// parses rather than a second, different colour-parsing routine.
+function hexToRgba(hex, alpha) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return `rgba(28, 24, 21, ${alpha})`;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 255,
+    g = (n >> 8) & 255,
+    b = n & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 // Picks readable text over an arbitrary brand colour instead of assuming
 // it's always dark -- a business that picks a pale brand colour would
 // otherwise get white-on-white header text.
@@ -225,7 +241,13 @@ function documentPage({ title, business, customer, order, items }) {
 // then a short clean list of details -- not a wide invoice grid. Items
 // still shown for record-keeping, but as a de-emphasized plain list
 // underneath, not the page's main event.
+// Chidera, 2026-09-25, follow-up: "let it have the business branding
+// colour just the look of a receipt" -- the checkmark badge/headline
+// below were a fixed success-green; now the business's own brand_color
+// (same field the invoice/menu/tracking pages already brand with), so
+// this still reads as THIS business's receipt, not a generic template.
 function receiptPage({ business, customer, order, items }) {
+  const brand = business.brand_color || '#1C1815';
   const itemRows = items
     .map(
       (i) =>
@@ -243,14 +265,14 @@ function receiptPage({ business, customer, order, items }) {
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap">
 <style>
-  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--success:#2E7D5B;--success-soft:rgba(46,125,91,0.1)}
+  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--accent:${brand};--accent-soft:${hexToRgba(brand, 0.12)}}
   *{box-sizing:border-box}
   html,body{background:var(--paper)}
   body { font-family: "Inter", system-ui, sans-serif; max-width: 420px; margin: 2.5rem auto; padding: 0 1rem 3rem; color: var(--ink); }
   .card { background: #fff; border-radius: 20px; padding: 32px 26px 26px; text-align: center; box-shadow: 0 1px 3px rgba(28,24,21,0.06), 0 10px 28px rgba(28,24,21,0.06); }
-  .check-badge { width: 60px; height: 60px; border-radius: 50%; background: var(--success-soft); color: var(--success); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; }
+  .check-badge { width: 60px; height: 60px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; }
   .check-badge svg { width: 28px; height: 28px; }
-  .headline { font-family: "Fraunces", serif; font-weight: 700; font-size: 19px; color: var(--success); }
+  .headline { font-family: "Fraunces", serif; font-weight: 700; font-size: 19px; color: var(--accent); }
   .biz-name { font-size: 13px; color: var(--mid); margin-top: 3px; }
   .amount { font-family: "Fraunces", serif; font-size: 36px; font-weight: 700; margin: 18px 0 22px; letter-spacing: -0.01em; }
   .divider { border-top: 1px dashed var(--line); margin: 4px 0 14px; }
