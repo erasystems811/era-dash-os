@@ -308,7 +308,16 @@ export async function sendStaffReply(customerId, text, staffId) {
   const customer = rows[0];
   if (!customer) throw new Error('Customer not found.');
 
-  if (customer.channel === 'whatsapp') return sendStaffReplyRedirect(customer, text, staffId);
+  // Chidera, 2026-09-25: "permit staff text from conversation tab to come
+  // directly to chat, i want to screenrecord it for meta app review, do
+  // it now, ill tell you when to undo it" -- a deliberate, temporary,
+  // off-by-default bypass of the web-chat redirect for this one send
+  // path, so a staff reply lands as a real, direct WhatsApp message
+  // instead (what Meta's own reviewers need to see). Gated on an env var
+  // so the shared codebase itself stays unchanged for every business --
+  // only set STAFF_REPLY_FORCE_DIRECT_WHATSAPP=1 on era-demo's own server
+  // env, nowhere else, and only until she says to undo it.
+  if (customer.channel === 'whatsapp' && process.env.STAFF_REPLY_FORCE_DIRECT_WHATSAPP !== '1') return sendStaffReplyRedirect(customer, text, staffId);
 
   const sendResult = await botEngine.sendMessage({ trigger: 'explicit_type_command', to: recipientFor(customer), text, whatsappSend: await senderFor(customer) });
   await logMessage({
