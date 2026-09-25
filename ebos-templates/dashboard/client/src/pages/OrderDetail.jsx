@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useStaff, canEdit } from '../StaffContext.jsx';
 import { nextStageFor, canCancelFrom } from '../orderStages.js';
@@ -7,6 +7,7 @@ import Loading from '../components/Loading.jsx';
 
 export default function OrderDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const { staff } = useStaff();
   const [data, setData] = useState(null);
 
@@ -177,9 +178,23 @@ export default function OrderDetail() {
           <button className="secondary" onClick={printDocket} style={{ padding: '8px 14px' }}>
             Print docket
           </button>
-          <Link to="/" className="btn secondary" style={{ padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8 }}>
+          {/* Chidera, 2026-09-25: "when staff tap back to orders it takes
+              them back to delivery in orders tab instead of back in the in
+              house tab still" -- this used to be a fixed Link to "/" (the
+              Orders tab), so opening an order from In-House's own kanban
+              and tapping back always dumped staff onto Orders instead of
+              where they actually came from. Real browser-history back
+              instead, so it returns to whichever tab (In-House, Orders, or
+              anywhere else a link to an order lives) staff actually opened
+              it from. */}
+          <button
+            type="button"
+            onClick={() => navigate(-1)}
+            className="btn secondary"
+            style={{ padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8 }}
+          >
             Back to orders
-          </Link>
+          </button>
         </div>
       </div>
 
