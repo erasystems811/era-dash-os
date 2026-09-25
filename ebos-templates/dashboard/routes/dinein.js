@@ -185,6 +185,49 @@ router.get('/orders/serving', async (req, res) => {
   res.json(rows.map((o) => ({ ...o, items: itemsWithServedDiff(o) })));
 });
 
+// Chidera, 2026-09-25: "can in house have its own dashboard, with cash
+// collected." /orders/stats/today already has an in_house-scoped branch,
+// but only for a staff account whose OWN work_area happens to be
+// 'in_house' (req.workArea, set from the logged-in staff's own row) -- an
+// owner/manager (work_area null, unrestricted) viewing In House itself
+// would get the WHOLE business's numbers back, online orders included.
+// This is always dine-in-only regardless of who's asking, same
+// cash/card/transfer split /finance/summary already established for
+// cash_collected (POST /orders/:id/payment-method is the only thing that
+// ever sets payment_method/cash_collected at all) -- "other" covers a
+// dine-in table that paid through a real payment link (Paystack/Monnify)
+// or an auto-matched POS transfer instead of the manual Mark-paid flow,
+// computed as a remainder in JS so the four figures always sum to
+// exactly `collected`, never drift apart from independent rounding.
+router.get('/stats/today', async (req, res) => {
+  const { rows } = await pool.query(
+    `select count(*) as orders,
+            coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as collected,
+            coalesce(sum(cash_collected) filter (where payment_method = 'cash'), 0) as cash,
+            coalesce(sum(total) filter (where payment_method = 'card' and payment_status in ('confirmed', 'accepted')), 0) as card,
+            coalesce(sum(total) filter (where payment_method = 'transfer' and payment_status in ('confirmed', 'accepted')), 0) as transfer,
+            count(distinct table_id) as tables
+     from "order"
+     where channel = 'dinein' and created_at >= date_trunc('day', now())
+       and ($1::uuid is null or branch_id = $1)`,
+    [req.branchId]
+  );
+  const r = rows[0];
+  const collected = Number(r.collected);
+  const cash = Number(r.cash);
+  const card = Number(r.card);
+  const transfer = Number(r.transfer);
+  res.json({
+    orders: Number(r.orders),
+    tablesServed: Number(r.tables),
+    collected,
+    cash,
+    card,
+    transfer,
+    other: Math.max(0, collected - cash - card - transfer),
+  });
+});
+
 // The only way an order leaves pipeline one -- sets served_at, nothing
 // else (status/payment are untouched, still tracked separately in
 // pipeline two). engine/flow.js's applyOrderModifications resets this back

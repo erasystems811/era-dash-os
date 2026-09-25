@@ -24,13 +24,23 @@ import Loading from '../components/Loading.jsx';
 // maybe a pipeline" -- same board/board-column/docket layout as Orders.jsx's
 // own kanban, so this reads as one real pipeline, not two disconnected
 // lists.
+function naira(amount) {
+  return `₦${Number(amount).toLocaleString()}`;
+}
+
 export default function InHouse() {
   const [serving, setServing] = useState(null);
   const [awaitingPayment, setAwaitingPayment] = useState(null);
+  // Chidera, 2026-09-25: "can in house have its own dashboard, with cash
+  // collected" -- always dine-in-only regardless of who's viewing (see
+  // routes/dinein.js's /stats/today of its own comment for why this
+  // couldn't just reuse /orders/stats/today's existing in_house branch).
+  const [stats, setStats] = useState(null);
 
   function load() {
     api.get('/dinein/orders/pending').then(setServing);
     api.get('/dinein/orders/serving').then(setAwaitingPayment);
+    api.get('/dinein/stats/today').then(setStats);
   }
   useEffect(() => {
     load();
@@ -205,6 +215,40 @@ export default function InHouse() {
           <p className="subtitle">Dine-in orders, oldest first.</p>
         </div>
       </div>
+
+      {stats && (
+        <div className="card" style={{ maxWidth: 560 }}>
+          <h3 style={{ marginTop: 0 }}>Today</h3>
+          <div className="figs">
+            <div className="fig">
+              <span>Tables served</span>
+              <strong className="mono">{stats.tablesServed}</strong>
+            </div>
+            <div className="fig">
+              <span>Collected</span>
+              <strong className="mono">{naira(stats.collected)}</strong>
+            </div>
+            <div className="fig">
+              <span>Cash</span>
+              <strong className="mono">{naira(stats.cash)}</strong>
+            </div>
+            <div className="fig">
+              <span>Card</span>
+              <strong className="mono">{naira(stats.card)}</strong>
+            </div>
+            <div className="fig">
+              <span>Transfer</span>
+              <strong className="mono">{naira(stats.transfer)}</strong>
+            </div>
+            {stats.other > 0 && (
+              <div className="fig">
+                <span>Other (link/POS)</span>
+                <strong className="mono">{naira(stats.other)}</strong>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="board" style={{ display: 'flex', gap: 14, overflowX: 'auto', paddingBottom: 8 }}>
         {column('serving', 'Serving', 'waiting on the kitchen/bar', serving, 'Nothing pending right now.', 'Served', markServed)}

@@ -258,25 +258,41 @@ export default function OrderDetail() {
         <p style={{ textAlign: 'right', fontWeight: 700, marginTop: 4 }}>Total: NGN {Number(order.total).toLocaleString()}</p>
       </div>
 
-      {!dineinUnserved && (paymentProofs.length > 0 || (canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted')) && (
-        <div className="card">
-          <h3 style={{ marginTop: 0 }}>Payment</h3>
-          {paymentProofs.length > 0 ? (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
-              {paymentProofs.map((p) => (
-                <a key={p.id} href={p.data_url} target="_blank" rel="noreferrer">
-                  <img src={p.data_url} alt="Payment proof" style={{ maxWidth: 200, borderRadius: 8, display: 'block' }} />
-                </a>
-              ))}
-            </div>
-          ) : (
-            <p className="hint">No proof of payment submitted yet.</p>
-          )}
-          {canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted' && (
-            <button onClick={confirmPayment}>Confirm payment received</button>
-          )}
-        </div>
-      )}
+      {/* Chidera, 2026-09-25: "why is there payment received button when
+          payment is auto confirmed? its if payment is manual itll need
+          tapping." A dine-in table already closes itself out through
+          InHouse.jsx's own Mark-paid flow (which records payment_method/
+          cash_collected properly, see its own 2026-09-24 comment) or a
+          real Paystack/Monnify/Moniepoint webhook auto-confirming --
+          neither needs a bare "I'm sure this is paid" override button
+          with no evidence behind it, and using this one instead of Mark
+          paid would silently skip recording how it was actually paid.
+          For dine-in, this card now only ever appears to review an
+          actual submitted proof (a guest paying their own split share by
+          bank transfer, still a real dine-in path) -- never the
+          no-evidence fallback. Non-dine-in orders (online, proof-of-
+          payment being the only path for some businesses) are unchanged. */}
+      {!dineinUnserved &&
+        (paymentProofs.length > 0 ||
+          (order.channel !== 'dinein' && canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted')) && (
+          <div className="card">
+            <h3 style={{ marginTop: 0 }}>Payment</h3>
+            {paymentProofs.length > 0 ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
+                {paymentProofs.map((p) => (
+                  <a key={p.id} href={p.data_url} target="_blank" rel="noreferrer">
+                    <img src={p.data_url} alt="Payment proof" style={{ maxWidth: 200, borderRadius: 8, display: 'block' }} />
+                  </a>
+                ))}
+              </div>
+            ) : (
+              <p className="hint">No proof of payment submitted yet.</p>
+            )}
+            {canEdit(staff) && order.payment_status !== 'confirmed' && order.payment_status !== 'accepted' && (
+              <button onClick={confirmPayment}>Confirm payment received</button>
+            )}
+          </div>
+        )}
 
       {topups.length > 0 && (
         <div className="card">

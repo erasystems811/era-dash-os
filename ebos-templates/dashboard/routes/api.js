@@ -1495,6 +1495,26 @@ router.post('/orders/:id/status', requireStaffApi, async (req, res) => {
       })
       .catch((err) => console.error('closeTableSessionIfSettled failed:', err.message));
   }
+  if (status === 'cancelled') {
+    // Chidera, 2026-09-25: "why is there cancel order in the in house
+    // kanban orders pipeline is staff meant to be able to cancel? isnt it
+    // meant to be a close table thing?" -- cancelling one round doesn't
+    // itself free the table (routes/dinein.js's own /tables/:id/close
+    // comment: this stays as the real fallback for "a walked-out,
+    // never-paid order got cancelled instead of completed"), but nothing
+    // closed the table automatically the way "Mark paid" already does
+    // above -- staff had to remember a separate step. Same fire-and-
+    // forget, no-op-unless-genuinely-settled call: cancelling a table's
+    // LAST outstanding round (the common "they walked out" case) now
+    // closes it out on its own; cancelling one round of a table that
+    // still has other active orders correctly leaves the table open.
+    pool
+      .query('select session_id from "order" where id = $1', [req.params.id])
+      .then(({ rows }) => {
+        if (rows[0]?.session_id) return closeTableSessionIfSettled(rows[0].session_id, { closedBy: 'auto', staffId: req.staff.id });
+      })
+      .catch((err) => console.error('closeTableSessionIfSettled failed:', err.message));
+  }
   // One "Mark as ready" click on the Preparation stage, same button
   // regardless of fulfilment_type (Chidera's call) -- everything below
   // branches automatically off the order's own real fulfilment_type

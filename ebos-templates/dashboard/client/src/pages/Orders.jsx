@@ -256,6 +256,10 @@ export default function Orders() {
   // inline instead of its own page.
   const [inHouseServing, setInHouseServing] = useState(null);
   const [inHouseAwaitingPayment, setInHouseAwaitingPayment] = useState(null);
+  // Same as InHouse.jsx's own dashboard card (routes/dinein.js's
+  // /stats/today) -- Chidera, 2026-09-25: "can in house have its own
+  // dashboard, with cash collected."
+  const [inHouseStats, setInHouseStats] = useState(null);
   const showTabs = dineinEnabled && !isPinTier(staff);
 
   function loadInHouse() {
@@ -271,6 +275,10 @@ export default function Orders() {
       .get('/dinein/orders/serving')
       .then(setInHouseAwaitingPayment)
       .catch(() => setInHouseAwaitingPayment([]));
+    api
+      .get('/dinein/stats/today')
+      .then(setInHouseStats)
+      .catch(() => setInHouseStats(null));
   }
 
   function load() {
@@ -454,6 +462,40 @@ export default function Orders() {
               </span>
             )}
           </button>
+        </div>
+      )}
+
+      {activeTab === 'in_house' && showTabs && inHouseStats && (
+        <div className="card" style={{ maxWidth: 560 }}>
+          <h3 style={{ marginTop: 0 }}>Today</h3>
+          <div className="figs">
+            <div className="fig">
+              <span>Tables served</span>
+              <strong className="mono">{inHouseStats.tablesServed}</strong>
+            </div>
+            <div className="fig">
+              <span>Collected</span>
+              <strong className="mono">{naira(inHouseStats.collected)}</strong>
+            </div>
+            <div className="fig">
+              <span>Cash</span>
+              <strong className="mono">{naira(inHouseStats.cash)}</strong>
+            </div>
+            <div className="fig">
+              <span>Card</span>
+              <strong className="mono">{naira(inHouseStats.card)}</strong>
+            </div>
+            <div className="fig">
+              <span>Transfer</span>
+              <strong className="mono">{naira(inHouseStats.transfer)}</strong>
+            </div>
+            {inHouseStats.other > 0 && (
+              <div className="fig">
+                <span>Other (link/POS)</span>
+                <strong className="mono">{naira(inHouseStats.other)}</strong>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
