@@ -193,8 +193,20 @@ export function renderWebChatPage({ businessName, coverPhotoVersion, waNumber, h
      :active (no JS, no round-trip wait), on every real tappable control
      on this page, so a tap always reads as "that registered" the moment
      it happens, not only once a reply eventually shows up. */
-  .actionrow,.linkbtn,.confirmbtn,.sheetrow-toggle,.qtybtn,#listSheetSend,#qSheetSend,.composer-icon,#sendBtn,a.back{transition:transform .08s ease}
-  .actionrow:active,.linkbtn:active,.confirmbtn:active,.sheetrow-toggle:active,.qtybtn:active,#listSheetSend:active,#qSheetSend:active,.composer-icon:active,#sendBtn:active,a.back:active{transform:scale(.94)}
+  /* Chidera, 2026-09-25: "when i tap a button on web chat can it have
+     that subtle bounce effect... this is for all buttons, dine in and
+     online." Dine-in and online already share this exact page/template
+     (only the message THREAD differs, routes/web-chat.js's own
+     table_session_id scoping) so one fix here covers both automatically.
+     Was a manually-maintained list of specific classes/ids -- missed
+     #qSheetClose/#listSheetClose (the sheet "X" buttons) entirely, and
+     would keep missing whatever real button gets added next. A blanket
+     button-element selector covers every real button on this page by
+     construction, present or future; a.linkbtn/a.back stay named
+     explicitly since those are real navigations (anchor tags), not
+     button elements. */
+  button,.linkbtn,a.back{transition:transform .08s ease}
+  button:active,.linkbtn:active,a.back:active{transform:scale(.94)}
   /* Chidera, 2026-09-24: "the next text just appears, customer may not
      even notice its a new text... add the typing sign." A real WhatsApp-
      style three-dot bubble shown for 2s before a new bot message actually
@@ -470,7 +482,7 @@ document.getElementById('listSheetRows').addEventListener('click', function (e) 
     if (sheetSubmitting) return;
     sheetSubmitting = true;
     document.getElementById('listSheet').classList.remove('open');
-    tap({ rowId: 'upsell::skip' });
+    tap({ rowId: 'upsell::skip' }, '[tapped: No thanks]');
     return;
   }
   const minusBtn = e.target.closest('[data-qty-minus]');
@@ -507,6 +519,13 @@ document.getElementById('listSheetSend').addEventListener('click', function (e) 
     return { productId: rowId.slice('upsell::'.length), quantity: selectedQuantities[rowId] };
   });
   if (!picks.length) return;
+  // handleUpsellMultiTap logs one real inbound row PER pick ("[tapped:
+  // 2x Chapman]", ...) -- the optimistic echo mirrors that exactly, one
+  // bubble per pick, not one combined line.
+  const pickEchoes = Object.keys(selectedQuantities).map(function (rowId) {
+    const row = (openListInteractive.rows || []).find(function (r) { return r.id === rowId; });
+    return '[tapped: ' + selectedQuantities[rowId] + 'x ' + (row ? row.title : rowId) + ']';
+  });
   // Chidera, 2026-09-24, real report: "when i tap a choose and put 2
   // drinks, the bot sends me 2 response." Same double-tap protection the
   // confirm/quick-reply buttons already have (see this file's other
@@ -519,7 +538,7 @@ document.getElementById('listSheetSend').addEventListener('click', function (e) 
   if (e.currentTarget.disabled) return;
   e.currentTarget.disabled = true;
   document.getElementById('listSheet').classList.remove('open');
-  tap({ upsellPicks: picks });
+  tap({ upsellPicks: picks }, pickEchoes);
 });
 
 // Chidera, 2026-09-24: "can i have it as a dropdown they can choose, and
@@ -553,7 +572,7 @@ document.getElementById('qSheetSend').addEventListener('click', function (e) {
   const note = document.getElementById('qSheetNote').value;
   e.currentTarget.disabled = true;
   document.getElementById('qSheet').classList.remove('open');
-  tap({ itemQuestionAnswer: { option: option, note: note } });
+  tap({ itemQuestionAnswer: { option: option, note: note } }, '[selected: ' + (note ? option + ' (' + note + ')' : option) + ']');
 });
 
 document.getElementById('scroll').addEventListener('click', function (e) {
@@ -579,7 +598,7 @@ document.getElementById('scroll').addEventListener('click', function (e) {
   // whichever this button actually sits in, disable every button inside
   // it so a double-tap can't fire twice while the reply is in flight.
   btn.parentElement.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
-  tap({ buttonId: btn.dataset.buttonId, title: btn.dataset.title });
+  tap({ buttonId: btn.dataset.buttonId, title: btn.dataset.title }, '[tapped: ' + btn.dataset.title + ']');
 });
 
 // Chidera, 2026-09-24, real report: "when i tapped make a complaint it
@@ -592,10 +611,30 @@ document.getElementById('scroll').addEventListener('click', function (e) {
 // possible gap. A tap while one's already in flight is silently dropped,
 // never queued or retried -- the customer's first tap is what happens,
 // a second one on top of it never means "do it twice."
+// Chidera, 2026-09-25: "when i respond to bot on web chat like a tap or
+// something cant my response seem likee a normal response and appear in
+// chat immediately i tap it, right now my response appears when bot is
+// delivering its own response, and they both apperar same time." sendText()
+// already gives typed messages this instant "it sent" feel (appendMessage,
+// right before the fetch); tap() never did the same, so a tap's own
+// customer-facing bubble only ever showed up later, in the same poll batch
+// as the bot's reply. echoTexts -- one string, or an array (a multi-pick
+// upsell logs one real inbound row PER pick, server-side) -- must match the
+// real logMessage body EXACTLY (the same "[tapped: X]"/"[selected: X]"
+// bracket format every handler already logs), so the optimistic bubble and
+// the real row that lands right behind it are pixel-identical, no visible
+// swap.
 let tapInFlight = false;
-async function tap(body) {
+async function tap(body, echoTexts) {
   if (tapInFlight) return;
   tapInFlight = true;
+  const echoList = echoTexts ? (Array.isArray(echoTexts) ? echoTexts : [echoTexts]) : [];
+  echoList.forEach(function (text, i) {
+    const localMsg = { id: 'local-tap-' + Date.now() + '-' + i, direction: 'inbound', sender: 'customer', body: text, interactive: null, created_at: new Date().toISOString() };
+    HISTORY.push(localMsg);
+    appendMessage(localMsg);
+  });
+  if (echoList.length) playSendSound();
   try {
     await fetch(TAP_PATH, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   } catch (err) {}
@@ -725,42 +764,56 @@ async function poll() {
     const url = POLL_PATH + (lastCursor ? (POLL_PATH.includes('?') ? '&' : '?') + 'since=' + encodeURIComponent(lastCursor) : '');
     const res = await fetch(url);
     const rows = await res.json();
-    if (Array.isArray(rows) && rows.length) {
-      const applyRows = function (animateIds) {
-        // Drop the optimistic local echo once the real logged row for it
-        // arrives, so a customer's own typed message doesn't render twice.
-        HISTORY = HISTORY.filter(function (m) { return typeof m.id !== 'string' || !m.id.startsWith('local-'); });
-        HISTORY = HISTORY.concat(rows);
-        lastCursor = rows[rows.length - 1].created_at;
-        renderAll(animateIds);
-        if (rows.some(function (m) { return m.trigger === 'payment_confirmed'; })) {
-          showBanner('Payment confirmed!');
-        }
-      };
-      // Chidera, 2026-09-24: "add the typing sign but it should type for 2
-      // seconds, so they know a new text has dropped." Only for a real bot
-      // reply arriving (outbound) -- nothing to announce for the
-      // customer's own message being echoed back.
-      const outboundInBatch = rows.filter(function (m) { return m.direction === 'outbound'; });
-      if (outboundInBatch.length) {
-        pendingTyping = true;
-        showTyping();
-        setTimeout(function () {
-          hideTyping();
-          // Chidera, 2026-09-24: "i need the pop in effect when a text is
-          // sent in." Only the real bot reply(ies) in this batch bounce in
-          // -- the customer's own echoed-back message (if this same batch
-          // also carries one) already got its bounce the instant it was
-          // sent, via appendMessage; re-animating it here too would just
-          // double it.
-          applyRows(new Set(outboundInBatch.map(function (m) { return m.id; })));
-          playReceiveSound();
-          pendingTyping = false;
-        }, 2000);
-      } else {
-        applyRows();
-      }
+    if (!Array.isArray(rows) || !rows.length) return;
+    // Drop the optimistic local echo(es) once the real logged row(s)
+    // arrive, so a customer's own typed/tapped message doesn't render
+    // twice.
+    HISTORY = HISTORY.filter(function (m) { return typeof m.id !== 'string' || !m.id.startsWith('local-'); });
+    lastCursor = rows[rows.length - 1].created_at;
+
+    const inboundInBatch = rows.filter(function (m) { return m.direction !== 'outbound'; });
+    const outboundInBatch = rows.filter(function (m) { return m.direction === 'outbound'; });
+
+    // The customer's own message(s), now logged for real -- silently
+    // replaces the local echo (already bounced in the instant it was
+    // sent), no re-animation, no delay.
+    if (inboundInBatch.length) {
+      HISTORY = HISTORY.concat(inboundInBatch);
+      renderAll();
     }
+    if (!outboundInBatch.length) return;
+
+    // Chidera, 2026-09-24: "add the typing sign but it should type for 2
+    // seconds, so they know a new text has dropped."
+    // Chidera, 2026-09-25: "when receipt and rate your order is landing
+    // let them land one by one" -- more than one real bot message can
+    // land in the same poll batch (a receipt bubble immediately followed
+    // by a feedback request, say); revealing all of them in one renderAll()
+    // used to pop every one in at the exact same instant, reading as one
+    // dump instead of a real back-and-forth. Same typing-dots pause before
+    // the first one, now followed by a real stagger between each
+    // additional one in the same batch -- each gets its own reveal, sound,
+    // and (where relevant) banner check, one at a time.
+    pendingTyping = true;
+    showTyping();
+    setTimeout(function revealOutboundOneByOne() {
+      hideTyping();
+      let i = 0;
+      function revealNext() {
+        const m = outboundInBatch[i];
+        HISTORY.push(m);
+        appendMessage(m);
+        playReceiveSound();
+        if (m.trigger === 'payment_confirmed') showBanner('Payment confirmed!');
+        i += 1;
+        if (i < outboundInBatch.length) {
+          setTimeout(revealNext, 700);
+        } else {
+          pendingTyping = false;
+        }
+      }
+      revealNext();
+    }, 2000);
   } catch (err) {}
 }
 setInterval(poll, 3000);

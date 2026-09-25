@@ -3024,8 +3024,15 @@ export async function sendPaymentInstructions(customer, order) {
   // what's being bought, not a footnote on the payment line. Always followed
   // by bank details now -- see the note above the function.
   const invoiceUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${invoicePath}` : null;
+  // "attached above" is only true for WhatsApp/Instagram (a genuinely
+  // separate, earlier real document send there) -- on website it's the
+  // SAME bubble, and the document/interactive part always renders BELOW
+  // the body text (renderMessage's own body-then-actions order). Same fix
+  // as completePayment's own receiptLine, see its comment.
   const invoiceLine = invoiceSent
-    ? `Your invoice is attached above.`
+    ? customer.channel === 'website'
+      ? `Your invoice is attached below.`
+      : `Your invoice is attached above.`
     : invoiceUrl
       ? `Here's your invoice: ${invoiceUrl}`
       : `Your invoice for this order is ready.`;
@@ -4097,6 +4104,102 @@ export async function completeTopupPayment(topupId) {
   }
 }
 
+// Chidera, 2026-09-25: "after payment is confirmed instead of the bare
+// payment received, send customer a receipt, but receipt shouldnt look
+// like invoice it is a receipt" -- a real RECEIPT (routes/documents.js's
+// own receiptPage, deliberately not the invoice template with a different
+// title -- see its own comment) sent as a WhatsApp document, same
+// resilient send-then-fallback-to-a-link shape sendPaymentInstructions
+// already uses for the invoice. Extracted out of completePayment
+// (2026-09-25, "hope dine in has receipt too and the receipt has back to
+// chat") so routes/api.js's own dine-in "Mark paid" route can send the
+// exact same real receipt -- dine-in settles in person, so its own
+// payment never went through completePayment at all (payment_status never
+// reaches 'confirmed'/'accepted' there -- see completePayment's own
+// comment on this), and had no receipt of any kind until now.
+// followUpText -- whatever operational info belongs right after the
+// receipt line, in the SAME message/bubble (delivery status, pickup
+// instructions, or dine-in's own thank-you) -- always starts with its own
+// leading space, so callers with nothing to add can just pass ''.
+export async function sendReceiptMessage(customer, order, followUpText = '') {
+  const receiptPath = await createReceipt(order);
+  let receiptSent = false;
+  // Chidera, 2026-09-25: "the receipt and the your receipt is attached
+  // should be in one chat" -- website's own document bubble used to be
+  // logged separately, then a SECOND bubble with the actual follow-up
+  // text went out right after. Only the URL is captured here now; the
+  // real combined send (text + document, one bubble) happens below once
+  // the full body text is known.
+  let receiptWebsiteUrl = null;
+  if (process.env.PUBLIC_URL) {
+    try {
+      // Found live, 2026-09-25: this whole block predates the website
+      // channel (main-only, never touched by the web-chat merge) and had
+      // no website branch at all -- customer.channel === 'website' fell
+      // straight into the `else` below, sending a REAL WhatsApp document
+      // to a customer who should have gotten a free chat bubble.
+      if (customer.channel === 'website') {
+        // website: same fix as sendPaymentInstructions' own invoice branch
+        // -- link to the plain HTML receipt page, not /pdf (Gotenberg-
+        // backed, internal-only).
+        receiptWebsiteUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
+      } else {
+        const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
+        if (customer.channel === 'instagram') {
+          await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
+        } else {
+          await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
+        }
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
+      }
+      receiptSent = true;
+    } catch (err) {
+      console.error(`Failed to send receipt PDF, falling back to a text link: ${err.message}`);
+    }
+  }
+  const receiptUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${receiptPath}` : null;
+  // Chidera, 2026-09-25: "the receipt text also didnt have the your
+  // payment has been received, your receipt is attached here it just
+  // went straight to your receipt is attached above, the receipt is
+  // below sef." Two real gaps: (1) the explicit "payment received"
+  // confirmation was dropped entirely once the receipt document itself
+  // became the opener; (2) "attached above" was only ever true for
+  // WhatsApp/Instagram (the document is a genuinely separate, earlier
+  // real send there) -- on website it's the SAME bubble, and the
+  // document/interactive part of a bubble always renders BELOW the body
+  // text (renderMessage's own body-then-actions order), so "above" was
+  // just wrong there.
+  const receiptLine = receiptSent
+    ? customer.channel === 'website'
+      ? 'Your payment has been received. Your receipt is attached below.'
+      : 'Your payment has been received. Your receipt is attached above.'
+    : receiptUrl
+      ? `Your payment has been received. Here's your receipt: ${receiptUrl}`
+      : 'Your payment has been received.';
+  const bodyText = `${receiptLine}${followUpText}`;
+
+  // One bubble, not two -- see this function's own comment above. Every
+  // other website reply already goes through reply() (real WhatsApp send
+  // for every other channel, a no-op websocket-free bubble for website),
+  // which has no `interactive` param; this bypasses it only for website,
+  // straight to logMessage, so the document reference and the real
+  // follow-up text land in the SAME row.
+  if (customer.channel === 'website' && receiptWebsiteUrl) {
+    await logMessage({
+      customerId: customer.id,
+      tableSessionId: customer.tableSessionId,
+      direction: 'outbound',
+      channel: customer.channel,
+      sender: 'bot',
+      body: bodyText,
+      trigger: 'payment_confirmed',
+      interactive: { type: 'document', filename: `receipt-${order.reference}`, url: receiptWebsiteUrl },
+    });
+    return;
+  }
+  await reply(customer, bodyText, 'payment_confirmed');
+}
+
 // Called from the Paystack webhook once a payment is verified -- not part
 // of handleInboundMessage's request/reply loop, since payment confirmation
 // arrives from Paystack, not from the customer's next WhatsApp message.
@@ -4149,72 +4252,12 @@ export async function completePayment(orderId) {
 
   // Chidera, 2026-09-25: "after payment is confirmed instead of the bare
   // payment received, send customer a receipt, but receipt shouldnt look
-  // like invoice it is a receipt" -- a real RECEIPT (routes/documents.js's
-  // own receiptPage, deliberately not the invoice template with a
-  // different title -- see its own comment) sent as a WhatsApp document,
-  // same resilient send-then-fallback-to-a-link shape sendPaymentInstructions
-  // already uses for the invoice. Replaces the bare "Payment received"
-  // opener; the delivery/pickup-specific operational info still follows.
-  const receiptPath = await createReceipt(order);
-  let receiptSent = false;
-  // Chidera, 2026-09-25: "the receipt and the your receipt is attached
-  // should be in one chat" -- website's own document bubble used to be
-  // logged here, separately, then a SECOND bubble with the actual
-  // delivery/pickup text went out right after. Only the URL is captured
-  // here now; the real combined send (text + document, one bubble) happens
-  // below once the delivery/pickup message is known.
-  let receiptWebsiteUrl = null;
-  if (process.env.PUBLIC_URL) {
-    try {
-      // Found live, 2026-09-25: this whole block predates the website
-      // channel (main-only, never touched by the web-chat merge) and had
-      // no website branch at all -- customer.channel === 'website' fell
-      // straight into the `else` below, sending a REAL WhatsApp document
-      // to a customer who should have gotten a free chat bubble.
-      if (customer.channel === 'website') {
-        // website: same fix as sendPaymentInstructions' own invoice branch
-        // -- link to the plain HTML receipt page, not /pdf (Gotenberg-
-        // backed, internal-only).
-        receiptWebsiteUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
-      } else {
-        const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
-        if (customer.channel === 'instagram') {
-          await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
-        } else {
-          await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
-        }
-        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
-      }
-      receiptSent = true;
-    } catch (err) {
-      console.error(`Failed to send receipt PDF, falling back to a text link: ${err.message}`);
-    }
-  }
-  const receiptUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${receiptPath}` : null;
-  const receiptLine = receiptSent ? 'Your receipt is attached above.' : receiptUrl ? `Here's your receipt: ${receiptUrl}` : 'Payment received.';
-  // One bubble, not two -- see this function's own comment above. Every
-  // other website reply already goes through reply() (real WhatsApp send
-  // for every other channel, a no-op websocket-free bubble for website),
-  // which has no `interactive` param; this bypasses it only for website,
-  // straight to logMessage, so the document reference and the real
-  // follow-up text land in the SAME row.
-  const sendPaymentConfirmed = async (bodyText) => {
-    if (customer.channel === 'website' && receiptWebsiteUrl) {
-      await logMessage({
-        customerId: customer.id,
-        tableSessionId: customer.tableSessionId,
-        direction: 'outbound',
-        channel: customer.channel,
-        sender: 'bot',
-        body: bodyText,
-        trigger: 'payment_confirmed',
-        interactive: { type: 'document', filename: `receipt-${order.reference}`, url: receiptWebsiteUrl },
-      });
-      return;
-    }
-    await reply(customer, bodyText, 'payment_confirmed');
-  };
-
+  // like invoice it is a receipt" -- see sendReceiptMessage's own comment
+  // for the real send/one-bubble/wording details, extracted out so
+  // routes/api.js's own dine-in "Mark paid" route (which never went
+  // through completePayment at all -- dine-in settles in person, its own
+  // payment_status never reaches 'confirmed'/'accepted') can send the
+  // exact same real receipt too.
   if (order.fulfilment_type === 'delivery') {
     const delivery = await createDelivery(order, customer);
     const riderLine = delivery.riderName ? ` Your rider is ${delivery.riderName}.` : '';
@@ -4230,14 +4273,16 @@ export async function completePayment(orderId) {
     // own poll() can recognise THIS specific message and show a banner,
     // not just a bubble easy to miss while they're still tabbed over to
     // Paystack's own checkout.
-    await sendPaymentConfirmed(`${receiptLine} Your order is being prepared for delivery.${riderLine}${trackingLine}`);
+    await sendReceiptMessage(customer, order, ` Your order is being prepared for delivery.${riderLine}${trackingLine}`);
   } else {
     const { rows: bizRows } = await pool.query('select address, phone_number from business limit 1');
     const biz = bizRows[0] || {};
     const branchRows = order.branch_id ? (await pool.query('select address, phone_number from branch where id = $1', [order.branch_id])).rows : [];
     const b = branchRows[0] || {};
-    await sendPaymentConfirmed(
-      `${receiptLine} I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
+    await sendReceiptMessage(
+      customer,
+      order,
+      ` I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
     );
   }
 

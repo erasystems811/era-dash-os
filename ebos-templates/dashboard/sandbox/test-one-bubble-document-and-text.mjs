@@ -71,7 +71,11 @@ async function main() {
 
   const invoiceMsg = await latestOutbound(pool, customer.id, 'website');
   assert(invoiceMsg.interactive?.type === 'document', 'that one message carries the real document interactive payload');
-  assert(/attached above/i.test(invoiceMsg.body), 'and its body has the real "attached above" follow-up text in the SAME bubble');
+  // "below", not "above" -- on website the document renders BELOW the
+  // body text within this SAME bubble (renderMessage's own body-then-
+  // actions order); "above" is only accurate for WhatsApp/Instagram's
+  // genuinely separate, earlier real document send.
+  assert(/attached below/i.test(invoiceMsg.body), 'and its body has the real "attached below" follow-up text in the SAME bubble');
 
   const invoiceLinkRes = await fetch(invoiceMsg.interactive.url);
   assert(invoiceLinkRes.status === 200, `the invoice link itself resolves (got ${invoiceLinkRes.status})`);
@@ -87,7 +91,8 @@ async function main() {
 
   const receiptMsg = await latestOutbound(pool, customer.id, 'website');
   assert(receiptMsg.interactive?.type === 'document', 'that one message carries the real receipt document payload');
-  assert(/attached above/i.test(receiptMsg.body) && /pick up/i.test(receiptMsg.body), 'and its body has BOTH the receipt line and the real pickup instructions in the SAME bubble');
+  assert(/payment has been received/i.test(receiptMsg.body), 'and it leads with the real "payment has been received" confirmation, not just a bare "attached" line');
+  assert(/attached below/i.test(receiptMsg.body) && /pick up/i.test(receiptMsg.body), 'and its body has BOTH the receipt line (correctly "below", matching where the document actually renders in this bubble) and the real pickup instructions in the SAME bubble');
 
   const receiptLinkRes = await fetch(receiptMsg.interactive.url);
   assert(receiptLinkRes.status === 200, `the receipt link itself resolves (got ${receiptLinkRes.status})`);

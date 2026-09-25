@@ -74,7 +74,7 @@ async function main() {
   assert(!!receiptRow, 'a [receipt PDF] message was logged for this send');
   assert(receiptRow?.body.includes('/documents/receipt/'), `the logged receipt message points at the real receipt URL (got "${receiptRow?.body}")`);
   const followUp = sentMessages[sentMessages.length - 1];
-  assert(followUp.body.startsWith('Your receipt is attached above.'), `the follow-up text opens with the receipt line, not the old bare "Payment received" (got "${followUp.body}")`);
+  assert(followUp.body.startsWith('Your payment has been received. Your receipt is attached above.'), `the follow-up text opens with the real "payment received" confirmation + the receipt line, not the old bare "Payment received" (got "${followUp.body}")`);
   assert(!sentMessages.some((m) => m.body === 'Payment received.'), 'the old bare "Payment received." text is never sent anymore');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');

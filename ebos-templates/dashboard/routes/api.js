@@ -24,7 +24,7 @@ import {
   magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, sendOutstandingBalanceLink, UPSELL_GROUPS, categoryMatchesGroup, notifyComplaintReply } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, sendOutstandingBalanceLink, sendReceiptMessage, UPSELL_GROUPS, categoryMatchesGroup, notifyComplaintReply } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
@@ -1471,7 +1471,17 @@ router.post('/orders/:id/payment-method', requireStaffApi, async (req, res) => {
 
   await pool.query(`update "order" set status = 'completed', engine_state = 'completed', completed_at = now() where id = $1`, [order.id]);
   sendFeedbackRequest(order.id).catch((err) => console.error('sendFeedbackRequest failed:', err.message));
+  // Chidera, 2026-09-25: "hope dine in has receipt too" -- dine-in settles
+  // in person here, so this route (not completePayment -- see its own
+  // comment) is the only real "payment confirmed" moment a dine-in order
+  // ever gets. Same real receipt as everywhere else (sendReceiptMessage,
+  // shared with completePayment). Fire-and-forget, same reasoning as
+  // sendFeedbackRequest above -- a receipt-send failure should never block
+  // staff from actually closing the order out.
   if (order.session_id) {
+    pool.query('select * from customers where id = $1', [order.customer_id]).then(({ rows }) => {
+      if (rows[0]) return sendReceiptMessage(rows[0], order, ' Thank you for dining with us!');
+    }).catch((err) => console.error('sendReceiptMessage failed:', err.message));
     closeTableSessionIfSettled(order.session_id, { closedBy: 'staff', staffId: req.staff.id }).catch((err) =>
       console.error('closeTableSessionIfSettled failed:', err.message)
     );
