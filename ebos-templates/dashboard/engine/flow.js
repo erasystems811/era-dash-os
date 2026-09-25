@@ -3099,6 +3099,63 @@ export async function sweepAbandonedWebChatOrders() {
   if (candidates.length) console.log(`Sent ${candidates.length} abandonment nudge(s).`);
 }
 
+// Chidera, 2026-09-25: "when a customer text and abandon a menu maybe they
+// text bare chat and they dont open web menu or they open webmenu but dont
+// say anything after see menu, retext them... 10 mins after abandonment."
+// A DIFFERENT, earlier gap than sweepAbandonedWebChatOrders above -- that
+// one only ever fires once a real order already exists and reached
+// confirm_payment. This covers everything BEFORE that: a customer who got
+// the greeting/first-choice/dinein bubble (or opened the web menu itself,
+// which touches web_chat_active_at but never last_message_at on its own)
+// and then just went quiet, possibly with no order row at all yet.
+// last_message_at (touched by logMessage on both inbound and outbound)
+// is the real "last activity on this thread" clock -- opening the web
+// menu without saying/tapping anything after never advances it, so
+// staying on "See menu" with no follow-up correctly counts as abandonment
+// too, not just silence after a bare text.
+// Deliberately reuses sendChatRedirectPing/chat_redirect_sent_at (the same
+// "tap here to text" mechanism handlePendingBatch's own bare-WhatsApp
+// redirect already uses) rather than a second, parallel ping system --
+// same underlying situation (customer isn't using the web chat right now),
+// just a different trigger (a silence timer instead of a fresh bare text).
+// Its own guard is written directly here rather than via needsChatRedirect
+// -- that helper's 30-minute "actively on page" window would silently
+// delay this to ~30 minutes instead of the requested 10 for anyone in the
+// 10-30 minute band, since a page LOAD alone (no message) touches
+// web_chat_active_at without ever advancing last_message_at.
+const ORDER_ABANDONMENT_NUDGE_MINUTES = 10;
+
+export async function sweepAbandonedChatCustomers() {
+  const { rows: candidates } = await pool.query(
+    `select c.* from customers c
+     where c.last_message_at is not null
+       and c.last_message_at < now() - make_interval(mins => $1)
+       and c.channel in ('whatsapp', 'instagram')
+       and (c.web_chat_active_at is null or c.web_chat_active_at < now() - make_interval(mins => $1))
+       and (c.chat_redirect_sent_at is null or c.web_chat_active_at > c.chat_redirect_sent_at or c.last_message_at > c.chat_redirect_sent_at)
+       and not exists (
+         select 1 from "order" o where o.customer_id = c.id and o.engine_state in ('confirm_payment', 'fulfilment', 'completed')
+       )
+       and not exists (
+         select 1 from table_session ts where ts.closed_at is null
+           and (ts.customer_id = c.id or exists (select 1 from table_session_guest g where g.session_id = ts.id and g.customer_id = c.id))
+       )`,
+    [ORDER_ABANDONMENT_NUDGE_MINUTES]
+  );
+  for (const customer of candidates) {
+    try {
+      await sendChatRedirectPing(
+        customer,
+        "Hey, we noticed you didn't go on with your order. Tap below to continue with your order.",
+        { trigger: 'order_abandonment_nudge' }
+      );
+    } catch (err) {
+      console.error(`Order abandonment nudge failed for customer ${customer.id}:`, err);
+    }
+  }
+  if (candidates.length) console.log(`Sent ${candidates.length} order abandonment nudge(s).`);
+}
+
 // Reviewing an order isn't a one-shot thing -- "add a chapman" or "remove
 // the suya wrap" can come at any point before payment, and recalculates the
 // total live. Once payment_status is actually confirmed/accepted, removing
@@ -4133,9 +4190,9 @@ export async function resumeBotControl(customerId) {
 }
 
 // Dine-in add-on (EBOS-Addon-Schema-Dine-In.md), Stage 2. A guest's QR scan
-// always sends exactly "Menu Table {label}" (routes/dinein.js's
-// qrDataUrlFor) -- deterministic, no AI call. Returns true when this
-// handled the message (a real scan, or the answer to "which table"),
+// always sends exactly "Menu Table {label}(send this to proceed)"
+// (routes/dinein.js's qrDataUrlFor) -- deterministic, no AI call. Returns
+// true when this handled the message (a real scan, or the answer to "which table"),
 // false to let normal routing continue untouched. Off entirely when the
 // add-on isn't enabled -- one cheap query, then nothing else runs.
 async function getDineinConfig() {
@@ -4220,6 +4277,12 @@ async function handleDineinScan(customer, text) {
 
   const scanMatch = /^menu\s+table\s+(.+)$/i.exec(text.trim());
   let label = scanMatch?.[1]?.trim();
+  // Chidera, 2026-09-25: "menu table 1(send this to proceed)" -- the QR's
+  // own prefilled text (routes/dinein.js's qrDataUrlFor) now carries this
+  // parenthetical so it's obvious a tap on Send is still needed. Stripped
+  // back off here, generically (any trailing "(...)"), so the real table
+  // label match below still sees a bare "1", same as before this change.
+  if (label) label = label.replace(/\s*\([^)]*\)\s*$/, '').trim();
 
   if (!label) {
     // Not a fresh scan -- only worth a second look if the LAST thing the

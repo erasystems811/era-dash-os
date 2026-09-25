@@ -27,7 +27,7 @@ import { router as instagramWebhook } from './engine/webhook-instagram.js';
 import { router as paystackWebhook } from './engine/webhook-paystack.js';
 import { router as moniepointWebhook } from './engine/webhook-moniepoint.js';
 import { router as monnifyWebhook } from './engine/webhook-monnify.js';
-import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications, sweepAbandonedWebChatOrders } from './engine/flow.js';
+import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications, sweepAbandonedWebChatOrders, sweepAbandonedChatCustomers } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -223,4 +223,12 @@ app.listen(port, () => {
   setInterval(() => {
     sweepAbandonedWebChatOrders().catch((err) => console.error('sweepAbandonedWebChatOrders failed:', err));
   }, 5 * 60_000);
+  // Chidera, 2026-09-25: "retext them... 10 mins after abandonment" -- a
+  // tighter tick than the payment nudge's above, since its own threshold
+  // (ORDER_ABANDONMENT_NUDGE_MINUTES, 10) is half that one's. 2 minutes
+  // keeps it "10-12 minutes in practice", same reasoning as every other
+  // sweep's own comment here.
+  setInterval(() => {
+    sweepAbandonedChatCustomers().catch((err) => console.error('sweepAbandonedChatCustomers failed:', err));
+  }, 2 * 60_000);
 });
