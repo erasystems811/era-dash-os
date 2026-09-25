@@ -9,12 +9,13 @@ import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderFeedbackFormPage } from '../engine/feedback-form-template.js';
 import { resolveWaNumber } from './dinein-menu.js';
+import { ensureMenuToken } from '../engine/flow.js';
 
 export const router = express.Router();
 
 router.get('/:id', async (req, res) => {
   const { rows } = await pool.query(
-    `select f.status, o.reference, o.branch_id, biz.name as business_name
+    `select f.status, o.reference, o.branch_id, o.customer_id, o.table_id, biz.name as business_name
      from order_feedback f
      join "order" o on o.id = f.order_id
      cross join (select name from business limit 1) biz
@@ -23,11 +24,24 @@ router.get('/:id', async (req, res) => {
   );
   const fb = rows[0];
   if (!fb) return res.status(404).send('Not found.');
-  // Hands the guest straight back to the WhatsApp thread after submitting,
-  // instead of leaving them stranded on this page -- Chidera 2026-09-11:
-  // "after feedback, take them back to chat automatically." Same wa.me
-  // trick the web menu page already uses (WhatsApp's own in-app browser
-  // intercepts it and swaps back to the chat).
+  // Chidera, 2026-09-25: "after feedback take customer back to web chat
+  // ... after giving feedback that thank you, feedback should have a back
+  // to chat thing." This used to hand the guest back to BARE WhatsApp
+  // (wa.me/<number>, Chidera 2026-09-11's own original fix, predating the
+  // web-chat feature entirely) -- now the real /wa/:token thread instead,
+  // same table-scoped link for a dine-in order (see routes/dinein-menu.js's
+  // own webChatPath) or the generic online one otherwise.
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [fb.customer_id]);
+  const customer = custRows[0];
+  let webChatPath = null;
+  if (customer) {
+    const token = await ensureMenuToken(customer);
+    webChatPath = `/wa/${token}`;
+    if (fb.table_id) {
+      const { rows: tableRows } = await pool.query('select qr_token from restaurant_table where id = $1', [fb.table_id]);
+      if (tableRows[0]) webChatPath += `?table=${tableRows[0].qr_token}`;
+    }
+  }
   const waNumber = await resolveWaNumber(fb.branch_id);
   res.set('Content-Type', 'text/html').send(
     renderFeedbackFormPage({
@@ -36,6 +50,7 @@ router.get('/:id', async (req, res) => {
       submitted: fb.status === 'answered',
       submitPath: `/f/${req.params.id}/submit`,
       waNumber,
+      webChatPath,
     })
   );
 });

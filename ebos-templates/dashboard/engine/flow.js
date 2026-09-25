@@ -1026,7 +1026,7 @@ export async function buildGreetingContent(customer) {
 // chat while an order's in progress) -- both need the exact same "was
 // this already sent, and have they actually come back to the chat since"
 // check, not two separate copies of the same timestamp logic.
-async function needsChatRedirect(customer) {
+export async function needsChatRedirect(customer) {
   // Actively on the page right now (same 30-min freshness window
   // completePayment already uses) -- they'll see a free bubble live via
   // the page's own poll, no real ping needed at all regardless of history.
@@ -1039,24 +1039,36 @@ async function needsChatRedirect(customer) {
   // the count below once this ping actually goes out).
   const visitedSinceLastPing = customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(customer.chat_redirect_sent_at);
   if (visitedSinceLastPing) return true;
-  // No visit at all since the last ping -- Chidera, 2026-09-24: "i said
-  // after the first greeting there should be a second resend of the tap
-  // here to chat to redirect customer again before silent, but this one
-  // only did first greeting and went quiet." Chidera, 2026-09-25: "let bot
-  // resend that greeting text to chat a max time of 5 cause that 2 is
-  // risky, going silent on a customer is risky." Up to 5 consecutive
-  // pings total before staying fully silent -- not just the 2 this used
-  // to stop at.
+  // Chidera, 2026-09-25: "the bot cant be silent forever after the first
+  // five times, after 24 hours renew the 5 times trial." A customer who
+  // never once revisits the chat would otherwise stay capped and silent
+  // permanently -- 24h of real silence since the last ping is its own
+  // reset, same as a genuine visit would be (markChatRedirectSent's own
+  // "fresh count of 1" logic already treats this the same way once this
+  // returns true).
+  const moreThan24hSinceLastPing = new Date(customer.chat_redirect_sent_at) < new Date(Date.now() - 24 * 60 * 60 * 1000);
+  if (moreThan24hSinceLastPing) return true;
+  // No visit at all since the last ping, and still within 24h of it --
+  // Chidera, 2026-09-24: "i said after the first greeting there should be
+  // a second resend of the tap here to chat to redirect customer again
+  // before silent, but this one only did first greeting and went quiet."
+  // Chidera, 2026-09-25: "let bot resend that greeting text to chat a max
+  // time of 5 cause that 2 is risky, going silent on a customer is
+  // risky." Up to 5 consecutive pings total before staying silent until
+  // either a real visit or the 24h renewal above.
   return (customer.chat_redirect_count || 0) < 5;
 }
 async function markChatRedirectSent(customer) {
-  // A genuine visit since the last ping (or this being the very first
-  // ping ever) starts a fresh count of 1 -- otherwise this is one more
-  // consecutive ping in the current silent-run, see needsChatRedirect's
-  // own comment for why that's capped at 2.
+  // A genuine visit since the last ping, 24h+ of real silence since the
+  // last ping (Chidera, 2026-09-25: "after 24 hours renew the 5 times
+  // trial"), or this being the very first ping ever, all start a fresh
+  // count of 1 -- otherwise this is one more consecutive ping in the
+  // current silent-run, see needsChatRedirect's own comment for why
+  // that's capped at 5.
   const visitedSinceLastPing =
     customer.chat_redirect_sent_at && customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(customer.chat_redirect_sent_at);
-  const nextCount = !customer.chat_redirect_sent_at || visitedSinceLastPing ? 1 : (customer.chat_redirect_count || 0) + 1;
+  const renewed24h = customer.chat_redirect_sent_at && new Date(customer.chat_redirect_sent_at) < new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const nextCount = !customer.chat_redirect_sent_at || visitedSinceLastPing || renewed24h ? 1 : (customer.chat_redirect_count || 0) + 1;
   await pool.query('update customers set chat_redirect_sent_at = now(), chat_redirect_count = $2 where id = $1', [customer.id, nextCount]);
 }
 
@@ -1068,7 +1080,7 @@ async function markChatRedirectSent(customer) {
 // each caller's own decision -- notifyComplaintReply always does (a
 // manager's reply is unscheduled); the others gate it on
 // needsChatRedirect(customer) first.
-async function sendChatRedirectPing(customer, pingText, { trigger = 'chat_redirect_ping', sender = 'bot' } = {}) {
+export async function sendChatRedirectPing(customer, pingText, { trigger = 'chat_redirect_ping', sender = 'bot' } = {}) {
   const token = await ensureMenuToken(customer);
   const chatUrl = `${process.env.PUBLIC_URL}/wa/${token}`;
   const credentials = await getWhatsAppCredentials(customer.branch_id);
