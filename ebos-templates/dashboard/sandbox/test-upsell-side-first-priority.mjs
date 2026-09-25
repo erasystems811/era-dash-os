@@ -1,18 +1,14 @@
-// Chidera, 2026-09-24: "if youll recommend a side, then the side should
-// be first and its either side then protein then drink or protein then
-// snack then drink...and recommendation should depend on what is needed
-// for that customer" -- then corrected the WITH-side order specifically:
-// "instead of side then protein then drink make it protein then side then
-// drink." Two priority tracks: an order genuinely missing a side gets
-// protein offered first, then side (still ahead of drink, still reversing
-// the old fixed drink-first order -- just not literally first anymore);
-// an order that already has a side skips straight past it to the OTHER
-// track (protein, then snack, then drink) instead. Confirms both tracks
-// directly against nextUpsellGroup's own real logic (via
-// finishItemsCollection, same as any other order), not just the
+// Chidera, 2026-09-25: "let upsell only be protein and drink or side and
+// drink now no more snack, and only 2 upsell" -- simplified from the old
+// 3-step "protein then side/snack then drink" tracks (see git history for
+// that version) down to exactly two tracks of two, picked by the same
+// "does this order already have a side" check as before: missing one gets
+// side then drink; already has one gets protein then drink instead.
+// Confirms both tracks directly against nextUpsellGroup's own real logic
+// (via finishItemsCollection, same as any other order), not just the
 // side-needed happy path test-upsell-multiselect-quantity.mjs already
 // covers (that seed has no protein products at all, so it never actually
-// exercises the protein-first step this test does).
+// exercises the protein track this test does).
 process.env.EBOS_TEST_PGLITE = '1';
 process.env.EBOS_SANDBOX = '1';
 process.env.PORT = '3959';
@@ -43,8 +39,8 @@ async function main() {
   const { rows: sideProductRows } = await pool.query(`select id, price from product where name = 'Fried Plantain'`);
   const { rows: mainRows } = await pool.query(`select id, price from product where name = 'Jollof Rice and Chicken'`);
 
-  // === Track A: order genuinely missing a side -- protein offered FIRST,
-  // then side once protein's declined (both still ahead of drink). ===
+  // === Track A: order genuinely missing a side -- side offered FIRST
+  // (protein no longer part of this track at all), then drink. ===
   const customerA = await flow.findOrCreateCustomer({ phoneNumber: '2348012359101', channel: 'whatsapp' });
   customerA.channel = 'website';
   const { rows: orderA } = await pool.query(
@@ -58,13 +54,13 @@ async function main() {
     `select body from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`,
     [customerA.id]
   );
-  assert(/would you like to add a protein/i.test(msgA1[0].body), 'Track A (no side yet): protein is offered FIRST, ahead of side/drink');
+  assert(/would you like to add a side/i.test(msgA1[0].body), 'Track A (no side yet): side is offered FIRST, protein is not part of this track');
 
-  // Decline protein -- Track A's next category is side (not drink,
-  // "protein then side then drink"). Fresh from the DB before the next
-  // call, same reasoning as Track B's own equivalent step below.
+  // Decline side -- Track A's next (and last, cap is 2 now) category is
+  // drink. Fresh from the DB before the next call, same reasoning as
+  // Track B's own equivalent step below.
   const { rows: pendingA } = await pool.query(`select pending_upsell_category from "order" where id = $1`, [orderA[0].id]);
-  assert(pendingA[0].pending_upsell_category === 'protein', 'sanity check: protein really is what got offered and is now pending');
+  assert(pendingA[0].pending_upsell_category === 'side', 'sanity check: side really is what got offered and is now pending');
   await pool.query(`update "order" set pending_upsell_category = null where id = $1`, [orderA[0].id]);
   const { rows: freshOrderA } = await pool.query(`select * from "order" where id = $1`, [orderA[0].id]);
   await flow.finishItemsCollection(customerA, freshOrderA[0], '');
@@ -72,10 +68,10 @@ async function main() {
     `select body from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`,
     [customerA.id]
   );
-  assert(/would you like to add a side/i.test(msgA2[0].body), 'Track A, second offer: side comes next, not drink -- matches "protein then side then drink" exactly');
+  assert(/would you like to add a drink/i.test(msgA2[0].body), 'Track A, second (and last) offer: drink -- matches "side and drink" exactly');
 
   // === Track B: order already has a real side -- side is skipped
-  // entirely, the OTHER track (protein, then snack, then drink) applies. ===
+  // entirely, the OTHER track (protein, then drink, no snack) applies. ===
   const customerB = await flow.findOrCreateCustomer({ phoneNumber: '2348012359102', channel: 'whatsapp' });
   customerB.channel = 'website';
   const { rows: orderB } = await pool.query(
@@ -93,13 +89,13 @@ async function main() {
   assert(/would you like to add a protein/i.test(msgB1[0].body), 'Track B (already has a side): protein is offered first instead -- side is never re-offered');
   assert(!/would you like to add a side/i.test(msgB1[0].body), 'and side itself is never asked about again -- already satisfied');
 
-  // Decline protein -- Track B's next category is snack (not drink,
-  // "protein then SNACK then drink"). Fresh from the DB before the next
-  // call -- finishItemsCollection's own upsell branch only ever writes
-  // pending_upsell_category/upsell_offered to the DB row, never mutates
-  // the in-memory `order` object it was given, same "production always
-  // re-fetches" reasoning every other sandbox test in this repo already
-  // carves out.
+  // Decline protein -- Track B's next (and last, cap is 2 now) category is
+  // drink, never snack (dropped entirely). Fresh from the DB before the
+  // next call -- finishItemsCollection's own upsell branch only ever
+  // writes pending_upsell_category/upsell_offered to the DB row, never
+  // mutates the in-memory `order` object it was given, same "production
+  // always re-fetches" reasoning every other sandbox test in this repo
+  // already carves out.
   const { rows: pendingB } = await pool.query(`select pending_upsell_category from "order" where id = $1`, [orderB[0].id]);
   assert(pendingB[0].pending_upsell_category === 'protein', 'sanity check: protein really is what got offered and is now pending');
   await pool.query(`update "order" set pending_upsell_category = null where id = $1`, [orderB[0].id]);
@@ -109,7 +105,20 @@ async function main() {
     `select body from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`,
     [customerB.id]
   );
-  assert(/would you like to add a snack/i.test(msgB2[0].body), 'Track B, second offer: snack comes next, not drink -- matches "protein then snack then drink" exactly');
+  assert(/would you like to add a drink/i.test(msgB2[0].body), 'Track B, second (and last) offer: drink, never snack -- matches "protein and drink" exactly');
+
+  // === Cap check: exactly 2 upsells now, never a 3rd offer. ===
+  const { rows: pendingB2 } = await pool.query(`select pending_upsell_category, upsell_offered from "order" where id = $1`, [orderB[0].id]);
+  assert(pendingB2[0].pending_upsell_category === 'drink', 'sanity check: drink really is what got offered and is now pending');
+  assert(pendingB2[0].upsell_offered.length === 2, 'exactly 2 categories offered so far (protein, drink)');
+  await pool.query(`update "order" set pending_upsell_category = null where id = $1`, [orderB[0].id]);
+  const { rows: freshOrderB2 } = await pool.query(`select * from "order" where id = $1`, [orderB[0].id]);
+  await flow.finishItemsCollection(customerB, freshOrderB2[0], '');
+  const { rows: msgB3 } = await pool.query(
+    `select body from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 1`,
+    [customerB.id]
+  );
+  assert(!/would you like to add/i.test(msgB3[0].body), 'no 3rd upsell offer -- cap of 2 is respected');
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

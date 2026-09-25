@@ -58,6 +58,23 @@ async function main() {
   const pings2 = rows2.filter((r) => r.trigger === 'staff_reply_ping');
   assert(pings2.length === 2, 'a second staff message right after still gets its own real ping -- staff is never capped');
 
+  // Chidera, 2026-09-25, same live report, checked directly against dee's
+  // real DB: `capped: false` alone didn't actually fix it -- 3 real staff
+  // replies there, zero pings, because this customer's web_chat_active_at
+  // was still inside the 30-min "actively on the page" window (stale from
+  // browsing the web chat ~15 minutes earlier, unrelated to this exact
+  // moment) -- `activelyOnPage` skipped the ping before capped was ever
+  // even reached. Reproduces that exact real state here.
+  const customer2 = await flow.findOrCreateCustomer({ phoneNumber: '2348012370002', channel: 'whatsapp' });
+  await pool.query(`update customers set web_chat_active_at = now() - interval '15 minutes' where id = $1`, [customer2.id]);
+  const fresh2 = await pool.query('select * from customers where id = $1', [customer2.id]);
+  assert((await flow.needsChatRedirect(fresh2.rows[0])) === false, 'sanity check: the bot-redirect gate really is suppressed by a recent web-chat visit (default checkActive:true)');
+
+  await flow.sendStaffReply(customer2.id, 'Hi, just checking on your order.', null);
+  const rows3 = await outboundRows(pool, customer2.id);
+  const ping3 = rows3.find((r) => r.trigger === 'staff_reply_ping');
+  assert(Boolean(ping3), 'a staff reply still gets a real ping even when web_chat_active_at is recent -- staff never relies on that heuristic either');
+
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);
 }

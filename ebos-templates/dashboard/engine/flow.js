@@ -294,7 +294,7 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
 async function sendStaffReplyRedirect(customer, text, staffId) {
   await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
 
-  if (await needsChatRedirect(customer, { capped: false })) {
+  if (await needsChatRedirect(customer, { capped: false, checkActive: false })) {
     await sendChatRedirectPing(customer, `We're trying to reach out to you.`, { trigger: 'staff_reply_ping', sender: 'staff' });
   }
   await pool.query(
@@ -1125,11 +1125,27 @@ export async function buildGreetingContent(customer) {
 // `capped` lets sendStaffReplyRedirect opt out of just the count check
 // below while keeping every other real dedupe (actively on the page,
 // already-pinged-with-no-time-passed) unchanged for everyone.
-export async function needsChatRedirect(customer, { capped = true } = {}) {
+//
+// Chidera, 2026-09-25, real live report (found live on dee, checked
+// directly against the DB): staff replied 3 times from the Conversations
+// tab, customer got zero pings any of the 3 times. `capped: false` alone
+// didn't fix it -- the customer's web_chat_active_at was still within the
+// 30-min "actively on the page" window (stale from browsing the web chat
+// ~15 minutes earlier, unrelated to this moment), so `activelyOnPage`
+// below was true and skipped the ping before capped was ever even
+// checked. That heuristic is a reasonable bet for the BOT's own automated
+// redirect (handlePendingBatch: the customer just texted bare WhatsApp
+// themselves, so if the tab's genuinely open they'll see a live bubble
+// either way) -- but a staff member replying from the dashboard has no
+// such signal to go on, and same "deliberate, real event" reasoning as
+// the cap bypass just above: they still need the ping, unconditionally.
+// `checkActive` lets sendStaffReplyRedirect opt out of this check too,
+// same shape as `capped`.
+export async function needsChatRedirect(customer, { capped = true, checkActive = true } = {}) {
   // Actively on the page right now (same 30-min freshness window
   // completePayment already uses) -- they'll see a free bubble live via
   // the page's own poll, no real ping needed at all regardless of history.
-  const activelyOnPage = customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(Date.now() - 30 * 60 * 1000);
+  const activelyOnPage = checkActive && customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(Date.now() - 30 * 60 * 1000);
   if (activelyOnPage) return false;
   if (!customer.chat_redirect_sent_at) return true;
   // Pinged before, and genuinely visited the chat again since that ping
@@ -1738,10 +1754,16 @@ async function askNextItemQuestion(orderId) {
 // keyword matching nextUpsellGroup itself uses to decide a category's
 // already satisfied -- one source of truth for what counts as a match,
 // not a second guess at the same keywords.
-// Chidera, 2026-09-24: "it could be a side too." nextUpsellGroup below no
-// longer walks this array in one fixed order -- see its own comment for
-// the real priority logic (side-first when one's actually needed, a
-// different track when it's not).
+// Chidera, 2026-09-25: "let upsell only be protein and drink or side and
+// drink now no more snack" -- snack dropped from the priority tracks below
+// (nextUpsellGroup), so it's never actively offered going forward. Kept
+// HERE though, not deleted -- routes/api.js's computeUpsellStats and this
+// file's own logMetric('upsell_accepted') both look up a past order's
+// upsell_offered entries against this exact array to tell whether an
+// already-recorded offer (snack entries from before today, on real live
+// orders) actually landed; deleting the group here would silently zero
+// out accepted-count accuracy for that real historical data, not just stop
+// new snack offers.
 export const UPSELL_GROUPS = [
   { key: 'drink', keywords: ['drink', 'beverage', 'juice', 'water'], label: 'a drink' },
   { key: 'protein', keywords: ['protein', 'meat'], label: 'a protein' },
@@ -1749,15 +1771,8 @@ export const UPSELL_GROUPS = [
   { key: 'snack', keywords: ['snack', 'small chop', 'appetiser', 'appetizer', 'starter'], label: 'a snack' },
 ];
 
-// Chidera, 2026-09-24: "could be 3 or 2 upsells... or 1" -- confirmed, on
-// correction, this means up to this many SEQUENTIAL offers per order
-// (drink, then a side, then a snack -- one category at a time, not all
-// combined into one list): "no you got upsell wronggg...you dont make it
-// obvious, you said want to complete your oeder like that is a pre
-// requiste, the former would you like to add a drink is very okay just
-// that it was to enable multi selesct and all and after theyve added
-// drink then ask again would you like to add one of our special sides."
-const MAX_UPSELL_PICKS = 3;
+// Chidera, 2026-09-25, same message: "and only 2 upsell" -- down from 3.
+const MAX_UPSELL_PICKS = 2;
 
 export function categoryMatchesGroup(category, keywords) {
   if (!category) return false;
@@ -1776,22 +1791,16 @@ function catalogueOptions(menu, keywords) {
   return menu.filter((p) => categoryMatchesGroup(p.category, keywords));
 }
 
-// Chidera, 2026-09-24: "if youll recommend a side, then the side should
-// be first and its either side then protein then drink or protein then
-// snack then drink...and recommendation should depend on what is needed
-// for that customer" -- then corrected the WITH-side order specifically:
-// "instead of side then protein then drink make it protein then side then
-// drink." Two priority tracks, picked once per call by the one real thing
-// that decides which is "needed": whether this order already has a side.
-// A side genuinely missing still gets offered (ahead of drink, reversing
-// the old fixed drink-first order), just after protein now, not before
-// it; an order that already has one skips straight to the other track
-// instead (a second side offer would never fire anyway -- orderHasIt
-// below already excludes it -- so protein/snack/drink is what's actually
-// left to offer, in the order she asked for).
+// Chidera, 2026-09-25: "let upsell only be protein and drink or side and
+// drink now no more snack, and only 2 upsell" -- simplified to exactly two
+// tracks of two, picked by the same "does this order already have a side"
+// check as before: missing one gets offered side then drink (get the side
+// actually added, protein no longer asked about in this track at all);
+// already has one gets protein then drink instead (side would never fire
+// anyway -- orderHasIt below already excludes it).
 const SIDE_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'side').keywords;
-const UPSELL_PRIORITY_WITH_SIDE = ['protein', 'side', 'drink'];
-const UPSELL_PRIORITY_WITHOUT_SIDE = ['protein', 'snack', 'drink'];
+const UPSELL_PRIORITY_WITH_SIDE = ['side', 'drink'];
+const UPSELL_PRIORITY_WITHOUT_SIDE = ['protein', 'drink'];
 
 // Next upsell offer worth making, if any -- one whole category at a time
 // (every real product in it, not just a representative one), already-

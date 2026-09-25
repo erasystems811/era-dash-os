@@ -64,6 +64,25 @@ async function main() {
   const dineinPage = await (await fetch(`${BASE}/c/${dineinToken}`)).text();
   assert(dineinPage.includes(`CHAT_URL = "${BASE}/wa/${dineinToken}?table=qrcomplaint81"`), 'a dine-in guest\'s complaint link is table-scoped to their own separate thread, not the generic online one');
 
+  // === 3. Chidera, 2026-09-25 (live report): "in complaint form there is
+  // no back to chat" -- the redirect above sends a dine-in guest to their
+  // table's own scoped thread, but the ack/inbound rows this submit
+  // actually logs must land in that SAME thread, or they land back in a
+  // chat showing nothing at all (looked exactly like "no back to chat"
+  // ever happened). ===
+  const { rows: sessionRows } = await pool.query(`select id from table_session where table_id = $1`, [tableRows[0].id]);
+  const dineinSubmitRes = await fetch(`${BASE}/c/${dineinToken}/submit`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: 'My food is missing an item.' }),
+  });
+  assert(dineinSubmitRes.status === 200 || dineinSubmitRes.status === 500, `the dine-in complaint submission is accepted (got ${dineinSubmitRes.status})`);
+  const { rows: dineinMsgRows } = await pool.query(
+    `select table_session_id from message where customer_id = $1 and direction = 'inbound' and body = 'My food is missing an item.'`,
+    [dineinCustomer.id]
+  );
+  assert(dineinMsgRows.length === 1, 'the complaint text itself was logged');
+  assert(dineinMsgRows[0]?.table_session_id === sessionRows[0].id, 'and logged into the guest\'s own table-scoped thread, not the generic online one -- matching where the "Back to chat" link actually sends them');
+
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);
 }
