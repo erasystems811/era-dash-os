@@ -6,7 +6,7 @@
 import express from 'express';
 import { pool } from '../lib/db.js';
 import { renderMenuPage, renderPayPage } from '../engine/menu-page-template.js';
-import { createOrderPayment, ensureDynamicPosAccount, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, notifyCustomerClaimedPosPayment, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
+import { createOrderPayment, ensureDynamicPosAccount, ensureMenuToken, finishItemsCollection, getOrCreateTableOrder, handover, notifyCustomerClaimedPosPayment, reply, restartItemsCollection, summariseOrder, upsertTableGuest } from '../engine/flow.js';
 import { getPaymentConfig, initializeOrderPaymentPaystackTransaction } from '../engine/payment.js';
 import { getSharingMode } from '../engine/fields.js';
 import { getWhatsAppCredentials } from '../engine/branch-channel.js';
@@ -301,6 +301,23 @@ router.post('/:qrToken/review', async (req, res) => {
   const afterQty = new Map();
   for (const item of resolved) afterQty.set(item.productId, (afterQty.get(item.productId) || 0) + item.quantity);
   const anyRemoved = [...beforeQty.entries()].some(([productId, qty]) => (afterQty.get(productId) || 0) < qty);
+
+  // Chidera, 2026-09-25: "if a table place an order and after it has been
+  // placed they tap change it and remove something instead of add, how
+  // will that be solved? cause kitchen would have already started
+  // preparing order and theyll get a price reduction for what has been
+  // placed?" A real gap this whole-basket replace never guarded against --
+  // a round already confirmed (sent to the kitchen) could still have
+  // items silently dropped just by resubmitting a smaller basket, with the
+  // price quietly reduced and no staff awareness at all. Same
+  // escalate-to-a-human treatment engine/flow.js's own handleOrderModification
+  // gives an already-paid order, applied here BEFORE the destructive
+  // delete-and-reinsert below -- nothing about this round is touched.
+  if (wasAlreadyConfirmed && anyRemoved) {
+    await reply(customer, `That round's already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`);
+    await handover(customer, 'Customer wants to remove or change items already sent to the kitchen', null, false);
+    return res.status(409).json({ error: "That round's already gone to the kitchen -- we've let staff know, they'll sort it out with you." });
+  }
 
   // Chidera, 2026-09-20, real report: "i went to type cold for water it is
   // refusing to click the place order button" -- reproduced live: an item

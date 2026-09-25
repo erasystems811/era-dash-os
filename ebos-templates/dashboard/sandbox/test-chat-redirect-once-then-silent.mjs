@@ -70,39 +70,33 @@ async function main() {
   assert(/trying to reach out/i.test(ping1.body), 'with the right ping wording');
   assert(!/checking in/i.test(ping1.body), 'the real message content never leaks into the billable ping');
 
-  // Two more staff messages right after -- customer hasn't visited the
-  // chat since the first ping, but each of these is still within the 3
-  // consecutive pings Chidera asked for, so both still go out (pings 2
-  // and 3).
-  for (let i = 2; i <= 3; i++) {
+  // Chidera, 2026-09-25, real live report: "i texted a customer on dee
+  // from staff dashboard... and the customer didnt get the text? when i
+  // say 3 text max i mean 3 GREETING text, when a staff is texting...
+  // why isnt it sending atall?" Staff-initiated pings are never subject
+  // to the bot's own 3-consecutive-pings cap (see needsChatRedirect's own
+  // `capped: false` for staff) -- every single staff message gets its own
+  // real ping, no matter how many have already gone out with no visit in
+  // between. Five more staff messages right after, well past where the
+  // bot's own cap would have gone silent, all still get real pings.
+  for (let i = 2; i <= 6; i++) {
     await flow.sendStaffReply(customer.id, `Update #${i}.`, null);
   }
   rows = await outboundRows(pool, customer.id);
   let bubbles = rows.filter((r) => r.trigger === 'staff_reply');
   let pings = rows.filter((r) => r.trigger === 'staff_reply_ping');
-  assert(bubbles.length === 3, 'all three messages log as free bubbles');
-  assert(pings.length === 3, 'and all three real pings go out too -- up to 3 consecutive before silence');
+  assert(bubbles.length === 6, 'all six messages log as free bubbles');
+  assert(pings.length === 6, 'and all six real pings go out too -- staff is never capped, unlike the bot\'s own redirect');
 
-  // A FOURTH staff message, still no visit at all -- now genuinely
-  // silent, three consecutive pings already spent.
-  await flow.sendStaffReply(customer.id, 'Still there?', null);
-  rows = await outboundRows(pool, customer.id);
-  bubbles = rows.filter((r) => r.trigger === 'staff_reply');
-  pings = rows.filter((r) => r.trigger === 'staff_reply_ping');
-  assert(bubbles.length === 4, 'the fourth message still logs as a free bubble');
-  assert(pings.length === 3, 'but NO fourth real ping -- three consecutive pings with no visit is the real cap');
-
-  // Customer actually opens the chat page -- but has since left (not
-  // "actively on it right now", which would correctly skip the ping for a
-  // DIFFERENT reason -- they'd see the free bubble live). Backdating the
-  // last ping further into the past first, so there's real room for
-  // "visited after that ping, but more than 30 minutes ago".
+  // A genuine chat visit in between still correctly resets the count
+  // (proving the reset logic itself still works), then one more staff
+  // message keeps getting through same as always.
   await pool.query('update customers set chat_redirect_sent_at = now() - interval \'3 hours\' where id = $1', [customer.id]);
   await pool.query('update customers set web_chat_active_at = now() - interval \'45 minutes\' where id = $1', [customer.id]);
   await flow.sendStaffReply(customer.id, 'One more update for you.', null);
   rows = await outboundRows(pool, customer.id);
   const pingsAfterVisit = rows.filter((r) => r.trigger === 'staff_reply_ping');
-  assert(pingsAfterVisit.length === 4, 'a fresh ping IS sent once the customer has genuinely returned to the chat since the last one -- the count resets, not just stays capped forever');
+  assert(pingsAfterVisit.length === 7, 'a fresh ping is still sent after a genuine chat visit, same as always');
 
   // === PART B: a customer texting real ("bare") WhatsApp instead of the
   // web chat, while an order is genuinely in progress. ===

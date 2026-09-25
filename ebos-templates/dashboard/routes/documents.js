@@ -284,8 +284,19 @@ function receiptPage({ business, customer, order, items }) {
   .item-row .qty { color: var(--ink); font-weight: 600; margin-right: 4px; }
   .footer { text-align: center; color: var(--mid); font-size: 12px; margin-top: 26px; }
   .era-mark { text-align: center; color: var(--mid); font-size: 10.5px; letter-spacing: 0.03em; margin-top: 8px; opacity: 0.65; }
+  /* Chidera, 2026-09-25: "receipt doesnt have the back to chat" -- same
+     real chip button the invoice page already has (.back-link there),
+     never ported over when this page was rebuilt around the receipt-card
+     layout. */
+  .back-link { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 18px; background: #fff; border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-weight: 600; font-size: 13.5px; padding: 9px 16px 9px 12px; border-radius: 999px; }
+  .back-link:active { background: var(--paper); }
 </style></head>
 <body>
+  ${
+    customer.menu_token && process.env.PUBLIC_URL
+      ? `<a class="back-link" href="${esc(process.env.PUBLIC_URL)}/wa/${esc(customer.menu_token)}">&#8249; Back to chat</a>`
+      : ''
+  }
   <div class="card">
     ${business.logo_data_url ? `<img src="${esc(business.logo_data_url)}" alt="${esc(business.name)}" style="max-height:36px;max-width:160px;border-radius:6px;margin-bottom:14px;">` : ''}
     <div class="check-badge">

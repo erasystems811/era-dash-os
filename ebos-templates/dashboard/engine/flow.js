@@ -289,7 +289,7 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
 async function sendStaffReplyRedirect(customer, text, staffId) {
   await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
 
-  if (await needsChatRedirect(customer)) {
+  if (await needsChatRedirect(customer, { capped: false })) {
     await sendChatRedirectPing(customer, `We're trying to reach out to you.`, { trigger: 'staff_reply_ping', sender: 'staff' });
   }
   await pool.query(
@@ -1108,7 +1108,19 @@ export async function buildGreetingContent(customer) {
 // chat while an order's in progress) -- both need the exact same "was
 // this already sent, and have they actually come back to the chat since"
 // check, not two separate copies of the same timestamp logic.
-export async function needsChatRedirect(customer) {
+//
+// Chidera, 2026-09-25, real live report: "i texted a customer on dee from
+// staff dashboard on conversations and the customer didnt get the text?
+// so when i say 3 text max i mean 3 GREETING text, when a staff is
+// texting... why isnt it sending atall?" Real bug: the 3-ping CAP below
+// was shared between both callers, so a customer who'd already used up
+// their 3 bot-redirect pings (from texting bare WhatsApp repeatedly) went
+// permanently silent for staff too -- a staff member reaching out is a
+// deliberate, real event, never subject to the bot's own anti-spam count.
+// `capped` lets sendStaffReplyRedirect opt out of just the count check
+// below while keeping every other real dedupe (actively on the page,
+// already-pinged-with-no-time-passed) unchanged for everyone.
+export async function needsChatRedirect(customer, { capped = true } = {}) {
   // Actively on the page right now (same 30-min freshness window
   // completePayment already uses) -- they'll see a free bubble live via
   // the page's own poll, no real ping needed at all regardless of history.
@@ -1130,6 +1142,7 @@ export async function needsChatRedirect(customer) {
   // returns true).
   const moreThan24hSinceLastPing = new Date(customer.chat_redirect_sent_at) < new Date(Date.now() - 24 * 60 * 60 * 1000);
   if (moreThan24hSinceLastPing) return true;
+  if (!capped) return true;
   // No visit at all since the last ping, and still within 24h of it --
   // Chidera, 2026-09-24: "i said after the first greeting there should be
   // a second resend of the tap here to chat to redirect customer again
@@ -1138,7 +1151,9 @@ export async function needsChatRedirect(customer) {
   // time of 5 cause that 2 is risky, going silent on a customer is
   // risky" -- then, same day, on reflection: "make it 3 now sef, 5 is
   // much." Up to 3 consecutive pings total before staying silent until
-  // either a real visit or the 24h renewal above.
+  // either a real visit or the 24h renewal above -- BOT-initiated
+  // redirects only (see this function's own header comment for why
+  // staff-initiated pings never reach this line at all).
   return (customer.chat_redirect_count || 0) < 3;
 }
 async function markChatRedirectSent(customer) {
@@ -2311,22 +2326,41 @@ export async function handleUpsellMultiTap({ customer, picks }) {
 // normal flow via finishItemsCollection once every item's questions are done.
 async function handlePendingItemQuestion(customer, order, text) {
   const answer = text.trim();
-  const { rows: qRows } = await pool.query('select question from product_question where id = $1', [order.pending_question_id]);
+  const pendingQuestionId = order.pending_question_id;
+  const pendingItemId = order.pending_question_order_item_id;
+  // Chidera, 2026-09-25, real live report: "while placing my order after
+  // the bot upsold me a drink and i chose cold it sent me double reply."
+  // A genuine race, not a UI bug: this question can be answered two ways
+  // almost at once (a dropdown tap and typed text arriving together, or
+  // two rapid taps before the client's own in-flight guard registers) --
+  // both requests read the SAME pending_question_id before either one
+  // cleared it (the clear used to happen at the very END, after all the
+  // real work), so both ran the full apply-and-reply path, each sending
+  // its own "Got it..." message. Claiming the question atomically FIRST
+  // (only clearing it if it's still what was just read) means the
+  // second, losing request finds nothing left to claim and does nothing
+  // more, instead of running the whole flow twice.
+  const { rows: claimed } = await pool.query(
+    `update "order" set pending_question_order_item_id = null, pending_question_id = null
+     where id = $1 and pending_question_id = $2 returning id`,
+    [order.id, pendingQuestionId]
+  );
+  if (!claimed.length) return; // someone else already answered this exact question
+  order.pending_question_order_item_id = null;
+  order.pending_question_id = null;
+
+  const { rows: qRows } = await pool.query('select question from product_question where id = $1', [pendingQuestionId]);
   const questionText = qRows[0]?.question || '';
 
   await pool.query(
     `insert into order_item_answer (order_item_id, question_id, answer) values ($1, $2, $3)
      on conflict (order_item_id, question_id) do update set answer = excluded.answer`,
-    [order.pending_question_order_item_id, order.pending_question_id, answer]
+    [pendingItemId, pendingQuestionId, answer]
   );
-  const { rows: itemRows } = await pool.query('select modification from order_item where id = $1', [order.pending_question_order_item_id]);
+  const { rows: itemRows } = await pool.query('select modification from order_item where id = $1', [pendingItemId]);
   const existingMod = itemRows[0]?.modification;
   const newMod = existingMod ? `${existingMod}; ${questionText}: ${answer}` : `${questionText}: ${answer}`;
-  await pool.query('update order_item set modification = $1 where id = $2', [newMod, order.pending_question_order_item_id]);
-
-  order.pending_question_order_item_id = null;
-  order.pending_question_id = null;
-  await pool.query('update "order" set pending_question_order_item_id = null, pending_question_id = null where id = $1', [order.id]);
+  await pool.query('update order_item set modification = $1 where id = $2', [newMod, pendingItemId]);
 
   // finishItemsCollection's own item-question check (its very first thing)
   // picks up the next unanswered question itself if there is one -- no
@@ -2944,6 +2978,16 @@ export async function sendPaymentInstructions(customer, order) {
   // see routes/documents.js), falling back to a text link only if that
   // send fails, so the invoice info is never just lost.
   let invoiceSent = false;
+  // Chidera, 2026-09-25: "the invoice and pay now should be one chat" --
+  // website's own document bubble used to be logged here, separately,
+  // then a SECOND bubble carrying the actual pay line (and, when an
+  // online payment link exists, its own "Pay now" cta_url button) went
+  // out right after. Only the URL is captured here now; the invoice HTML
+  // page itself already embeds a "Pay now" button reading the same
+  // order.payment_link_url (routes/documents.js's own documentPage), so
+  // one combined bubble covers both without inventing a second
+  // interactive type.
+  let invoiceWebsiteUrl = null;
   if (process.env.PUBLIC_URL) {
     try {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
@@ -2961,8 +3005,7 @@ export async function sendPaymentInstructions(customer, order) {
         // ever actually rendering anything -- the button looked fine but
         // failed the moment a customer tapped it ("the invoice link keeps
         // not opening, an invalid link").
-        const invoiceHtmlUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
-        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice] ${invoiceHtmlUrl}`, trigger: 'invoice_pdf', interactive: { type: 'document', filename: `invoice-${order.reference}`, url: invoiceHtmlUrl } });
+        invoiceWebsiteUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `invoice-${order.reference}.pdf`, `Invoice for order ${order.reference}`);
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
@@ -2995,16 +3038,26 @@ export async function sendPaymentInstructions(customer, order) {
   // copying out -- each on its own line reads the way a real transfer
   // slip would.
   const { payLine, needsHandover, paymentUrl, posChoice } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
-  if (posChoice) {
+  if (customer.channel === 'website' && invoiceWebsiteUrl) {
+    await logMessage({
+      customerId: customer.id,
+      tableSessionId: customer.tableSessionId,
+      direction: 'outbound',
+      channel: customer.channel,
+      sender: 'bot',
+      body: posChoice ? invoiceLine : `${invoiceLine}\n\n${payLine}`,
+      trigger: 'invoice_pdf',
+      interactive: { type: 'document', filename: `invoice-${order.reference}`, url: invoiceWebsiteUrl },
+    });
+    if (posChoice) await sendPosPaymentChoice(customer, order);
+  } else if (posChoice) {
     // A CTA-URL button (paymentUrl) or plain text can carry the invoice
     // line inline, but a Transfer/Card choice needs its own real WhatsApp
     // buttons message -- sent separately, same multi-message shape the
     // invoice PDF + payment link already use today.
     await reply(customer, invoiceLine);
     await sendPosPaymentChoice(customer, order);
-    return;
-  }
-  if (paymentUrl) {
+  } else if (paymentUrl) {
     await sendPaymentLinkButton(customer, paymentUrl, `${invoiceLine}\n\n${payLine}`);
   } else {
     await reply(customer, `${invoiceLine}\n\n${payLine}`);
@@ -3568,21 +3621,46 @@ async function handleOrderModification(customer, order, mods) {
   // just scoped to what's new (deltaLines below), not the whole order
   // restated again.
   const wasAlreadyConfirmed = Boolean(order.confirmed_at);
+  // Chidera, 2026-09-25: "if a customer places an order in dine in and
+  // changes it in a form of reduction... kitchen would have already
+  // started preparing order and theyll get a price reduction for what
+  // has been placed?" A real gap the `paid` check above never covers --
+  // dine-in's own payment_status stays 'pending' the whole meal (settled
+  // at the end, not up front, see this function's own comment above), so
+  // a round already confirmed and sent to the kitchen (confirming a round
+  // IS what dispatches it -- markOrderConfirmed's "place the ordr") could
+  // still have items silently removed and the price quietly dropped, with
+  // no one on staff any the wiser that food already being cooked just got
+  // taken off the bill. Same escalate-to-a-human treatment as an
+  // already-paid order gets below, just gated on "already sent to the
+  // kitchen" instead of "already paid" for this one channel.
+  const alreadySentToKitchen = order.payment_mode === 'at_table' && wasAlreadyConfirmed;
 
-  if (paid && (mods.removes.length || mods.sets.length)) {
+  if ((paid || alreadySentToKitchen) && (mods.removes.length || mods.sets.length)) {
     // A change/removal after payment needs a real person -- Chidera
     // 2026-09-11: "after payment is made if they want to add take it and
     // add it, but if they want to change, hand it over to a human."
     // Adding more still goes straight through below unchanged (falls
     // through to the adds-only branch when mods.adds is also non-empty);
-    // it's only removing or changing what's already paid for that gets
-    // escalated instead of just being declined.
-    await reply(customer, `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`);
-    await handover(customer, 'Customer wants to remove or change items on an already-paid order', null, false);
+    // it's only removing or changing what's already paid for (or, for
+    // dine-in, already sent to the kitchen) that gets escalated instead
+    // of just being declined.
+    await reply(
+      customer,
+      paid
+        ? `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`
+        : `That round's already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
+    );
+    await handover(
+      customer,
+      paid ? 'Customer wants to remove or change items on an already-paid order' : 'Customer wants to remove or change items already sent to the kitchen',
+      null,
+      false
+    );
     if (!mods.adds.length) return;
   }
 
-  const { itemLines, total, deliveryFee, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !paid }, customer);
+  const { itemLines, total, deliveryFee, addedValue } = await applyOrderModifications(order, mods, { allowRemovals: !(paid || alreadySentToKitchen) }, customer);
   // Chidera, 2026-09-23, live report on era-demo: "it gave me a bill of
   // food with total of 4700 my food way 1700 but it didnt state the
   // delivery there, one could easily misunderstand" -- summariseOrder's
@@ -4062,30 +4140,25 @@ export async function completePayment(orderId) {
   // opener; the delivery/pickup-specific operational info still follows.
   const receiptPath = await createReceipt(order);
   let receiptSent = false;
+  // Chidera, 2026-09-25: "the receipt and the your receipt is attached
+  // should be in one chat" -- website's own document bubble used to be
+  // logged here, separately, then a SECOND bubble with the actual
+  // delivery/pickup text went out right after. Only the URL is captured
+  // here now; the real combined send (text + document, one bubble) happens
+  // below once the delivery/pickup message is known.
+  let receiptWebsiteUrl = null;
   if (process.env.PUBLIC_URL) {
     try {
-      // website: same fix as sendPaymentInstructions' own invoice branch --
-      // link to the plain HTML receipt page, not /pdf (Gotenberg-backed,
-      // internal-only), and log it with a real `interactive` document
-      // payload so the chat page renders an actual button instead of the
-      // raw bracketed [receipt PDF] text + URL as a plain bubble. Found
-      // live, 2026-09-25: this whole block predates the website channel
-      // (main-only, never touched by the web-chat merge) and had no
-      // website branch at all -- customer.channel === 'website' fell
+      // Found live, 2026-09-25: this whole block predates the website
+      // channel (main-only, never touched by the web-chat merge) and had
+      // no website branch at all -- customer.channel === 'website' fell
       // straight into the `else` below, sending a REAL WhatsApp document
       // to a customer who should have gotten a free chat bubble.
       if (customer.channel === 'website') {
-        const receiptHtmlUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
-        await logMessage({
-          customerId: customer.id,
-          tableSessionId: customer.tableSessionId,
-          direction: 'outbound',
-          channel: customer.channel,
-          sender: 'bot',
-          body: `[receipt] ${receiptHtmlUrl}`,
-          trigger: 'receipt_pdf',
-          interactive: { type: 'document', filename: `receipt-${order.reference}`, url: receiptHtmlUrl },
-        });
+        // website: same fix as sendPaymentInstructions' own invoice branch
+        // -- link to the plain HTML receipt page, not /pdf (Gotenberg-
+        // backed, internal-only).
+        receiptWebsiteUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
       } else {
         const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
         if (customer.channel === 'instagram') {
@@ -4102,6 +4175,28 @@ export async function completePayment(orderId) {
   }
   const receiptUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${receiptPath}` : null;
   const receiptLine = receiptSent ? 'Your receipt is attached above.' : receiptUrl ? `Here's your receipt: ${receiptUrl}` : 'Payment received.';
+  // One bubble, not two -- see this function's own comment above. Every
+  // other website reply already goes through reply() (real WhatsApp send
+  // for every other channel, a no-op websocket-free bubble for website),
+  // which has no `interactive` param; this bypasses it only for website,
+  // straight to logMessage, so the document reference and the real
+  // follow-up text land in the SAME row.
+  const sendPaymentConfirmed = async (bodyText) => {
+    if (customer.channel === 'website' && receiptWebsiteUrl) {
+      await logMessage({
+        customerId: customer.id,
+        tableSessionId: customer.tableSessionId,
+        direction: 'outbound',
+        channel: customer.channel,
+        sender: 'bot',
+        body: bodyText,
+        trigger: 'payment_confirmed',
+        interactive: { type: 'document', filename: `receipt-${order.reference}`, url: receiptWebsiteUrl },
+      });
+      return;
+    }
+    await reply(customer, bodyText, 'payment_confirmed');
+  };
 
   if (order.fulfilment_type === 'delivery') {
     const delivery = await createDelivery(order, customer);
@@ -4118,16 +4213,14 @@ export async function completePayment(orderId) {
     // own poll() can recognise THIS specific message and show a banner,
     // not just a bubble easy to miss while they're still tabbed over to
     // Paystack's own checkout.
-    await reply(customer, `${receiptLine} Your order is being prepared for delivery.${riderLine}${trackingLine}`, 'payment_confirmed');
+    await sendPaymentConfirmed(`${receiptLine} Your order is being prepared for delivery.${riderLine}${trackingLine}`);
   } else {
     const { rows: bizRows } = await pool.query('select address, phone_number from business limit 1');
     const biz = bizRows[0] || {};
     const branchRows = order.branch_id ? (await pool.query('select address, phone_number from branch where id = $1', [order.branch_id])).rows : [];
     const b = branchRows[0] || {};
-    await reply(
-      customer,
-      `${receiptLine} I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`,
-      'payment_confirmed'
+    await sendPaymentConfirmed(
+      `${receiptLine} I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
     );
   }
 
@@ -5714,9 +5807,26 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
   // completely untouched.
   if (['confirm_order', 'confirm_payment', 'fulfilment'].includes(order.engine_state)) {
     const paid = order.payment_status === 'confirmed' || order.payment_status === 'accepted';
-    if (paid && (sets.length || removes.length)) {
-      await reply(customer, `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`);
-      await handover(customer, 'Customer wants to remove or change items on an already-paid order', null, false);
+    // Chidera, 2026-09-25: same dine-in kitchen-protection gap as
+    // handleOrderModification's own fix (its own comment has the full
+    // reasoning) -- this is the web-menu-page basket-resubmit path
+    // (tapping through the menu and hitting "Review order" again, not
+    // typing), the one dine-in tables actually use to change an order.
+    // Captured before anything below mutates confirmed_at.
+    const alreadySentToKitchen = order.payment_mode === 'at_table' && Boolean(order.confirmed_at);
+    if ((paid || alreadySentToKitchen) && (sets.length || removes.length)) {
+      await reply(
+        customer,
+        paid
+          ? `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`
+          : `That round's already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
+      );
+      await handover(
+        customer,
+        paid ? 'Customer wants to remove or change items on an already-paid order' : 'Customer wants to remove or change items already sent to the kitchen',
+        null,
+        false
+      );
       if (!adds.length) return;
     }
 
@@ -5725,7 +5835,7 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
       await insertWebOrderItem(order.id, item);
       addedValue += item.quantity * Number(item.price);
     }
-    if (!paid) {
+    if (!paid && !alreadySentToKitchen) {
       for (const item of sets) {
         await pool.query('update order_item set quantity = $1 where id = $2', [item.quantity, item.itemId]);
       }
