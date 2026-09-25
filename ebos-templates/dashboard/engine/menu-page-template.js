@@ -864,7 +864,18 @@ async function submitOrder() {
     alert('Could not reach the connection. Please check your network and try again.');
     return;
   }
-  if (!res.ok) { goBtn.textContent = originalLabel; alert(data.error || 'Something went wrong.'); return; }
+  if (!res.ok) {
+    goBtn.textContent = originalLabel;
+    alert(data.error || 'Something went wrong.');
+    // Chidera, 2026-09-25 (live report): "it didnt take the customer out
+    // of the web menu, back to the web chat automatically. it left them
+    // there stuck" -- routes/dinein-menu.js's own kitchen-removal block
+    // sets redirectToChat only for this one specific error (a real web-
+    // chat session actually exists to go back to); every other error on
+    // this page still just leaves them here to fix the basket and retry.
+    if (data.redirectToChat && WEB_CHAT_PATH) window.location.href = WEB_CHAT_PATH;
+    return;
+  }
   document.body.innerHTML = '<div style="padding:60px 20px;text-align:center;font-family:Inter,sans-serif;"><h2 style="font-family:Fraunces,serif;">Order sent!</h2><p style="color:#6E6156;margin-top:8px;">Taking you back to the chat\\u2026</p></div>';
   // Chidera, 2026-09-21, real live report: "after i closed web from
   // instagram it took me on whatsapp not back to ig where i placed the

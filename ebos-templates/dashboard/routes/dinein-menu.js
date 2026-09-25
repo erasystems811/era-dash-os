@@ -314,9 +314,37 @@ router.post('/:qrToken/review', async (req, res) => {
   // gives an already-paid order, applied here BEFORE the destructive
   // delete-and-reinsert below -- nothing about this round is touched.
   if (wasAlreadyConfirmed && anyRemoved) {
-    await reply(customer, `That round's already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`);
-    await handover(customer, 'Customer wants to remove or change items already sent to the kitchen', null, false);
-    return res.status(409).json({ error: "That round's already gone to the kitchen -- we've let staff know, they'll sort it out with you." });
+    // Chidera, 2026-09-25 (live report): "the text went to bare chat
+    // instead of web chat and it didnt take the customer out of the web
+    // menu, back to the web chat automatically" -- this early return was
+    // the one branch in this whole route that never applied the same
+    // isViaWebChat channel/tableSessionId flip every other exit path here
+    // already does (see isRepeatAddOn and the main flow below), so
+    // reply()/handover() went out as a real WhatsApp send instead of a
+    // free web-chat bubble, landing table-session-less even when it did.
+    const viaWebChat = isViaWebChat(customer);
+    if (viaWebChat) {
+      customer.channel = 'website';
+      customer.tableSessionId = session.id;
+      await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
+    }
+    await reply(customer, `That order is already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`);
+    // Chidera, 2026-09-25: "then tell staff in handover text what is the
+    // table name, what they also want to remove" -- the alert used to just
+    // say a generic reason, staff had to go find the conversation to see
+    // which table and what was actually being asked for.
+    const removedLines = [...beforeQty.entries()]
+      .filter(([productId, qty]) => (afterQty.get(productId) || 0) < qty)
+      .map(([productId, qty]) => `${qty - (afterQty.get(productId) || 0)}x ${byId.get(productId)?.name || 'an item'}`);
+    await handover(customer, 'Customer wants to remove or change items already sent to the kitchen', {
+      table: `Table: ${table.label}`,
+      wants: removedLines.length ? `Wants to remove: ${removedLines.join(', ')}` : null,
+    }, false);
+    // redirectToChat -- menu-page-template.js's submitOrder() only auto-
+    // sends a web-chat customer back to WEB_CHAT_PATH on this specific
+    // error, not the OTHER 409 above (no real session yet, nothing to go
+    // back to) or any other error on this route.
+    return res.status(409).json({ error: "That order is already gone to the kitchen -- we've let staff know, they'll sort it out with you.", redirectToChat: viaWebChat });
   }
 
   // Chidera, 2026-09-20, real report: "i went to type cold for water it is

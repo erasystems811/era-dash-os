@@ -73,12 +73,14 @@ async function main() {
   // Chidera, 2026-09-25, real live report: "i texted a customer on dee
   // from staff dashboard... and the customer didnt get the text? when i
   // say 3 text max i mean 3 GREETING text, when a staff is texting...
-  // why isnt it sending atall?" Staff-initiated pings are never subject
-  // to the bot's own 3-consecutive-pings cap (see needsChatRedirect's own
-  // `capped: false` for staff) -- every single staff message gets its own
-  // real ping, no matter how many have already gone out with no visit in
-  // between. Five more staff messages right after, well past where the
-  // bot's own cap would have gone silent, all still get real pings.
+  // why isnt it sending atall?" -- staff's genuine first ping is never
+  // subject to the bot's own numeric cap. Then, same day, a correction
+  // after that fix first went out: "its not every single text that you
+  // send we are trying to reach out to you, only the first staff reach
+  // out text, everything else is expected to go on in web chat." Five
+  // more staff messages right after must NOT keep re-pinging -- exactly
+  // one real ping total for this customer, see needsStaffChatRedirect's
+  // own comment in engine/flow.js for the full story.
   for (let i = 2; i <= 6; i++) {
     await flow.sendStaffReply(customer.id, `Update #${i}.`, null);
   }
@@ -86,17 +88,22 @@ async function main() {
   let bubbles = rows.filter((r) => r.trigger === 'staff_reply');
   let pings = rows.filter((r) => r.trigger === 'staff_reply_ping');
   assert(bubbles.length === 6, 'all six messages log as free bubbles');
-  assert(pings.length === 6, 'and all six real pings go out too -- staff is never capped, unlike the bot\'s own redirect');
+  assert(pings.length === 1, `only the first staff message gets a real ping -- everything after stays on web chat (got ${pings.length})`);
 
-  // A genuine chat visit in between still correctly resets the count
-  // (proving the reset logic itself still works), then one more staff
-  // message keeps getting through same as always.
-  await pool.query('update customers set chat_redirect_sent_at = now() - interval \'3 hours\' where id = $1', [customer.id]);
-  await pool.query('update customers set web_chat_active_at = now() - interval \'45 minutes\' where id = $1', [customer.id]);
+  // A genuine chat visit since that one ping earns exactly one fresh ping
+  // next time staff reaches out, not a free-for-all again.
+  await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
   await flow.sendStaffReply(customer.id, 'One more update for you.', null);
   rows = await outboundRows(pool, customer.id);
   const pingsAfterVisit = rows.filter((r) => r.trigger === 'staff_reply_ping');
-  assert(pingsAfterVisit.length === 7, 'a fresh ping is still sent after a genuine chat visit, same as always');
+  assert(pingsAfterVisit.length === 2, `a genuine chat visit since the last ping earns exactly one fresh ping, not unlimited ones (got ${pingsAfterVisit.length})`);
+
+  // And right after that fresh ping, still no visit since -- back to
+  // staying quiet, same as the very first stretch.
+  await flow.sendStaffReply(customer.id, 'Another update.', null);
+  rows = await outboundRows(pool, customer.id);
+  const pingsAfterVisit2 = rows.filter((r) => r.trigger === 'staff_reply_ping');
+  assert(pingsAfterVisit2.length === 2, `and it goes right back to staying quiet after that one fresh ping (got ${pingsAfterVisit2.length})`);
 
   // === PART B: a customer texting real ("bare") WhatsApp instead of the
   // web chat, while an order is genuinely in progress. ===

@@ -48,6 +48,15 @@ router.post('/:token/submit', async (req, res) => {
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'Please tell us what happened first.' });
   customer.channel = 'website';
+  // Chidera, 2026-09-25 (live report): "in complaint form there is no back
+  // to chat" -- the GET handler above already sends a dine-in guest's
+  // "Back to chat" link at their table's own scoped thread
+  // (?table=<qr_token>), but this route never tagged the ack/inbound rows
+  // with that same table_session_id -- they landed in the generic online
+  // thread instead, so the table thread they got redirected to showed
+  // nothing at all. Same currentDineinSession lookup the GET handler uses.
+  const dineinSession = await currentDineinSession(customer);
+  if (dineinSession) customer.tableSessionId = dineinSession.id;
   await logInboundWebsiteMessage(customer, text);
   // Chidera, 2026-09-24: "there is also nowhere for complaint to go to,
   // there is no database table." handover() alone (the real WhatsApp ping

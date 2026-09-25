@@ -125,6 +125,80 @@ async function main() {
   const { rows: itemsAfterAdd } = await pool.query(`select p.name from order_item oi join product p on p.id = oi.product_id where oi.order_id = $1`, [order.id]);
   assert(itemsAfterAdd.some((i) => i.name === 'Zobo'), 'the new item was actually added');
 
+  // === 4. Chidera, 2026-09-25 (live report): "the text went to bare chat
+  // instead of web chat and it didnt take the customer out of the web
+  // menu, back to the web chat automatically. it left them there stuck" --
+  // same scenario as #2, but this guest is genuinely on the web chat
+  // (web_chat_active_at freshly touched). The reply/handover ack must land
+  // as a website-channel, table-scoped bubble (not a real WhatsApp send),
+  // and the response must say to redirect back to chat. ===
+  const { rows: custRows2 } = await pool.query(
+    `insert into customers (name, phone_number, channel, menu_token, web_chat_active_at) values ('Table 9 Guest 2', '2348012390002', 'whatsapp', 'menutok-remove-kitchen-2', now()) returning id`
+  );
+  const customerId2 = custRows2[0].id;
+  const { rows: tableRows2 } = await pool.query(
+    `insert into restaurant_table (label, qr_token, branch_id) values ('Table 10', 'qr-remove-kitchen-2', $1) returning id`,
+    [branchId]
+  );
+  const tableId2 = tableRows2[0].id;
+  await pool.query(`insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3)`, [tableId2, branchId, customerId2]);
+
+  const firstRes2 = await fetch(`${BASE}/t/qr-remove-kitchen-2/review?g=menutok-remove-kitchen-2`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: [{ productId: prod1[0].id, quantity: 1 }, { productId: prod2[0].id, quantity: 1 }] }),
+  });
+  assert(firstRes2.status === 200, 'the web-chat guest\'s first-ever submission goes through fine');
+  const { rows: order2Rows } = await pool.query(`select * from "order" where table_id = $1 order by created_at desc limit 1`, [tableId2]);
+  const order2 = order2Rows[0];
+  await pool.query(`update "order" set confirmed_at = now() where id = $1`, [order2.id]);
+
+  const { rows: session2Rows } = await pool.query(`select id from table_session where table_id = $1`, [tableId2]);
+
+  // handover()'s own transcript summary (askText) needs a real
+  // ANTHROPIC_API_KEY this sandbox doesn't have -- unlike scenario #2
+  // above (which just accepts the resulting crash and checks DB state
+  // instead), redirectToChat can ONLY be observed on the HTTP response
+  // itself, so it's worth stubbing out just this one call to get a real,
+  // complete response -- same "mock the one real external call" shape
+  // test-one-bubble-document-and-text.mjs already uses for Paystack.
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('api.anthropic.com')) {
+      return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'What they want: n/a\nAgreed so far: n/a\nOutstanding: n/a' }], usage: {} }) };
+    }
+    return realFetch(url, opts);
+  };
+  // Chidera, 2026-09-25, same-day follow-up: "then tell staff in handover
+  // text what is the table name, what they also want to remove" -- captures
+  // the real staff alert (console.log in this sandbox) to verify it now
+  // names the table and the specific item being removed, not just a
+  // generic reason.
+  const alertLogs = [];
+  const originalLog = console.log;
+  console.log = (...args) => { alertLogs.push(args.join(' ')); originalLog(...args); };
+  const removeRes2 = await fetch(`${BASE}/t/qr-remove-kitchen-2/review?g=menutok-remove-kitchen-2`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: [{ productId: prod1[0].id, quantity: 1 }] }),
+  });
+  const removeBody2 = await removeRes2.json();
+  console.log = originalLog;
+  global.fetch = realFetch;
+  assert(removeRes2.status === 409, `the web-chat guest's removal is also refused, not silently applied (got ${removeRes2.status})`);
+  assert(removeBody2.redirectToChat === true, 'the response tells the client to auto-redirect this guest back to web chat, not just leave them stuck on the menu page');
+  assert(removeBody2.error?.startsWith('That order is already gone to the kitchen'), `wording says "order", not "round" (got "${removeBody2.error}")`);
+
+  const staffAlert2 = alertLogs.find((l) => /Reason: Customer wants to remove/.test(l));
+  assert(Boolean(staffAlert2), 'a real staff alert was raised for this');
+  assert(staffAlert2?.includes('Table: Table 10'), `the alert names the actual table (got "${staffAlert2}")`);
+  assert(staffAlert2?.includes('Wants to remove: 1x Grilled Chicken'), `the alert names what's actually being removed (got "${staffAlert2}")`);
+
+  const { rows: websiteMsgRows } = await pool.query(
+    `select body, channel, table_session_id from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 5`,
+    [customerId2]
+  );
+  assert(websiteMsgRows.some((m) => /gone to the kitchen/i.test(m.body) && m.channel === 'website'), 'the ack landed as a website-channel bubble, not a real WhatsApp send ("bare chat")');
+  assert(websiteMsgRows.some((m) => /gone to the kitchen/i.test(m.body) && m.table_session_id === session2Rows[0].id), 'and it landed in this table\'s own scoped thread, not the generic online one');
+
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);
 }

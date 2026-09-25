@@ -71,7 +71,11 @@ async function main() {
 
   const invoiceMsg = await latestOutbound(pool, customer.id, 'website');
   assert(invoiceMsg.interactive?.type === 'document', 'that one message carries the real document interactive payload');
-  assert(/attached above/i.test(invoiceMsg.body), 'and its body has the real "attached above" follow-up text in the SAME bubble');
+  // "below", not "above" -- on website the document renders BELOW the
+  // body text within this SAME bubble (renderMessage's own body-then-
+  // actions order); "above" is only accurate for WhatsApp/Instagram's
+  // genuinely separate, earlier real document send.
+  assert(/attached below/i.test(invoiceMsg.body), 'and its body has the real "attached below" follow-up text in the SAME bubble');
 
   const invoiceLinkRes = await fetch(invoiceMsg.interactive.url);
   assert(invoiceLinkRes.status === 200, `the invoice link itself resolves (got ${invoiceLinkRes.status})`);
@@ -87,12 +91,48 @@ async function main() {
 
   const receiptMsg = await latestOutbound(pool, customer.id, 'website');
   assert(receiptMsg.interactive?.type === 'document', 'that one message carries the real receipt document payload');
-  assert(/attached above/i.test(receiptMsg.body) && /pick up/i.test(receiptMsg.body), 'and its body has BOTH the receipt line and the real pickup instructions in the SAME bubble');
+  assert(/payment has been received/i.test(receiptMsg.body), 'and it leads with the real "payment has been received" confirmation, not just a bare "attached" line');
+  assert(/attached below/i.test(receiptMsg.body) && /pick up/i.test(receiptMsg.body), 'and its body has BOTH the receipt line (correctly "below", matching where the document actually renders in this bubble) and the real pickup instructions in the SAME bubble');
 
   const receiptLinkRes = await fetch(receiptMsg.interactive.url);
   assert(receiptLinkRes.status === 200, `the receipt link itself resolves (got ${receiptLinkRes.status})`);
   const receiptHtml = await receiptLinkRes.text();
   assert(/back-link/i.test(receiptHtml) && /Back to chat/i.test(receiptHtml), 'the receipt page now has a real back-to-chat link too, same as the invoice');
+
+  // === 3. Chidera, 2026-09-25, follow-up: "when i said invoice and pay
+  // now in same chat i meant itll have 2 buttons not just the pay now in
+  // the invoice." With a real online payment link (Paystack) configured,
+  // the SAME one bubble must carry TWO real buttons -- view the invoice,
+  // and pay now -- not rely on the invoice page's own embedded button. ===
+  process.env.PAYMENT_PROVIDER = 'paystack';
+  process.env.PAYMENT_SECRET_KEY = 'sk_test_fake';
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('paystack.co/transaction/initialize')) {
+      return { ok: true, json: async () => ({ data: { reference: 'PSK-2BTN-1', authorization_url: 'https://checkout.paystack.com/fake-2btn' } }) };
+    }
+    return realFetch(url, opts);
+  };
+
+  const customer2 = await flow.findOrCreateCustomer({ phoneNumber: '2348012400002', channel: 'website' });
+  await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer2.id]);
+  const { rows: order2Rows } = await pool.query(
+    `insert into "order" (customer_id, reference, fulfilment_type, total, status, payment_status, engine_state, channel)
+     values ($1, 'REF-ONEBUBBLE-2BTN', 'pickup', $2, 'new', 'pending', 'confirm_payment', 'whatsapp') returning *`,
+    [customer2.id, product.price]
+  );
+  const order2 = order2Rows[0];
+  await pool.query(`insert into order_item (order_id, product_id, quantity, price) values ($1, $2, 1, $3)`, [order2.id, product.id, product.price]);
+
+  await flow.sendPaymentInstructions(customer2, order2);
+  global.fetch = realFetch;
+
+  const twoBtnMsg = await latestOutbound(pool, customer2.id, 'website');
+  assert(twoBtnMsg.interactive?.type === 'document', 'still one combined document-type message, not a separate cta_url one');
+  assert(twoBtnMsg.interactive?.payUrl === 'https://checkout.paystack.com/fake-2btn', 'that same bubble carries the real Paystack pay link as its own second button, not folded into a redirect');
+  assert(twoBtnMsg.interactive?.payLabel === 'Pay now', 'with the real "Pay now" label');
+  const afterTwoBtnCount = await countOutbound(pool, customer2.id, 'website');
+  assert(afterTwoBtnCount === 1, `still exactly one website bubble, not two, even with a real pay link attached (got ${afterTwoBtnCount})`);
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

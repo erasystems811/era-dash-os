@@ -294,7 +294,7 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
 async function sendStaffReplyRedirect(customer, text, staffId) {
   await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
 
-  if (await needsChatRedirect(customer, { capped: false })) {
+  if (await needsStaffChatRedirect(customer)) {
     await sendChatRedirectPing(customer, `We're trying to reach out to you.`, { trigger: 'staff_reply_ping', sender: 'staff' });
   }
   await pool.query(
@@ -1107,25 +1107,12 @@ export async function buildGreetingContent(customer) {
 // customer should get a one time we are trying to reach out to you tap
 // here to text... bot must not answer every reply customer makes on bare
 // chat, just resend them the place to text once if they text bare and if
-// they text bare again, leave it stay silent." Shared by sendStaffReply
-// (a real staff-initiated message) and handlePendingBatch's own bare-
-// WhatsApp redirect (a customer texting real WhatsApp instead of the web
-// chat while an order's in progress) -- both need the exact same "was
-// this already sent, and have they actually come back to the chat since"
-// check, not two separate copies of the same timestamp logic.
-//
-// Chidera, 2026-09-25, real live report: "i texted a customer on dee from
-// staff dashboard on conversations and the customer didnt get the text?
-// so when i say 3 text max i mean 3 GREETING text, when a staff is
-// texting... why isnt it sending atall?" Real bug: the 3-ping CAP below
-// was shared between both callers, so a customer who'd already used up
-// their 3 bot-redirect pings (from texting bare WhatsApp repeatedly) went
-// permanently silent for staff too -- a staff member reaching out is a
-// deliberate, real event, never subject to the bot's own anti-spam count.
-// `capped` lets sendStaffReplyRedirect opt out of just the count check
-// below while keeping every other real dedupe (actively on the page,
-// already-pinged-with-no-time-passed) unchanged for everyone.
-export async function needsChatRedirect(customer, { capped = true } = {}) {
+// they text bare again, leave it stay silent." The BOT's own automatic
+// bare-WhatsApp redirect (handlePendingBatch) -- see needsStaffChatRedirect
+// just below for the separate, independently-tracked staff version of
+// this same idea (Chidera, 2026-09-25: two real live bugs taught this
+// they can't safely share one counter -- see that function's own comment).
+export async function needsChatRedirect(customer) {
   // Actively on the page right now (same 30-min freshness window
   // completePayment already uses) -- they'll see a free bubble live via
   // the page's own poll, no real ping needed at all regardless of history.
@@ -1147,7 +1134,6 @@ export async function needsChatRedirect(customer, { capped = true } = {}) {
   // returns true).
   const moreThan24hSinceLastPing = new Date(customer.chat_redirect_sent_at) < new Date(Date.now() - 24 * 60 * 60 * 1000);
   if (moreThan24hSinceLastPing) return true;
-  if (!capped) return true;
   // No visit at all since the last ping, and still within 24h of it --
   // Chidera, 2026-09-24: "i said after the first greeting there should be
   // a second resend of the tap here to chat to redirect customer again
@@ -1156,10 +1142,41 @@ export async function needsChatRedirect(customer, { capped = true } = {}) {
   // time of 5 cause that 2 is risky, going silent on a customer is
   // risky" -- then, same day, on reflection: "make it 3 now sef, 5 is
   // much." Up to 3 consecutive pings total before staying silent until
-  // either a real visit or the 24h renewal above -- BOT-initiated
-  // redirects only (see this function's own header comment for why
-  // staff-initiated pings never reach this line at all).
+  // either a real visit or the 24h renewal above.
   return (customer.chat_redirect_count || 0) < 3;
+}
+
+// Chidera, 2026-09-25: a separate function, deliberately NOT sharing
+// needsChatRedirect's own chat_redirect_sent_at/chat_redirect_count
+// columns -- two real live bugs in a row proved those can't be reused for
+// staff:
+// 1. "i texted a customer on dee from staff dashboard on conversations
+//    and the customer didnt get the text? when a staff is texting... why
+//    isnt it sending atall?" -- the bot's own 3-ping numeric cap had
+//    already been exhausted by earlier automated pings, so needsChatRedirect
+//    went permanently silent for staff too, sharing that same count.
+// 2. "its not every single text that you send we are trying to reach out
+//    to you, only the first staff reach out text, everything else is
+//    expected to go on in web chat" -- the first attempt at fixing #1
+//    (an override flag that skipped the numeric cap) over-corrected: once
+//    it shared chat_redirect_sent_at with the bot's own history, it either
+//    fired on every single staff message, or -- worse -- could silently
+//    skip staff's own genuine first ping just because the BOT happened to
+//    have pinged recently and exhausted its cap (the exact #1 scenario).
+// A staff ping's own history (was staff's OWN first ping already sent,
+// and has this customer visited or gone 24h quiet since) can only be
+// answered correctly by looking at staff's own pings specifically --
+// message's own staff_reply_ping rows, untangled from the bot's count.
+async function needsStaffChatRedirect(customer) {
+  const { rows } = await pool.query(
+    `select created_at from message where customer_id = $1 and trigger = 'staff_reply_ping' order by created_at desc limit 1`,
+    [customer.id]
+  );
+  const lastStaffPing = rows[0]?.created_at;
+  if (!lastStaffPing) return true; // staff has never pinged this customer before
+  const visitedSinceLastPing = customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(lastStaffPing);
+  if (visitedSinceLastPing) return true;
+  return new Date(lastStaffPing) < new Date(Date.now() - 24 * 60 * 60 * 1000);
 }
 async function markChatRedirectSent(customer) {
   // A genuine visit since the last ping, 24h+ of real silence since the
@@ -1738,10 +1755,16 @@ async function askNextItemQuestion(orderId) {
 // keyword matching nextUpsellGroup itself uses to decide a category's
 // already satisfied -- one source of truth for what counts as a match,
 // not a second guess at the same keywords.
-// Chidera, 2026-09-24: "it could be a side too." nextUpsellGroup below no
-// longer walks this array in one fixed order -- see its own comment for
-// the real priority logic (side-first when one's actually needed, a
-// different track when it's not).
+// Chidera, 2026-09-25: "let upsell only be protein and drink or side and
+// drink now no more snack" -- snack dropped from the priority tracks below
+// (nextUpsellGroup), so it's never actively offered going forward. Kept
+// HERE though, not deleted -- routes/api.js's computeUpsellStats and this
+// file's own logMetric('upsell_accepted') both look up a past order's
+// upsell_offered entries against this exact array to tell whether an
+// already-recorded offer (snack entries from before today, on real live
+// orders) actually landed; deleting the group here would silently zero
+// out accepted-count accuracy for that real historical data, not just stop
+// new snack offers.
 export const UPSELL_GROUPS = [
   { key: 'drink', keywords: ['drink', 'beverage', 'juice', 'water'], label: 'a drink' },
   { key: 'protein', keywords: ['protein', 'meat'], label: 'a protein' },
@@ -1749,15 +1772,8 @@ export const UPSELL_GROUPS = [
   { key: 'snack', keywords: ['snack', 'small chop', 'appetiser', 'appetizer', 'starter'], label: 'a snack' },
 ];
 
-// Chidera, 2026-09-24: "could be 3 or 2 upsells... or 1" -- confirmed, on
-// correction, this means up to this many SEQUENTIAL offers per order
-// (drink, then a side, then a snack -- one category at a time, not all
-// combined into one list): "no you got upsell wronggg...you dont make it
-// obvious, you said want to complete your oeder like that is a pre
-// requiste, the former would you like to add a drink is very okay just
-// that it was to enable multi selesct and all and after theyve added
-// drink then ask again would you like to add one of our special sides."
-const MAX_UPSELL_PICKS = 3;
+// Chidera, 2026-09-25, same message: "and only 2 upsell" -- down from 3.
+const MAX_UPSELL_PICKS = 2;
 
 export function categoryMatchesGroup(category, keywords) {
   if (!category) return false;
@@ -1776,22 +1792,16 @@ function catalogueOptions(menu, keywords) {
   return menu.filter((p) => categoryMatchesGroup(p.category, keywords));
 }
 
-// Chidera, 2026-09-24: "if youll recommend a side, then the side should
-// be first and its either side then protein then drink or protein then
-// snack then drink...and recommendation should depend on what is needed
-// for that customer" -- then corrected the WITH-side order specifically:
-// "instead of side then protein then drink make it protein then side then
-// drink." Two priority tracks, picked once per call by the one real thing
-// that decides which is "needed": whether this order already has a side.
-// A side genuinely missing still gets offered (ahead of drink, reversing
-// the old fixed drink-first order), just after protein now, not before
-// it; an order that already has one skips straight to the other track
-// instead (a second side offer would never fire anyway -- orderHasIt
-// below already excludes it -- so protein/snack/drink is what's actually
-// left to offer, in the order she asked for).
+// Chidera, 2026-09-25: "let upsell only be protein and drink or side and
+// drink now no more snack, and only 2 upsell" -- simplified to exactly two
+// tracks of two, picked by the same "does this order already have a side"
+// check as before: missing one gets offered side then drink (get the side
+// actually added, protein no longer asked about in this track at all);
+// already has one gets protein then drink instead (side would never fire
+// anyway -- orderHasIt below already excludes it).
 const SIDE_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'side').keywords;
-const UPSELL_PRIORITY_WITH_SIDE = ['protein', 'side', 'drink'];
-const UPSELL_PRIORITY_WITHOUT_SIDE = ['protein', 'snack', 'drink'];
+const UPSELL_PRIORITY_WITH_SIDE = ['side', 'drink'];
+const UPSELL_PRIORITY_WITHOUT_SIDE = ['protein', 'drink'];
 
 // Next upsell offer worth making, if any -- one whole category at a time
 // (every real product in it, not just a representative one), already-
@@ -3024,8 +3034,15 @@ export async function sendPaymentInstructions(customer, order) {
   // what's being bought, not a footnote on the payment line. Always followed
   // by bank details now -- see the note above the function.
   const invoiceUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${invoicePath}` : null;
+  // "attached above" is only true for WhatsApp/Instagram (a genuinely
+  // separate, earlier real document send there) -- on website it's the
+  // SAME bubble, and the document/interactive part always renders BELOW
+  // the body text (renderMessage's own body-then-actions order). Same fix
+  // as completePayment's own receiptLine, see its comment.
   const invoiceLine = invoiceSent
-    ? `Your invoice is attached above.`
+    ? customer.channel === 'website'
+      ? `Your invoice is attached below.`
+      : `Your invoice is attached above.`
     : invoiceUrl
       ? `Here's your invoice: ${invoiceUrl}`
       : `Your invoice for this order is ready.`;
@@ -3044,6 +3061,13 @@ export async function sendPaymentInstructions(customer, order) {
   // slip would.
   const { payLine, needsHandover, paymentUrl, posChoice } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
   if (customer.channel === 'website' && invoiceWebsiteUrl) {
+    // Chidera, 2026-09-25: "when i said invoice and pay now in same chat i
+    // meant itll have 2 buttons not just the pay now in the invoice" --
+    // a real, separate "Pay now" button right on this bubble (not only
+    // the invoice page's own embedded one) whenever there's an actual
+    // online payment link to pay with. POS (Transfer/Card) has no single
+    // paymentUrl to attach here -- it keeps its own separate choice
+    // message right after, same as before.
     await logMessage({
       customerId: customer.id,
       tableSessionId: customer.tableSessionId,
@@ -3052,7 +3076,12 @@ export async function sendPaymentInstructions(customer, order) {
       sender: 'bot',
       body: posChoice ? invoiceLine : `${invoiceLine}\n\n${payLine}`,
       trigger: 'invoice_pdf',
-      interactive: { type: 'document', filename: `invoice-${order.reference}`, url: invoiceWebsiteUrl },
+      interactive: {
+        type: 'document',
+        filename: `invoice-${order.reference}`,
+        url: invoiceWebsiteUrl,
+        ...(paymentUrl && !posChoice ? { payUrl: paymentUrl, payLabel: 'Pay now' } : {}),
+      },
     });
     if (posChoice) await sendPosPaymentChoice(customer, order);
   } else if (posChoice) {
@@ -3654,12 +3683,26 @@ async function handleOrderModification(customer, order, mods) {
       customer,
       paid
         ? `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`
-        : `That round's already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
+        : `That order is already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
     );
+    // Chidera, 2026-09-25: "then tell staff in handover text what is the
+    // table name, what they also want to remove" -- same reasoning as
+    // routes/dinein-menu.js's own web-basket-resubmit version of this
+    // exact escalation (its own comment has the full story); this is the
+    // typed-chat path (a dine-in guest typing "remove the rice" instead of
+    // using the menu page), table_id is null for a paid online order so
+    // that line is simply omitted there, not shown blank.
+    const removedLines = [...mods.removes.map((i) => `${i.quantity}x ${i.name}`), ...mods.sets.map((i) => `${i.name} to ${i.quantity}`)];
+    const { rows: tableRowsForHandover } = order.table_id
+      ? await pool.query('select label from restaurant_table where id = $1', [order.table_id])
+      : { rows: [] };
     await handover(
       customer,
       paid ? 'Customer wants to remove or change items on an already-paid order' : 'Customer wants to remove or change items already sent to the kitchen',
-      null,
+      {
+        table: tableRowsForHandover[0] ? `Table: ${tableRowsForHandover[0].label}` : null,
+        wants: removedLines.length ? `Wants to remove/change: ${removedLines.join(', ')}` : null,
+      },
       false
     );
     if (!mods.adds.length) return;
@@ -4085,6 +4128,102 @@ export async function completeTopupPayment(topupId) {
   }
 }
 
+// Chidera, 2026-09-25: "after payment is confirmed instead of the bare
+// payment received, send customer a receipt, but receipt shouldnt look
+// like invoice it is a receipt" -- a real RECEIPT (routes/documents.js's
+// own receiptPage, deliberately not the invoice template with a different
+// title -- see its own comment) sent as a WhatsApp document, same
+// resilient send-then-fallback-to-a-link shape sendPaymentInstructions
+// already uses for the invoice. Extracted out of completePayment
+// (2026-09-25, "hope dine in has receipt too and the receipt has back to
+// chat") so routes/api.js's own dine-in "Mark paid" route can send the
+// exact same real receipt -- dine-in settles in person, so its own
+// payment never went through completePayment at all (payment_status never
+// reaches 'confirmed'/'accepted' there -- see completePayment's own
+// comment on this), and had no receipt of any kind until now.
+// followUpText -- whatever operational info belongs right after the
+// receipt line, in the SAME message/bubble (delivery status, pickup
+// instructions, or dine-in's own thank-you) -- always starts with its own
+// leading space, so callers with nothing to add can just pass ''.
+export async function sendReceiptMessage(customer, order, followUpText = '') {
+  const receiptPath = await createReceipt(order);
+  let receiptSent = false;
+  // Chidera, 2026-09-25: "the receipt and the your receipt is attached
+  // should be in one chat" -- website's own document bubble used to be
+  // logged separately, then a SECOND bubble with the actual follow-up
+  // text went out right after. Only the URL is captured here now; the
+  // real combined send (text + document, one bubble) happens below once
+  // the full body text is known.
+  let receiptWebsiteUrl = null;
+  if (process.env.PUBLIC_URL) {
+    try {
+      // Found live, 2026-09-25: this whole block predates the website
+      // channel (main-only, never touched by the web-chat merge) and had
+      // no website branch at all -- customer.channel === 'website' fell
+      // straight into the `else` below, sending a REAL WhatsApp document
+      // to a customer who should have gotten a free chat bubble.
+      if (customer.channel === 'website') {
+        // website: same fix as sendPaymentInstructions' own invoice branch
+        // -- link to the plain HTML receipt page, not /pdf (Gotenberg-
+        // backed, internal-only).
+        receiptWebsiteUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
+      } else {
+        const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
+        if (customer.channel === 'instagram') {
+          await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
+        } else {
+          await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
+        }
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
+      }
+      receiptSent = true;
+    } catch (err) {
+      console.error(`Failed to send receipt PDF, falling back to a text link: ${err.message}`);
+    }
+  }
+  const receiptUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${receiptPath}` : null;
+  // Chidera, 2026-09-25: "the receipt text also didnt have the your
+  // payment has been received, your receipt is attached here it just
+  // went straight to your receipt is attached above, the receipt is
+  // below sef." Two real gaps: (1) the explicit "payment received"
+  // confirmation was dropped entirely once the receipt document itself
+  // became the opener; (2) "attached above" was only ever true for
+  // WhatsApp/Instagram (the document is a genuinely separate, earlier
+  // real send there) -- on website it's the SAME bubble, and the
+  // document/interactive part of a bubble always renders BELOW the body
+  // text (renderMessage's own body-then-actions order), so "above" was
+  // just wrong there.
+  const receiptLine = receiptSent
+    ? customer.channel === 'website'
+      ? 'Your payment has been received. Your receipt is attached below.'
+      : 'Your payment has been received. Your receipt is attached above.'
+    : receiptUrl
+      ? `Your payment has been received. Here's your receipt: ${receiptUrl}`
+      : 'Your payment has been received.';
+  const bodyText = `${receiptLine}${followUpText}`;
+
+  // One bubble, not two -- see this function's own comment above. Every
+  // other website reply already goes through reply() (real WhatsApp send
+  // for every other channel, a no-op websocket-free bubble for website),
+  // which has no `interactive` param; this bypasses it only for website,
+  // straight to logMessage, so the document reference and the real
+  // follow-up text land in the SAME row.
+  if (customer.channel === 'website' && receiptWebsiteUrl) {
+    await logMessage({
+      customerId: customer.id,
+      tableSessionId: customer.tableSessionId,
+      direction: 'outbound',
+      channel: customer.channel,
+      sender: 'bot',
+      body: bodyText,
+      trigger: 'payment_confirmed',
+      interactive: { type: 'document', filename: `receipt-${order.reference}`, url: receiptWebsiteUrl },
+    });
+    return;
+  }
+  await reply(customer, bodyText, 'payment_confirmed');
+}
+
 // Called from the Paystack webhook once a payment is verified -- not part
 // of handleInboundMessage's request/reply loop, since payment confirmation
 // arrives from Paystack, not from the customer's next WhatsApp message.
@@ -4137,72 +4276,12 @@ export async function completePayment(orderId) {
 
   // Chidera, 2026-09-25: "after payment is confirmed instead of the bare
   // payment received, send customer a receipt, but receipt shouldnt look
-  // like invoice it is a receipt" -- a real RECEIPT (routes/documents.js's
-  // own receiptPage, deliberately not the invoice template with a
-  // different title -- see its own comment) sent as a WhatsApp document,
-  // same resilient send-then-fallback-to-a-link shape sendPaymentInstructions
-  // already uses for the invoice. Replaces the bare "Payment received"
-  // opener; the delivery/pickup-specific operational info still follows.
-  const receiptPath = await createReceipt(order);
-  let receiptSent = false;
-  // Chidera, 2026-09-25: "the receipt and the your receipt is attached
-  // should be in one chat" -- website's own document bubble used to be
-  // logged here, separately, then a SECOND bubble with the actual
-  // delivery/pickup text went out right after. Only the URL is captured
-  // here now; the real combined send (text + document, one bubble) happens
-  // below once the delivery/pickup message is known.
-  let receiptWebsiteUrl = null;
-  if (process.env.PUBLIC_URL) {
-    try {
-      // Found live, 2026-09-25: this whole block predates the website
-      // channel (main-only, never touched by the web-chat merge) and had
-      // no website branch at all -- customer.channel === 'website' fell
-      // straight into the `else` below, sending a REAL WhatsApp document
-      // to a customer who should have gotten a free chat bubble.
-      if (customer.channel === 'website') {
-        // website: same fix as sendPaymentInstructions' own invoice branch
-        // -- link to the plain HTML receipt page, not /pdf (Gotenberg-
-        // backed, internal-only).
-        receiptWebsiteUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
-      } else {
-        const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
-        if (customer.channel === 'instagram') {
-          await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
-        } else {
-          await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
-        }
-        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
-      }
-      receiptSent = true;
-    } catch (err) {
-      console.error(`Failed to send receipt PDF, falling back to a text link: ${err.message}`);
-    }
-  }
-  const receiptUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}${receiptPath}` : null;
-  const receiptLine = receiptSent ? 'Your receipt is attached above.' : receiptUrl ? `Here's your receipt: ${receiptUrl}` : 'Payment received.';
-  // One bubble, not two -- see this function's own comment above. Every
-  // other website reply already goes through reply() (real WhatsApp send
-  // for every other channel, a no-op websocket-free bubble for website),
-  // which has no `interactive` param; this bypasses it only for website,
-  // straight to logMessage, so the document reference and the real
-  // follow-up text land in the SAME row.
-  const sendPaymentConfirmed = async (bodyText) => {
-    if (customer.channel === 'website' && receiptWebsiteUrl) {
-      await logMessage({
-        customerId: customer.id,
-        tableSessionId: customer.tableSessionId,
-        direction: 'outbound',
-        channel: customer.channel,
-        sender: 'bot',
-        body: bodyText,
-        trigger: 'payment_confirmed',
-        interactive: { type: 'document', filename: `receipt-${order.reference}`, url: receiptWebsiteUrl },
-      });
-      return;
-    }
-    await reply(customer, bodyText, 'payment_confirmed');
-  };
-
+  // like invoice it is a receipt" -- see sendReceiptMessage's own comment
+  // for the real send/one-bubble/wording details, extracted out so
+  // routes/api.js's own dine-in "Mark paid" route (which never went
+  // through completePayment at all -- dine-in settles in person, its own
+  // payment_status never reaches 'confirmed'/'accepted') can send the
+  // exact same real receipt too.
   if (order.fulfilment_type === 'delivery') {
     const delivery = await createDelivery(order, customer);
     const riderLine = delivery.riderName ? ` Your rider is ${delivery.riderName}.` : '';
@@ -4218,14 +4297,16 @@ export async function completePayment(orderId) {
     // own poll() can recognise THIS specific message and show a banner,
     // not just a bubble easy to miss while they're still tabbed over to
     // Paystack's own checkout.
-    await sendPaymentConfirmed(`${receiptLine} Your order is being prepared for delivery.${riderLine}${trackingLine}`);
+    await sendReceiptMessage(customer, order, ` Your order is being prepared for delivery.${riderLine}${trackingLine}`);
   } else {
     const { rows: bizRows } = await pool.query('select address, phone_number from business limit 1');
     const biz = bizRows[0] || {};
     const branchRows = order.branch_id ? (await pool.query('select address, phone_number from branch where id = $1', [order.branch_id])).rows : [];
     const b = branchRows[0] || {};
-    await sendPaymentConfirmed(
-      `${receiptLine} I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
+    await sendReceiptMessage(
+      customer,
+      order,
+      ` I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
     );
   }
 
@@ -5828,7 +5909,7 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
         customer,
         paid
           ? `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`
-          : `That round's already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
+          : `That order is already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
       );
       await handover(
         customer,
