@@ -214,26 +214,27 @@ function documentPage({ title, business, customer, order, items }) {
 
 // Chidera, 2026-09-25: "after payment is confirmed instead of the bare
 // payment received, send customer a receipt, but receipt shouldnt look
-// like invoice it is a receipt" -- deliberately NOT documentPage() reused
-// with a different title. A receipt is proof something already happened,
-// not a bill asking for money: no "Pay now" button, no bank-account box
-// (there's nothing left to pay), no "Billed to" framing. A green PAID
-// stamp up top and "Received from"/"How it was paid" replace the
-// invoice's own pending-payment language. Same items table/total
-// structure underneath since that part is genuinely just useful record-
-// keeping either way.
+// like invoice it is a receipt." First version deliberately avoided the
+// invoice's pending-payment language, but kept its same wide bordered
+// item-table layout with a different badge stuck on top -- follow-up,
+// same day: "the styling of the receipt i dont like it, it looks almost
+// like the invoice, have you seen all these paystack them receipt
+// before?" Rebuilt around the pattern real payment confirmations
+// actually use (Paystack/Stripe-style): a narrow centered card, a big
+// green checkmark, the amount as the single dominant thing on the page,
+// then a short clean list of details -- not a wide invoice grid. Items
+// still shown for record-keeping, but as a de-emphasized plain list
+// underneath, not the page's main event.
 function receiptPage({ business, customer, order, items }) {
-  const brand = business.brand_color || '#1C1815';
-  const onBrand = readableTextColor(brand);
-  const rows = items
+  const itemRows = items
     .map(
       (i) =>
-        `<tr><td>${esc(i.name)}</td><td>${i.quantity}</td><td>${Number(i.price).toFixed(2)}</td><td>${(Number(i.price) * i.quantity).toFixed(2)}</td></tr>`
+        `<div class="item-row"><span><span class="qty">${i.quantity}&times;</span>${esc(i.name)}</span><span>${Number(i.price * i.quantity).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>`
     )
     .join('');
   const deliveryFeeRow =
     Number(order.delivery_fee) > 0
-      ? `<tr><td colspan="3">Delivery fee</td><td>${Number(order.delivery_fee).toFixed(2)}</td></tr>`
+      ? `<div class="item-row"><span>Delivery fee</span><span>${Number(order.delivery_fee).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>`
       : '';
 
   return `<!doctype html>
@@ -242,57 +243,45 @@ function receiptPage({ business, customer, order, items }) {
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap">
 <style>
-  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--paid:#2E7D5B;--paid-soft:rgba(46,125,91,0.12)}
+  :root{--paper:#F6F1E8;--ink:#1C1815;--mid:#6E6156;--line:#E2D9CB;--success:#2E7D5B;--success-soft:rgba(46,125,91,0.1)}
   *{box-sizing:border-box}
   html,body{background:var(--paper)}
-  body { font-family: "Inter", system-ui, sans-serif; max-width: 640px; margin: 2.5rem auto; padding: 0 1rem 3rem; color: var(--ink); }
-  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
-  .logo { max-height: 48px; max-width: 200px; margin-bottom: 6px; border-radius: 6px; }
-  .biz-name { font-family: "Fraunces", serif; font-weight: 700; font-size: 17px; }
-  .doc-title { font-family: "Fraunces", serif; font-size: 24px; font-weight: 700; text-align: right; letter-spacing: 0.01em; }
-  .paid-badge { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; background: var(--paid-soft); color: var(--paid); font-weight: 700; font-size: 11.5px; letter-spacing: 0.04em; padding: 4px 11px; border-radius: 999px; }
-  .doc-meta { text-align: right; font-size: 12.5px; color: var(--mid); margin-top: 8px; }
-  .received-from { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 18px 0; }
-  .received-from .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; }
-  table { border-collapse: collapse; width: 100%; margin: 18px 0; background: #fff; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); }
-  th { background: ${brand}; color: ${onBrand}; text-align: left; padding: 10px 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
-  td { padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
-  tr:last-child td { border-bottom: 0; }
-  .total-row { text-align: right; font-size: 17px; font-weight: 700; margin: 14px 4px 26px; color: var(--paid); }
-  .box { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
-  .box .label { font-size: 11px; font-weight: 700; color: var(--mid); letter-spacing: 0.04em; margin-bottom: 8px; }
-  .footer { text-align: center; color: var(--mid); font-size: 12px; margin-top: 32px; }
+  body { font-family: "Inter", system-ui, sans-serif; max-width: 420px; margin: 2.5rem auto; padding: 0 1rem 3rem; color: var(--ink); }
+  .card { background: #fff; border-radius: 20px; padding: 32px 26px 26px; text-align: center; box-shadow: 0 1px 3px rgba(28,24,21,0.06), 0 10px 28px rgba(28,24,21,0.06); }
+  .check-badge { width: 60px; height: 60px; border-radius: 50%; background: var(--success-soft); color: var(--success); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; }
+  .check-badge svg { width: 28px; height: 28px; }
+  .headline { font-family: "Fraunces", serif; font-weight: 700; font-size: 19px; color: var(--success); }
+  .biz-name { font-size: 13px; color: var(--mid); margin-top: 3px; }
+  .amount { font-family: "Fraunces", serif; font-size: 36px; font-weight: 700; margin: 18px 0 22px; letter-spacing: -0.01em; }
+  .divider { border-top: 1px dashed var(--line); margin: 4px 0 14px; }
+  .detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 13.5px; text-align: left; }
+  .detail-row span:first-child { color: var(--mid); }
+  .detail-row span:last-child { font-weight: 600; text-align: right; }
+  .items-label { font-size: 10.5px; font-weight: 700; color: var(--mid); letter-spacing: 0.05em; text-align: left; margin: 20px 0 6px; }
+  .item-row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 13px; text-align: left; color: var(--mid); }
+  .item-row .qty { color: var(--ink); font-weight: 600; margin-right: 4px; }
+  .footer { text-align: center; color: var(--mid); font-size: 12px; margin-top: 26px; }
   .era-mark { text-align: center; color: var(--mid); font-size: 10.5px; letter-spacing: 0.03em; margin-top: 8px; opacity: 0.65; }
 </style></head>
 <body>
-  <div class="header">
-    <div>
-      ${business.logo_data_url ? `<img class="logo" src="${esc(business.logo_data_url)}" alt="${esc(business.name)}">` : ''}
-      <div class="biz-name">${esc(business.name)}</div>
+  <div class="card">
+    ${business.logo_data_url ? `<img src="${esc(business.logo_data_url)}" alt="${esc(business.name)}" style="max-height:36px;max-width:160px;border-radius:6px;margin-bottom:14px;">` : ''}
+    <div class="check-badge">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
     </div>
-    <div>
-      <div class="doc-title">RECEIPT</div>
-      <div class="paid-badge">&#10003; PAID</div>
-      <div class="doc-meta">Reference: ${esc(order.reference)}<br>Date: ${new Date().toLocaleDateString()}</div>
-    </div>
-  </div>
+    <div class="headline">Payment successful</div>
+    <div class="biz-name">${esc(business.name)}</div>
+    <div class="amount">NGN ${Number(order.total).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
 
-  <div class="received-from">
-    <div class="label">RECEIVED FROM</div>
-    <strong>${esc(customer.name || customer.phone_number)}</strong>
-    ${customer.address ? `<br>${esc(customer.address)}` : ''}
-  </div>
+    <div class="divider"></div>
+    <div class="detail-row"><span>Received from</span><span>${esc(customer.name || customer.phone_number)}</span></div>
+    <div class="detail-row"><span>Reference</span><span>${esc(order.reference)}</span></div>
+    <div class="detail-row"><span>Date</span><span>${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
+    <div class="detail-row"><span>Paid via</span><span>${esc(paymentMethodLabel(order))}</span></div>
 
-  <table>
-    <tr><th>Item</th><th>Qty</th><th>Price</th><th>Line total</th></tr>
-    ${rows}
+    <div class="items-label">ITEMS</div>
+    ${itemRows}
     ${deliveryFeeRow}
-  </table>
-  <div class="total-row">Total paid: NGN ${Number(order.total).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
-
-  <div class="box">
-    <div class="label">HOW IT WAS PAID</div>
-    ${esc(paymentMethodLabel(order))}
   </div>
 
   <div class="footer">Thank you for your order &middot; ${esc(business.name)}</div>
