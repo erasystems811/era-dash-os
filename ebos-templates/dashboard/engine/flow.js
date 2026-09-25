@@ -4063,13 +4063,37 @@ export async function completePayment(orderId) {
   let receiptSent = false;
   if (process.env.PUBLIC_URL) {
     try {
-      const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
-      if (customer.channel === 'instagram') {
-        await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
+      // website: same fix as sendPaymentInstructions' own invoice branch --
+      // link to the plain HTML receipt page, not /pdf (Gotenberg-backed,
+      // internal-only), and log it with a real `interactive` document
+      // payload so the chat page renders an actual button instead of the
+      // raw bracketed [receipt PDF] text + URL as a plain bubble. Found
+      // live, 2026-09-25: this whole block predates the website channel
+      // (main-only, never touched by the web-chat merge) and had no
+      // website branch at all -- customer.channel === 'website' fell
+      // straight into the `else` below, sending a REAL WhatsApp document
+      // to a customer who should have gotten a free chat bubble.
+      if (customer.channel === 'website') {
+        const receiptHtmlUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
+        await logMessage({
+          customerId: customer.id,
+          tableSessionId: customer.tableSessionId,
+          direction: 'outbound',
+          channel: customer.channel,
+          sender: 'bot',
+          body: `[receipt] ${receiptHtmlUrl}`,
+          trigger: 'receipt_pdf',
+          interactive: { type: 'document', filename: `receipt-${order.reference}`, url: receiptHtmlUrl },
+        });
       } else {
-        await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
+        const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
+        if (customer.channel === 'instagram') {
+          await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
+        } else {
+          await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
+        }
+        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
       }
-      await logMessage({ customerId: customer.id, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
       receiptSent = true;
     } catch (err) {
       console.error(`Failed to send receipt PDF, falling back to a text link: ${err.message}`);
