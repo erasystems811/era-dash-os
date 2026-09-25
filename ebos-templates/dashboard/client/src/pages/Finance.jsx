@@ -53,15 +53,31 @@ function monthOptions() {
 // then, i dont think pos sync is even possible" -- POS split back out
 // into its own page (Pos.jsx) again. This page is back to purely the
 // bot's own cash/revenue/outstanding/best-sellers.
+// Chidera, 2026-09-25: "i need a place where cash collected history will be
+// logged with amount and name of staff and table name too and somehow let
+// it be flagged if there is an imbalance -- for accountability sake." Dine-
+// in only (her own follow-up: "online delivery never use cash or pos... this
+// is only about dine in"). Formats an ISO timestamp the same plain way as
+// everywhere else on this page -- no separate date-format helper needed for
+// one table.
+function formatWhen(iso) {
+  return new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
 export default function Finance() {
   const [month, setMonth] = useState('');
   const [summary, setSummary] = useState(null);
+  const [cashLog, setCashLog] = useState(null);
 
   useEffect(() => {
     setSummary(null);
     const q = month ? `?month=${month}` : '';
     api.get(`/finance/summary${q}`).then(setSummary);
   }, [month]);
+
+  useEffect(() => {
+    api.get('/cash-log').then(setCashLog);
+  }, []);
 
   if (!summary) return <Loading />;
 
@@ -154,6 +170,54 @@ export default function Finance() {
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Cash log</h3>
+        <p className="hint" style={{ marginTop: -6 }}>
+          Every dine-in cash mark-paid, who did it, and whether it came up short -- for accountability, not delivery/pickup (never cash).
+        </p>
+        {!cashLog ? (
+          <Loading />
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Staff</th>
+                <th>Table</th>
+                <th>Order</th>
+                <th>Collected</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cashLog.map((e) => (
+                <tr key={e.id} style={e.imbalance ? { background: 'rgba(198, 40, 40, 0.08)' } : undefined}>
+                  <td>{formatWhen(e.createdAt)}</td>
+                  <td>{e.staffName}</td>
+                  <td>{e.tableLabel || '-'}</td>
+                  <td>{e.orderReference || '-'}</td>
+                  <td>{formatMoney(e.collected)}</td>
+                  <td>
+                    {e.imbalance ? (
+                      <span style={{ color: '#c62828', fontWeight: 600 }}>Short by {formatMoney(e.shortfall)}</span>
+                    ) : (
+                      <span style={{ color: 'var(--success)' }}>Full</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {cashLog.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="hint">
+                    No cash collected yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

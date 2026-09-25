@@ -3185,6 +3185,56 @@ router.get('/activity-log', requireFullAccessApi, async (req, res) => {
   res.json(rows);
 });
 
+// Chidera, 2026-09-25: "i need a place where cash collected history will be
+// logged with amount and name of staff and table name too and somehow let
+// it be flagged if there is an imbalance -- for accountability sake." Dine-
+// in only (Chidera, same day: "online delivery never use cash or pos they
+// use monnify or paystack or manual confirmation, this is only about dine
+// in") -- so scoped to cash entries from /orders/:id/payment-method (see
+// its own 2026-09-24 comment), never delivery/pickup's plain confirm-
+// payment path, which is never cash. Reuses activity_log (the same
+// mechanism /activity-log above already reads) rather than a new table --
+// order_partial_cash and the cash branch of order_status_changed are
+// already the one real moment cash changes hands; this just filters and
+// reshapes that same history instead of tracking it twice. Amount and
+// shortfall are read from the activity_log entry's OWN detail (recorded at
+// the moment staff acted), not re-derived from the order's current row --
+// an audit trail has to stay true to what happened even if the order
+// itself is edited or reopened later.
+router.get('/cash-log', requireFullAccessApi, async (req, res) => {
+  const { rows } = await pool.query(
+    `select a.id, a.created_at, a.detail, s.name as staff_name,
+            o.reference as order_reference, o.total as order_total, rt.label as table_label
+     from activity_log a
+     left join staff s on s.id = a.staff_id
+     left join "order" o on o.id = a.entity_id
+     left join restaurant_table rt on rt.id = o.table_id
+     where (a.action = 'order_partial_cash' or (a.action = 'order_status_changed' and a.detail->>'paymentMethod' = 'cash'))
+       and ($1::uuid is null or a.branch_id = $1)
+     order by a.created_at desc limit 200`,
+    [req.branchId]
+  );
+  const entries = rows.map((r) => {
+    const shortfall = Number(r.detail?.shortfall || 0);
+    // order_partial_cash logs the exact amount handed over directly;
+    // order_status_changed (a full or closeAnyway close-out) doesn't carry
+    // it, but total - shortfall recovers it exactly the same way the
+    // payment-method route itself computed shortfall in the first place.
+    const collected = r.detail?.collected != null ? Number(r.detail.collected) : Number(r.order_total || 0) - shortfall;
+    return {
+      id: r.id,
+      createdAt: r.created_at,
+      staffName: r.staff_name || 'Unknown staff',
+      orderReference: r.order_reference,
+      tableLabel: r.table_label,
+      collected,
+      shortfall,
+      imbalance: shortfall > 0,
+    };
+  });
+  res.json(entries);
+});
+
 // --- Generated documents -----------------------------------------------
 
 // "Receipt" means the real payment-proof photo a customer sent, not a
