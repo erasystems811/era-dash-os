@@ -2169,18 +2169,23 @@ async function computeUpsellStats(dateWhereSql, dateParams) {
      group by o.id, o.upsell_offered`,
     dateParams
   );
+  // Chidera, 2026-09-25: "MULTIPLE UPSELL SHOULD BE CALCULATED LIKE THAT
+  // ALL INDIVIDUAL" -- an order can genuinely offer more than one group
+  // (era-demo's own orders do, e.g. ["protein","side","drink"]), and each
+  // one is its own offer, not just the array's last entry. Every entry
+  // counts as offered; only a RECOGNIZED group (UPSELL_GROUPS) that also
+  // actually matched counts as accepted -- same shape as
+  // 0065_upsell_count_each_offer.sql's own trigger, kept consistent on
+  // purpose.
+  let offered = 0;
   let accepted = 0;
   for (const row of rows) {
-    // Only one offer per order going forward (Chidera, 2026-09-20: "only
-    // upsell once"), but upsell_offered is still an array for older orders
-    // from before that -- the last entry is the one that was actually
-    // left standing when the order completed.
-    const key = row.upsell_offered[row.upsell_offered.length - 1];
-    const group = UPSELL_GROUPS.find((g) => g.key === key);
-    if (!group) continue;
-    if (row.item_categories.some((c) => categoryMatchesGroup(c, group.keywords))) accepted++;
+    for (const key of row.upsell_offered) {
+      offered++;
+      const group = UPSELL_GROUPS.find((g) => g.key === key);
+      if (group && row.item_categories.some((c) => categoryMatchesGroup(c, group.keywords))) accepted++;
+    }
   }
-  const offered = rows.length;
   return {
     upsellOffered: offered,
     upsellAccepted: accepted,

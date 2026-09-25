@@ -1008,23 +1008,28 @@ begin
     return new;
   end if;
 
+  -- migrations/0065_upsell_count_each_offer.sql -- each entry in
+  -- upsell_offered is its own "offered" event, checked individually,
+  -- not just the array's last entry (era-demo's real orders offer
+  -- several groups per order, e.g. ["protein","side","drink"]).
   if new.status = 'completed' and old.status is distinct from 'completed' then
     if new.upsell_offered is not null and array_length(new.upsell_offered, 1) > 0 then
-      insert into business_metrics_log (metric, created_at) values ('upsell_offered', new.created_at);
-      offered_key := new.upsell_offered[array_upper(new.upsell_offered, 1)];
-      select exists (
-        select 1 from order_item oi
-        join product p on p.id = oi.product_id
-        where oi.order_id = new.id
-          and (
-            (offered_key = 'drink' and (p.category ilike '%drink%' or p.category ilike '%beverage%' or p.category ilike '%juice%' or p.category ilike '%water%'))
-            or (offered_key = 'protein' and (p.category ilike '%protein%' or p.category ilike '%meat%'))
-            or (offered_key = 'snack' and (p.category ilike '%snack%' or p.category ilike '%small chop%' or p.category ilike '%appetiser%' or p.category ilike '%appetizer%' or p.category ilike '%starter%'))
-          )
-      ) into matched;
-      if matched then
-        insert into business_metrics_log (metric, created_at) values ('upsell_accepted', new.created_at);
-      end if;
+      foreach offered_key in array new.upsell_offered loop
+        insert into business_metrics_log (metric, created_at) values ('upsell_offered', new.created_at);
+        select exists (
+          select 1 from order_item oi
+          join product p on p.id = oi.product_id
+          where oi.order_id = new.id
+            and (
+              (offered_key = 'drink' and (p.category ilike '%drink%' or p.category ilike '%beverage%' or p.category ilike '%juice%' or p.category ilike '%water%'))
+              or (offered_key = 'protein' and (p.category ilike '%protein%' or p.category ilike '%meat%'))
+              or (offered_key = 'snack' and (p.category ilike '%snack%' or p.category ilike '%small chop%' or p.category ilike '%appetiser%' or p.category ilike '%appetizer%' or p.category ilike '%starter%'))
+            )
+        ) into matched;
+        if matched then
+          insert into business_metrics_log (metric, created_at) values ('upsell_accepted', new.created_at);
+        end if;
+      end loop;
     end if;
   end if;
 
