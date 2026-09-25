@@ -294,7 +294,7 @@ export async function sendConfirmButtons(customer, bodyText, trigger) {
 async function sendStaffReplyRedirect(customer, text, staffId) {
   await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
 
-  if (await needsChatRedirect(customer, { capped: false, checkActive: false })) {
+  if (await needsStaffChatRedirect(customer)) {
     await sendChatRedirectPing(customer, `We're trying to reach out to you.`, { trigger: 'staff_reply_ping', sender: 'staff' });
   }
   await pool.query(
@@ -1107,45 +1107,16 @@ export async function buildGreetingContent(customer) {
 // customer should get a one time we are trying to reach out to you tap
 // here to text... bot must not answer every reply customer makes on bare
 // chat, just resend them the place to text once if they text bare and if
-// they text bare again, leave it stay silent." Shared by sendStaffReply
-// (a real staff-initiated message) and handlePendingBatch's own bare-
-// WhatsApp redirect (a customer texting real WhatsApp instead of the web
-// chat while an order's in progress) -- both need the exact same "was
-// this already sent, and have they actually come back to the chat since"
-// check, not two separate copies of the same timestamp logic.
-//
-// Chidera, 2026-09-25, real live report: "i texted a customer on dee from
-// staff dashboard on conversations and the customer didnt get the text?
-// so when i say 3 text max i mean 3 GREETING text, when a staff is
-// texting... why isnt it sending atall?" Real bug: the 3-ping CAP below
-// was shared between both callers, so a customer who'd already used up
-// their 3 bot-redirect pings (from texting bare WhatsApp repeatedly) went
-// permanently silent for staff too -- a staff member reaching out is a
-// deliberate, real event, never subject to the bot's own anti-spam count.
-// `capped` lets sendStaffReplyRedirect opt out of just the count check
-// below while keeping every other real dedupe (actively on the page,
-// already-pinged-with-no-time-passed) unchanged for everyone.
-//
-// Chidera, 2026-09-25, real live report (found live on dee, checked
-// directly against the DB): staff replied 3 times from the Conversations
-// tab, customer got zero pings any of the 3 times. `capped: false` alone
-// didn't fix it -- the customer's web_chat_active_at was still within the
-// 30-min "actively on the page" window (stale from browsing the web chat
-// ~15 minutes earlier, unrelated to this moment), so `activelyOnPage`
-// below was true and skipped the ping before capped was ever even
-// checked. That heuristic is a reasonable bet for the BOT's own automated
-// redirect (handlePendingBatch: the customer just texted bare WhatsApp
-// themselves, so if the tab's genuinely open they'll see a live bubble
-// either way) -- but a staff member replying from the dashboard has no
-// such signal to go on, and same "deliberate, real event" reasoning as
-// the cap bypass just above: they still need the ping, unconditionally.
-// `checkActive` lets sendStaffReplyRedirect opt out of this check too,
-// same shape as `capped`.
-export async function needsChatRedirect(customer, { capped = true, checkActive = true } = {}) {
+// they text bare again, leave it stay silent." The BOT's own automatic
+// bare-WhatsApp redirect (handlePendingBatch) -- see needsStaffChatRedirect
+// just below for the separate, independently-tracked staff version of
+// this same idea (Chidera, 2026-09-25: two real live bugs taught this
+// they can't safely share one counter -- see that function's own comment).
+export async function needsChatRedirect(customer) {
   // Actively on the page right now (same 30-min freshness window
   // completePayment already uses) -- they'll see a free bubble live via
   // the page's own poll, no real ping needed at all regardless of history.
-  const activelyOnPage = checkActive && customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(Date.now() - 30 * 60 * 1000);
+  const activelyOnPage = customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(Date.now() - 30 * 60 * 1000);
   if (activelyOnPage) return false;
   if (!customer.chat_redirect_sent_at) return true;
   // Pinged before, and genuinely visited the chat again since that ping
@@ -1163,7 +1134,6 @@ export async function needsChatRedirect(customer, { capped = true, checkActive =
   // returns true).
   const moreThan24hSinceLastPing = new Date(customer.chat_redirect_sent_at) < new Date(Date.now() - 24 * 60 * 60 * 1000);
   if (moreThan24hSinceLastPing) return true;
-  if (!capped) return true;
   // No visit at all since the last ping, and still within 24h of it --
   // Chidera, 2026-09-24: "i said after the first greeting there should be
   // a second resend of the tap here to chat to redirect customer again
@@ -1172,10 +1142,41 @@ export async function needsChatRedirect(customer, { capped = true, checkActive =
   // time of 5 cause that 2 is risky, going silent on a customer is
   // risky" -- then, same day, on reflection: "make it 3 now sef, 5 is
   // much." Up to 3 consecutive pings total before staying silent until
-  // either a real visit or the 24h renewal above -- BOT-initiated
-  // redirects only (see this function's own header comment for why
-  // staff-initiated pings never reach this line at all).
+  // either a real visit or the 24h renewal above.
   return (customer.chat_redirect_count || 0) < 3;
+}
+
+// Chidera, 2026-09-25: a separate function, deliberately NOT sharing
+// needsChatRedirect's own chat_redirect_sent_at/chat_redirect_count
+// columns -- two real live bugs in a row proved those can't be reused for
+// staff:
+// 1. "i texted a customer on dee from staff dashboard on conversations
+//    and the customer didnt get the text? when a staff is texting... why
+//    isnt it sending atall?" -- the bot's own 3-ping numeric cap had
+//    already been exhausted by earlier automated pings, so needsChatRedirect
+//    went permanently silent for staff too, sharing that same count.
+// 2. "its not every single text that you send we are trying to reach out
+//    to you, only the first staff reach out text, everything else is
+//    expected to go on in web chat" -- the first attempt at fixing #1
+//    (an override flag that skipped the numeric cap) over-corrected: once
+//    it shared chat_redirect_sent_at with the bot's own history, it either
+//    fired on every single staff message, or -- worse -- could silently
+//    skip staff's own genuine first ping just because the BOT happened to
+//    have pinged recently and exhausted its cap (the exact #1 scenario).
+// A staff ping's own history (was staff's OWN first ping already sent,
+// and has this customer visited or gone 24h quiet since) can only be
+// answered correctly by looking at staff's own pings specifically --
+// message's own staff_reply_ping rows, untangled from the bot's count.
+async function needsStaffChatRedirect(customer) {
+  const { rows } = await pool.query(
+    `select created_at from message where customer_id = $1 and trigger = 'staff_reply_ping' order by created_at desc limit 1`,
+    [customer.id]
+  );
+  const lastStaffPing = rows[0]?.created_at;
+  if (!lastStaffPing) return true; // staff has never pinged this customer before
+  const visitedSinceLastPing = customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(lastStaffPing);
+  if (visitedSinceLastPing) return true;
+  return new Date(lastStaffPing) < new Date(Date.now() - 24 * 60 * 60 * 1000);
 }
 async function markChatRedirectSent(customer) {
   // A genuine visit since the last ping, 24h+ of real silence since the
@@ -3682,12 +3683,26 @@ async function handleOrderModification(customer, order, mods) {
       customer,
       paid
         ? `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`
-        : `That round's already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
+        : `That order is already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
     );
+    // Chidera, 2026-09-25: "then tell staff in handover text what is the
+    // table name, what they also want to remove" -- same reasoning as
+    // routes/dinein-menu.js's own web-basket-resubmit version of this
+    // exact escalation (its own comment has the full story); this is the
+    // typed-chat path (a dine-in guest typing "remove the rice" instead of
+    // using the menu page), table_id is null for a paid online order so
+    // that line is simply omitted there, not shown blank.
+    const removedLines = [...mods.removes.map((i) => `${i.quantity}x ${i.name}`), ...mods.sets.map((i) => `${i.name} to ${i.quantity}`)];
+    const { rows: tableRowsForHandover } = order.table_id
+      ? await pool.query('select label from restaurant_table where id = $1', [order.table_id])
+      : { rows: [] };
     await handover(
       customer,
       paid ? 'Customer wants to remove or change items on an already-paid order' : 'Customer wants to remove or change items already sent to the kitchen',
-      null,
+      {
+        table: tableRowsForHandover[0] ? `Table: ${tableRowsForHandover[0].label}` : null,
+        wants: removedLines.length ? `Wants to remove/change: ${removedLines.join(', ')}` : null,
+      },
       false
     );
     if (!mods.adds.length) return;
@@ -5894,7 +5909,7 @@ export async function handleWebMenuOrder(customer, items, fulfilment) {
         customer,
         paid
           ? `Your order's already paid for, so I can't remove or change what's in it myself -- let me get someone to help with that.`
-          : `That round's already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
+          : `That order is already gone to the kitchen, so I can't remove or change what's in it myself -- let me get someone to help with that.`
       );
       await handover(
         customer,

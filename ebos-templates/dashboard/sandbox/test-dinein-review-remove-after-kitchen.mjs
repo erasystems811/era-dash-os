@@ -168,14 +168,29 @@ async function main() {
     }
     return realFetch(url, opts);
   };
+  // Chidera, 2026-09-25, same-day follow-up: "then tell staff in handover
+  // text what is the table name, what they also want to remove" -- captures
+  // the real staff alert (console.log in this sandbox) to verify it now
+  // names the table and the specific item being removed, not just a
+  // generic reason.
+  const alertLogs = [];
+  const originalLog = console.log;
+  console.log = (...args) => { alertLogs.push(args.join(' ')); originalLog(...args); };
   const removeRes2 = await fetch(`${BASE}/t/qr-remove-kitchen-2/review?g=menutok-remove-kitchen-2`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items: [{ productId: prod1[0].id, quantity: 1 }] }),
   });
   const removeBody2 = await removeRes2.json();
+  console.log = originalLog;
   global.fetch = realFetch;
   assert(removeRes2.status === 409, `the web-chat guest's removal is also refused, not silently applied (got ${removeRes2.status})`);
   assert(removeBody2.redirectToChat === true, 'the response tells the client to auto-redirect this guest back to web chat, not just leave them stuck on the menu page');
+  assert(removeBody2.error?.startsWith('That order is already gone to the kitchen'), `wording says "order", not "round" (got "${removeBody2.error}")`);
+
+  const staffAlert2 = alertLogs.find((l) => /Reason: Customer wants to remove/.test(l));
+  assert(Boolean(staffAlert2), 'a real staff alert was raised for this');
+  assert(staffAlert2?.includes('Table: Table 10'), `the alert names the actual table (got "${staffAlert2}")`);
+  assert(staffAlert2?.includes('Wants to remove: 1x Grilled Chicken'), `the alert names what's actually being removed (got "${staffAlert2}")`);
 
   const { rows: websiteMsgRows } = await pool.query(
     `select body, channel, table_session_id from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 5`,
