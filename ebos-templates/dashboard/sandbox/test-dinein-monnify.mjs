@@ -94,6 +94,9 @@ async function main() {
     const payPageBefore = await (await fetch(`${BASE}/t/qrmonnify/pay?g=${g1}`)).text();
     assert(payPageBefore.includes('id="paystackBtn"'), 'the "Pay" button (generic, reused across providers) is on the page');
     assert(!/Account number:/i.test(payPageBefore), 'not the generic POS/bank-transfer fallback');
+    // Chidera, 2026-09-25 (live report): "the dine in payment summary web
+    // page has no back to chat" -- a real, visible back-to-chat link.
+    assert(payPageBefore.includes('class="back-to-chat"') && payPageBefore.includes(`/wa/${g1}?table=qrmonnify`), 'the pay page itself now has a real back-to-chat link, scoped to this table\'s own thread');
 
     // === 2. Requesting payment initializes a REAL Monnify transaction for this specific payment ===
     const create1 = await fetch(`${BASE}/t/qrmonnify/pay/create?g=${g1}`, {

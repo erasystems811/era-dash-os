@@ -929,7 +929,18 @@ export async function handover(customer, reason, extra, ackText, primaryLink) {
     'Summarise this WhatsApp conversation in exactly three short lines: "What they want:", "Agreed so far:", "Outstanding:". No markdown, no asterisks, and no dash of any kind anywhere in the text, not even mid-sentence as punctuation (no em dash, en dash, hyphen-as-punctuation, or bullet dash) -- outbound messages are hard-rejected if they contain one. Use a comma or period instead of a dash wherever you would normally use one. Be terse.',
     transcript
   );
-  const extraLines = extra ? `\n${Object.values(extra).filter(Boolean).join('\n')}` : '';
+  // Chidera, 2026-09-25: "for handover alert for that dine in when
+  // customer want to remove something already places- customer, reason,
+  // table, agreed so far want to remove is onay" -- table belongs right
+  // after Reason, ahead of the AI summary (which is what actually
+  // contains "Agreed so far:"); everything else in `extra` (e.g. "Wants
+  // to remove:") stays after the summary, same as before. Only the two
+  // dine-in kitchen-removal handover call sites pass a `table` key today.
+  const { table: beforeSummaryLine, ...afterSummaryExtra } = extra || {};
+  const beforeSummary = beforeSummaryLine ? `\n${beforeSummaryLine}` : '';
+  const extraLines = Object.values(afterSummaryExtra).filter(Boolean).length
+    ? `\n${Object.values(afterSummaryExtra).filter(Boolean).join('\n')}`
+    : '';
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   for (const { phoneNumber: to, staffId } of recipients) {
     // Chidera, 2026-09-23: "handover be structured not a paragraph" --
@@ -939,7 +950,7 @@ export async function handover(customer, reason, extra, ackText, primaryLink) {
     // chat from X to you." read as a sentence to parse, not a field to
     // scan -- "Customer:" is the same label shape as "Reason:" right
     // below it.
-    const alert = `Customer: ${displayNameFor(customer)}\nReason: ${reason}\n${summary}${extraLines}`;
+    const alert = `Customer: ${displayNameFor(customer)}\nReason: ${reason}${beforeSummary}\n${summary}${extraLines}`;
 
     // Chidera, 2026-09-23: "make handover chats in ebos one, meaning add
     // both the tap to open and message in one text to reduce my charges"
@@ -1385,7 +1396,18 @@ export async function handleGreeting(customer, text) {
     });
     return;
   }
+  // Chidera, 2026-09-25: "after an order has been completed a retext from
+  // same customer, bot can respond with greeting text again a max of 3
+  // times" -- this used to send a real, billable WhatsApp greeting on
+  // EVERY single re-text with no open order (a customer who's done
+  // ordering and just keeps saying "hi"), unbounded. Same
+  // needsChatRedirect/markChatRedirectSent budget the bare-WhatsApp
+  // mid-order redirect already shares across this customer -- a first-
+  // ever contact still always sends (chat_redirect_sent_at is null), a
+  // genuine web-chat visit or 24h of silence still renews it.
+  if (!(await needsChatRedirect(customer))) return;
   await sendStartOrderLink(customer);
+  await markChatRedirectSent(customer);
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,
@@ -1793,15 +1815,14 @@ function catalogueOptions(menu, keywords) {
 }
 
 // Chidera, 2026-09-25: "let upsell only be protein and drink or side and
-// drink now no more snack, and only 2 upsell" -- simplified to exactly two
-// tracks of two, picked by the same "does this order already have a side"
-// check as before: missing one gets offered side then drink (get the side
-// actually added, protein no longer asked about in this track at all);
-// already has one gets protein then drink instead (side would never fire
-// anyway -- orderHasIt below already excludes it).
+// drink now no more snack, and only 2 upsell" -- then, same day, a
+// correction: "protein is more important than side." Still exactly one
+// of {protein, side} paired with drink, never both -- protein is just
+// the tie breaker for WHICH one when an order is missing both (checked
+// first below); an order missing only side still gets side, same as
+// before.
 const SIDE_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'side').keywords;
-const UPSELL_PRIORITY_WITH_SIDE = ['side', 'drink'];
-const UPSELL_PRIORITY_WITHOUT_SIDE = ['protein', 'drink'];
+const PROTEIN_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'protein').keywords;
 
 // Next upsell offer worth making, if any -- one whole category at a time
 // (every real product in it, not just a representative one), already-
@@ -1815,8 +1836,17 @@ async function nextUpsellGroup(order, orderItems) {
   if (offered.length >= MAX_UPSELL_PICKS) return null;
   const menu = await resolveMenu(order.branch_id);
   const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
-  const orderHasSide = orderedCategories.some((c) => categoryMatchesGroup(c, SIDE_KEYWORDS));
-  const priorityKeys = orderHasSide ? UPSELL_PRIORITY_WITHOUT_SIDE : UPSELL_PRIORITY_WITH_SIDE;
+  const hasProtein = orderedCategories.some((c) => categoryMatchesGroup(c, PROTEIN_KEYWORDS));
+  const hasSide = orderedCategories.some((c) => categoryMatchesGroup(c, SIDE_KEYWORDS));
+  // Chidera, 2026-09-25: "protein is more important than side" -- but only
+  // when protein is actually a real, orderable category for this business;
+  // a catalogue with no protein products at all (test-upsell-multiselect-
+  // quantity.mjs's own seed, confirmed) must still fall through to side,
+  // not silently offer nothing.
+  const proteinOptions = !hasProtein ? catalogueOptions(menu, PROTEIN_KEYWORDS) : [];
+  const sideOptions = !hasSide ? catalogueOptions(menu, SIDE_KEYWORDS) : [];
+  const nonDrinkKey = proteinOptions.length ? 'protein' : sideOptions.length ? 'side' : null;
+  const priorityKeys = nonDrinkKey ? [nonDrinkKey, 'drink'] : ['drink'];
   const priorityGroups = priorityKeys.map((key) => UPSELL_GROUPS.find((g) => g.key === key));
   for (const group of priorityGroups) {
     if (offered.includes(group.key)) continue; // already asked about this one this order
@@ -5483,7 +5513,7 @@ export async function handlePendingBatch(customer, text) {
     // no need to ask first when they've already said what they want.
     const completedOrder = await recentlyCompletedOrder(customer.id);
     if (completedOrder && !(await wasSentFeedbackRequestFor(completedOrder.id))) {
-      await reply(customer, `Would you like to place another order, or is there anything else I can help you with?`, 'post_completion_greeting');
+      await reply(customer, `Hello! Would you like to place another order, or is there anything else I can help you with?`, 'post_completion_greeting');
       return;
     }
     await handleGreeting(customer, text);

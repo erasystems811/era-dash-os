@@ -31,6 +31,7 @@ function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 let initializeCallCount = 0;
 const generatedReferences = [];
+let lastInitializeBody = null;
 
 async function main() {
   const realFetch = global.fetch;
@@ -39,6 +40,7 @@ async function main() {
       initializeCallCount += 1;
       const body = JSON.parse(opts.body);
       generatedReferences.push(body.reference);
+      lastInitializeBody = body;
       return new Response(
         JSON.stringify({ status: true, data: { reference: body.reference, authorization_url: `https://checkout.paystack.com/${body.reference}` } }),
         { status: 200 }
@@ -85,6 +87,11 @@ async function main() {
     // === 1. The pay page shows a Paystack "Pay" button, not POS transfer instructions ===
     const payPageBefore = await (await fetch(`${BASE}/t/qrpaystack/pay?g=${g1}`)).text();
     assert(payPageBefore.includes('id="paystackBtn"'), 'the Paystack "Pay" button is on the page');
+    // Chidera, 2026-09-25 (live report): "the dine in payment summary web
+    // page has no back to chat" -- a real, visible back-to-chat link, same
+    // table-scoped thread every other dine-in page's own back-to-chat
+    // link already uses.
+    assert(payPageBefore.includes('class="back-to-chat"') && payPageBefore.includes(`/wa/${g1}?table=qrpaystack`), 'the pay page itself now has a real back-to-chat link, scoped to this table\'s own thread');
 
     // === 2. Requesting payment initializes a REAL Paystack transaction for this specific payment ===
     const create1 = await fetch(`${BASE}/t/qrpaystack/pay/create?g=${g1}`, {
@@ -94,6 +101,10 @@ async function main() {
     assert(create1Data.amount === 3500, 'a single guest at a solo table is a whole-order payment (matches earlier scenarios)');
     assert(create1Data.paystackUrl?.startsWith('https://checkout.paystack.com/'), 'a real Paystack checkout URL is returned, not POS/manual instructions');
     assert(initializeCallCount === 1, 'exactly one real Paystack initialize call made');
+    // Chidera, 2026-09-25: "if payment started in dine in chat, take
+    // customer back to din in chat even with back to chat button" --
+    // Paystack's own checkout page redirect target, table-scoped.
+    assert(lastInitializeBody?.callback_url === `${BASE}/wa/${g1}?table=qrpaystack`, `Paystack's own init call carries a real callback_url back to THIS table's own web chat thread (got "${lastInitializeBody?.callback_url}")`);
 
     const { rows: paymentRows } = await pool.query(`select * from order_payment where order_id = $1`, [order.id]);
     const payment = paymentRows[0];
