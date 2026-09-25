@@ -4653,14 +4653,33 @@ export async function notifyGuestsReadyToPay(order) {
       // only happens for the short redirect ping, and only once per guest
       // until each one has genuinely come back to the chat since the last
       // one.
+      // Chidera, 2026-09-25, real report: "why is one number having 2
+      // seperate table 1 conversation? ... one number has two chat space,
+      // that doesnt delete their previous conversation." Root cause,
+      // confirmed against era-demo's real data: this logMessage never set
+      // tableSessionId at all (guest.id, not customer.id -- the earlier
+      // bulk pass that threaded tableSessionId through every OTHER direct
+      // logMessage call site matched the literal string "customerId:
+      // customer.id," and silently missed this one, the only call site in
+      // the whole file using `guest`). The bubble landed with
+      // table_session_id null -- the generic online thread -- instead of
+      // this table's own separate one, which is exactly what looked like a
+      // second, stray "Table 1" conversation bleeding into the wrong
+      // thread. order.session_id IS the real table_session id (the guard
+      // above already requires it).
+      // Chidera, 2026-09-25: "when you receive your order and you are
+      // ready to pay just come back here and tap this button to pay with
+      // the pay now button, then also let them know you can still add to
+      // your order before making final payment."
       await logMessage({
         customerId: guest.id,
+        tableSessionId: order.session_id,
         direction: 'outbound',
         channel: 'website',
         sender: 'bot',
-        body: `Table ${table.label} is served! Total so far: NGN ${total}. Ready to pay?`,
+        body: `Your order has been served! When you're ready to pay, come back here and tap the button below to pay. You can still add to your order before making your final payment.`,
         trigger: 'dinein_ready_to_pay',
-        interactive: { type: 'cta_url', buttonText: 'Ready to pay?', url },
+        interactive: { type: 'cta_url', buttonText: 'Pay now', url },
       });
       if (await needsChatRedirect(guest)) {
         await sendChatRedirectPing(guest, `Your table is ready to pay.`, { trigger: 'dinein_ready_to_pay_ping' });
@@ -4830,7 +4849,14 @@ export async function handlePendingBatch(customer, text) {
     // redirect-once-then-silent gate as everything else below.
     if (customer.channel === 'whatsapp') {
       if (await needsChatRedirect(customer)) {
-        await sendStartOrderLink(customer);
+        // Chidera, 2026-09-25: "dine in can only ever be triggered with a
+        // qr code and all its greeting or redirect text to webchat must
+        // state the 'started on your dine in session'." This redirect used
+        // to always point at the generic bare /wa/:token, even for a
+        // customer sitting mid a real dine-in table session -- wrong
+        // thread entirely, not just wrong wording.
+        const dineinSession = await currentDineinSession(customer);
+        await sendStartOrderLink(customer, dineinSession ? { dineinTableLabel: dineinSession.table_label, dineinQrToken: dineinSession.qr_token } : {});
         await markChatRedirectSent(customer);
       }
       return;
@@ -4896,7 +4922,11 @@ export async function handlePendingBatch(customer, text) {
   // website-only now, reached exclusively through handleWebChatMessage.
   if (customer.channel === 'whatsapp') {
     if (await needsChatRedirect(customer)) {
-      await sendStartOrderLink(customer);
+      // Chidera, 2026-09-25: same dine-in-thread fix as the ack/thanks/
+      // decline branch above -- a dine-in customer texting bare must be
+      // redirected to THEIR table's own thread, not the generic online one.
+      const dineinSession = await currentDineinSession(customer);
+      await sendStartOrderLink(customer, dineinSession ? { dineinTableLabel: dineinSession.table_label, dineinQrToken: dineinSession.qr_token } : {});
       await markChatRedirectSent(customer);
     }
     return;

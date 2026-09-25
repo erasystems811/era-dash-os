@@ -217,13 +217,19 @@ async function main() {
   // 'dinein_ready_to_pay_ping'), with no link of its own at all.
   await flow.notifyGuestsReadyToPay(servedOrder);
   const { rows: pay1Rows } = await pool.query(
-    `select body, interactive, channel from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer1.id]
+    `select body, interactive, channel, table_session_id from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer1.id]
   );
   const { rows: pay2Rows } = await pool.query(
-    `select body, interactive, channel from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer2.id]
+    `select body, interactive, channel, table_session_id from message where customer_id = $1 and trigger = 'dinein_ready_to_pay' order by created_at desc limit 1`, [customer2.id]
   );
   assert(pay1Rows[0]?.channel === 'website' && pay1Rows[0]?.interactive?.url?.includes('/pay?g='), 'guest 1 got their own free Ready-to-pay bubble, linking to their own pay page');
   assert(pay2Rows[0]?.channel === 'website' && pay2Rows[0]?.interactive?.url?.includes('/pay?g='), 'guest 2 got their own free Ready-to-pay bubble, linking to their own pay page');
+  // Chidera, 2026-09-25, real report: "why is one number having 2 seperate
+  // table 1 conversation?" Root cause: this bubble never carried
+  // tableSessionId at all, landing with table_session_id null -- the
+  // generic ONLINE thread -- instead of this table's own separate one.
+  assert(pay1Rows[0]?.table_session_id === session.id, 'and it lands in THIS table\'s own dine-in thread, not the generic online one');
+  assert(pay2Rows[0]?.table_session_id === session.id, 'same for guest 2');
 
   const { rows: ping1Rows } = await pool.query(
     `select channel from message where customer_id = $1 and trigger = 'dinein_ready_to_pay_ping' order by created_at desc limit 1`, [customer1.id]
