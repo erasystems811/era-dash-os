@@ -274,20 +274,28 @@ router.get('/:token', async (req, res) => {
     // stretch (checked against the actual last row's trigger, not just
     // "history isn't empty") -- reopening the same link again before
     // they've typed or tapped anything doesn't resend it a second time.
+    // Chidera, 2026-09-26: "instead of just the welcome back! tap to see
+    // menu, they should get the what would you like to do place an order
+    // or make a complaint thing" -- same buttons/wording shape the very
+    // first-ever bubble uses (below), just its own distinct trigger tag
+    // (order_again_prompt, kept, wording aside) -- a brand-new customer's
+    // actual first-ever contact ALSO logs as 'first_choice', so comparing
+    // against that same name here would treat their one-and-only real
+    // first bubble as if it were already this returning-customer prompt,
+    // silently never sending it at all.
     const last = history[history.length - 1];
     if (last?.trigger !== 'order_again_prompt') {
-      const menuToken = await ensureMenuToken(customer);
-      // Chidera, 2026-09-25: dine-in now has its own separate thread
-      // entirely -- this generic thread only ever nudges towards a new
-      // ONLINE order, never /t/:token (a customer with an open dine-in
-      // session gets that nudge on that thread's own reopen instead, see
-      // the tableSession branch above).
-      const menuUrl = `${process.env.PUBLIC_URL}/m/${menuToken}`;
       await logWebsiteBubble({
         customerId: customer.id,
-        body: `Welcome back! Tap below to place a new order.`,
+        body: `Welcome back! What would you like to do?`,
         trigger: 'order_again_prompt',
-        interactive: { type: 'cta_url', buttonText: 'See menu', url: menuUrl },
+        interactive: {
+          type: 'buttons',
+          buttons: [
+            { id: 'wa_start_order', title: 'Place an order' },
+            { id: 'wa_give_feedback', title: 'Make a complaint' },
+          ],
+        },
       });
       history = await messageHistory(customer.id, null);
     }

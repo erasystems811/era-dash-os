@@ -191,6 +191,16 @@ async function main() {
   assert(Boolean(staffAlert2), 'a real staff alert was raised for this');
   assert(staffAlert2?.includes('Table: Table 10'), `the alert names the actual table (got "${staffAlert2}")`);
   assert(staffAlert2?.includes('Wants to remove: 1x Grilled Chicken'), `the alert names what's actually being removed (got "${staffAlert2}")`);
+  // Chidera, 2026-09-25: "for handover alert for that dine in when
+  // customer want to remove something already places- customer, reason,
+  // table, agreed so far want to remove is onay" -- exact field order,
+  // table ahead of the AI summary (which carries "Agreed so far:"),
+  // "Wants to remove:" after it.
+  const reasonIdx = staffAlert2.indexOf('Reason:');
+  const tableIdx = staffAlert2.indexOf('Table:');
+  const agreedIdx = staffAlert2.indexOf('Agreed so far:');
+  const wantsIdx = staffAlert2.indexOf('Wants to remove:');
+  assert(reasonIdx < tableIdx && tableIdx < agreedIdx && agreedIdx < wantsIdx, `field order is Customer, Reason, Table, Agreed so far, Wants to remove (got "${staffAlert2}")`);
 
   const { rows: websiteMsgRows } = await pool.query(
     `select body, channel, table_session_id from message where customer_id = $1 and direction = 'outbound' order by created_at desc limit 5`,

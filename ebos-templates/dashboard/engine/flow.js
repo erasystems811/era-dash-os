@@ -929,7 +929,18 @@ export async function handover(customer, reason, extra, ackText, primaryLink) {
     'Summarise this WhatsApp conversation in exactly three short lines: "What they want:", "Agreed so far:", "Outstanding:". No markdown, no asterisks, and no dash of any kind anywhere in the text, not even mid-sentence as punctuation (no em dash, en dash, hyphen-as-punctuation, or bullet dash) -- outbound messages are hard-rejected if they contain one. Use a comma or period instead of a dash wherever you would normally use one. Be terse.',
     transcript
   );
-  const extraLines = extra ? `\n${Object.values(extra).filter(Boolean).join('\n')}` : '';
+  // Chidera, 2026-09-25: "for handover alert for that dine in when
+  // customer want to remove something already places- customer, reason,
+  // table, agreed so far want to remove is onay" -- table belongs right
+  // after Reason, ahead of the AI summary (which is what actually
+  // contains "Agreed so far:"); everything else in `extra` (e.g. "Wants
+  // to remove:") stays after the summary, same as before. Only the two
+  // dine-in kitchen-removal handover call sites pass a `table` key today.
+  const { table: beforeSummaryLine, ...afterSummaryExtra } = extra || {};
+  const beforeSummary = beforeSummaryLine ? `\n${beforeSummaryLine}` : '';
+  const extraLines = Object.values(afterSummaryExtra).filter(Boolean).length
+    ? `\n${Object.values(afterSummaryExtra).filter(Boolean).join('\n')}`
+    : '';
   const credentials = await getWhatsAppCredentials(customer.branch_id);
   for (const { phoneNumber: to, staffId } of recipients) {
     // Chidera, 2026-09-23: "handover be structured not a paragraph" --
@@ -939,7 +950,7 @@ export async function handover(customer, reason, extra, ackText, primaryLink) {
     // chat from X to you." read as a sentence to parse, not a field to
     // scan -- "Customer:" is the same label shape as "Reason:" right
     // below it.
-    const alert = `Customer: ${displayNameFor(customer)}\nReason: ${reason}\n${summary}${extraLines}`;
+    const alert = `Customer: ${displayNameFor(customer)}\nReason: ${reason}${beforeSummary}\n${summary}${extraLines}`;
 
     // Chidera, 2026-09-23: "make handover chats in ebos one, meaning add
     // both the tap to open and message in one text to reduce my charges"
@@ -1228,7 +1239,7 @@ export async function sendChatRedirectPing(customer, pingText, { trigger = 'chat
 // moves to the web-chat page's own first bubble (routes/web-chat.js),
 // never sent over the real Cloud API -- only this short line + one CTA
 // button is.
-async function sendStartOrderLink(customer, { dineinTableLabel = null, dineinQrToken = null } = {}) {
+async function sendStartOrderLink(customer, { dineinTableLabel = null, dineinQrToken = null, readyToPay = false } = {}) {
   if (!process.env.PUBLIC_URL) {
     const { message } = await buildGreetingContent(customer);
     await reply(customer, message, 'greeting');
@@ -1251,10 +1262,26 @@ async function sendStartOrderLink(customer, { dineinTableLabel = null, dineinQrT
   // session." A table scanner already knows exactly why they're texting
   // (they just scanned a table's QR code) -- the one real WhatsApp message
   // they get should say so, not the generic online-order wording.
+  // Chidera, 2026-09-25 (live report): "i just realized in dine in that
+  // served you can pay now is inside web and they may not see it" --
+  // rescanning the table's own QR is the only way back for a guest who
+  // closed the web chat tab, and it used to say the exact same generic
+  // "tap below to get started" whether or not their own real "ready to
+  // pay" bubble (notifyGuestsReadyToPay) was already sitting there
+  // waiting -- nothing here signalled it was worth tapping through for.
+  // Chidera, 2026-09-25: "that greeing add Hello! at the begining" --
+  // said right after the 3x re-greet cap fix above, about this exact
+  // message. Doesn't undo the 2026-09-24 call above (a BARE "Hello!"
+  // alone was too generic/anonymous) -- this adds it as a warm opener
+  // ahead of the specific "Welcome to X" that already answers that.
   const tail = dineinTableLabel ? 'get started on your dine-in session.' : 'get started.';
-  const shortGreeting = customer.name
-    ? `Welcome to ${bizName}, ${customer.name}! Tap below to ${tail}`
-    : `Welcome to ${bizName}! Tap below to ${tail}`;
+  const shortGreeting = readyToPay
+    ? (customer.name
+        ? `Welcome back to ${bizName}, ${customer.name}! Your table's ready to pay -- tap below.`
+        : `Welcome back to ${bizName}! Your table's ready to pay -- tap below.`)
+    : (customer.name
+        ? `Hello! Welcome to ${bizName}, ${customer.name}! Tap below to ${tail}`
+        : `Hello! Welcome to ${bizName}! Tap below to ${tail}`);
   const token = await ensureMenuToken(customer);
   // Chidera, 2026-09-25: "let table dine in and online delivery have their
   // complete different web chat." Routes/web-chat.js's own ?table= is what
@@ -1385,7 +1412,18 @@ export async function handleGreeting(customer, text) {
     });
     return;
   }
+  // Chidera, 2026-09-25: "after an order has been completed a retext from
+  // same customer, bot can respond with greeting text again a max of 3
+  // times" -- this used to send a real, billable WhatsApp greeting on
+  // EVERY single re-text with no open order (a customer who's done
+  // ordering and just keeps saying "hi"), unbounded. Same
+  // needsChatRedirect/markChatRedirectSent budget the bare-WhatsApp
+  // mid-order redirect already shares across this customer -- a first-
+  // ever contact still always sends (chat_redirect_sent_at is null), a
+  // genuine web-chat visit or 24h of silence still renews it.
+  if (!(await needsChatRedirect(customer))) return;
   await sendStartOrderLink(customer);
+  await markChatRedirectSent(customer);
 }
 
 // Deterministic, not AI-driven -- this can never guess or invent an answer,
@@ -1793,15 +1831,14 @@ function catalogueOptions(menu, keywords) {
 }
 
 // Chidera, 2026-09-25: "let upsell only be protein and drink or side and
-// drink now no more snack, and only 2 upsell" -- simplified to exactly two
-// tracks of two, picked by the same "does this order already have a side"
-// check as before: missing one gets offered side then drink (get the side
-// actually added, protein no longer asked about in this track at all);
-// already has one gets protein then drink instead (side would never fire
-// anyway -- orderHasIt below already excludes it).
+// drink now no more snack, and only 2 upsell" -- then, same day, a
+// correction: "protein is more important than side." Still exactly one
+// of {protein, side} paired with drink, never both -- protein is just
+// the tie breaker for WHICH one when an order is missing both (checked
+// first below); an order missing only side still gets side, same as
+// before.
 const SIDE_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'side').keywords;
-const UPSELL_PRIORITY_WITH_SIDE = ['side', 'drink'];
-const UPSELL_PRIORITY_WITHOUT_SIDE = ['protein', 'drink'];
+const PROTEIN_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'protein').keywords;
 
 // Next upsell offer worth making, if any -- one whole category at a time
 // (every real product in it, not just a representative one), already-
@@ -1815,8 +1852,17 @@ async function nextUpsellGroup(order, orderItems) {
   if (offered.length >= MAX_UPSELL_PICKS) return null;
   const menu = await resolveMenu(order.branch_id);
   const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
-  const orderHasSide = orderedCategories.some((c) => categoryMatchesGroup(c, SIDE_KEYWORDS));
-  const priorityKeys = orderHasSide ? UPSELL_PRIORITY_WITHOUT_SIDE : UPSELL_PRIORITY_WITH_SIDE;
+  const hasProtein = orderedCategories.some((c) => categoryMatchesGroup(c, PROTEIN_KEYWORDS));
+  const hasSide = orderedCategories.some((c) => categoryMatchesGroup(c, SIDE_KEYWORDS));
+  // Chidera, 2026-09-25: "protein is more important than side" -- but only
+  // when protein is actually a real, orderable category for this business;
+  // a catalogue with no protein products at all (test-upsell-multiselect-
+  // quantity.mjs's own seed, confirmed) must still fall through to side,
+  // not silently offer nothing.
+  const proteinOptions = !hasProtein ? catalogueOptions(menu, PROTEIN_KEYWORDS) : [];
+  const sideOptions = !hasSide ? catalogueOptions(menu, SIDE_KEYWORDS) : [];
+  const nonDrinkKey = proteinOptions.length ? 'protein' : sideOptions.length ? 'side' : null;
+  const priorityKeys = nonDrinkKey ? [nonDrinkKey, 'drink'] : ['drink'];
   const priorityGroups = priorityKeys.map((key) => UPSELL_GROUPS.find((g) => g.key === key));
   for (const group of priorityGroups) {
     if (offered.includes(group.key)) continue; // already asked about this one this order
@@ -4900,7 +4946,18 @@ async function handleDineinScan(customer, text) {
   // real dine-in welcome (table label, "join an active order" wording,
   // the actual menu link) becomes the free first bubble on /wa/:token
   // instead (routes/web-chat.js's own dine-in branch).
-  await sendStartOrderLink(customer, { dineinTableLabel: table.label, dineinQrToken: table.qr_token });
+  // Chidera, 2026-09-25 (live report): "i just realized in dine in that
+  // served you can pay now is inside web and they may not see it" --
+  // rescanning the QR is this guest's only way back once they've closed
+  // the web chat tab; if their own real "ready to pay" bubble
+  // (notifyGuestsReadyToPay) is already sitting there, the one real
+  // WhatsApp message this scan produces should say so, not the generic
+  // "get started" line a first-timer with nothing to pay yet still gets.
+  const { rows: readyToPayRows } = await pool.query(
+    `select 1 from "order" where session_id = $1 and served_at is not null and status not in ('completed', 'cancelled') limit 1`,
+    [session.id]
+  );
+  await sendStartOrderLink(customer, { dineinTableLabel: table.label, dineinQrToken: table.qr_token, readyToPay: readyToPayRows.length > 0 });
   return true;
 }
 
@@ -5173,12 +5230,19 @@ export async function notifyGuestsReadyToPay(order) {
   const { rows: tableRows } = await pool.query('select label, qr_token, branch_id from restaurant_table where id = $1', [order.table_id]);
   const table = tableRows[0];
   if (!table) return;
+  // Chidera, 2026-09-25 (live report): "the whole ready to pay should come
+  // on bare chat once only for people who actually placed an order not
+  // just everyone on the table" -- real gap: every guest who'd EVER
+  // scanned or joined this table's session got notified, even one who
+  // never actually added a single item (came along, never ordered). Only
+  // customers who genuinely have their own order_item lines on THIS order
+  // get a "ready to pay" bubble/ping -- there's nothing for anyone else
+  // here to pay for.
   const { rows: guests } = await pool.query(
-    `select c.* from customers c where c.id in (
-       select customer_id from table_session_guest where session_id = $1
-       union select customer_id from table_session where id = $1
-     )`,
-    [order.session_id]
+    `select distinct c.* from customers c
+       join order_item oi on oi.added_by_customer_id = c.id
+     where oi.order_id = $1`,
+    [order.id]
   );
   if (!guests.length) return;
   const { total } = await summariseOrder(order);
@@ -5542,7 +5606,7 @@ export async function handlePendingBatch(customer, text) {
     // no need to ask first when they've already said what they want.
     const completedOrder = await recentlyCompletedOrder(customer.id);
     if (completedOrder && !(await wasSentFeedbackRequestFor(completedOrder.id))) {
-      await reply(customer, `Would you like to place another order, or is there anything else I can help you with?`, 'post_completion_greeting');
+      await reply(customer, `Hello! Would you like to place another order, or is there anything else I can help you with?`, 'post_completion_greeting');
       return;
     }
     await handleGreeting(customer, text);

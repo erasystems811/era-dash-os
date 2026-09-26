@@ -1049,7 +1049,7 @@ export function escapeHtml(s) {
 // live without a manual refresh. The existing dashboard "Mark paid"
 // button stays as a real fallback (cash, or anything that doesn't
 // reconcile automatically) -- never removed.
-export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, status, statusPath, createPath, claimPath, posTransfer = null, dynamicExpiresAt = null, dynamicReadyAt = null, paystackUrl = null }) {
+export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, status, statusPath, createPath, claimPath, posTransfer = null, dynamicExpiresAt = null, dynamicReadyAt = null, paystackUrl = null, webChatPath = null }) {
   const headerStyle = coverPhotoVersion
     ? `position:relative;background-image:linear-gradient(180deg,rgba(28,24,21,.1),rgba(28,24,21,.88)),url('/photo/cover?v=${coverPhotoVersion}');background-size:cover;background-position:center`
     : 'position:relative';
@@ -1096,11 +1096,14 @@ export function renderPayPage({ businessName, tableLabel, coverPhotoVersion, sta
   .note{margin:0 16px 16px;background:#fff;border-radius:14px;padding:16px;border:1px solid var(--line);font-size:13.5px;color:var(--mid);line-height:1.55}
   .note b{color:var(--ink)}
   .done{margin:16px;background:var(--ok);color:#fff;border-radius:14px;padding:18px;text-align:center;font-family:"Fraunces",serif;font-size:17px;font-weight:700}
+  .back-to-chat{display:inline-flex;align-items:center;gap:4px;margin-top:10px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.3);color:var(--paper);text-decoration:none;font-weight:600;font-size:12.5px;padding:7px 13px 7px 10px;border-radius:999px}
+  .back-to-chat:active{background:rgba(255,255,255,.22)}
 </style></head>
 <body>
 <div class="top">
   <div class="nm">${escapeHtml(businessName)}</div>
   <div class="mt">Table ${escapeHtml(tableLabel)} · Ready to pay</div>
+  ${webChatPath ? `<a class="back-to-chat" href="${escapeHtml(webChatPath)}">&#8249; Back to chat</a>` : ''}
 </div>
 <div id="doneBanner" class="done" hidden>All paid up. Thank you!</div>
 <div id="mainContent">

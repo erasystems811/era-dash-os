@@ -158,6 +158,12 @@ export default function InHouse() {
               <div className="foot">
                 <span className="total mono">NGN {Number(o.total || 0).toLocaleString()}</span>
               </div>
+              {Number(o.confirmed_amount || 0) > 0 && (
+                <span className="paid-badge">
+                  PAID NGN {Number(o.confirmed_amount).toLocaleString()}
+                  {Number(o.confirmed_amount) < Number(o.total || 0) ? ' (partial)' : ''}
+                </span>
+              )}
               {actionLabel === 'Mark paid' && payingOrderId === o.id && shortfall[o.id] ? (
                 <div style={{ marginTop: 8 }} onClick={(e) => e.preventDefault()}>
                   <p className="hint" style={{ margin: '0 0 6px' }}>

@@ -788,7 +788,16 @@ router.get('/:qrToken/pay', async (req, res) => {
       // more than once per payment for no reason" discipline as the POS
       // dynamic account above.
       paystackUrl = myPending.payment_link_url
-        || (await initializeOrderPaymentPaystackTransaction({ orderPayment: myPending, order, customer: actingCustomer, amount: Number(myPending.amount) }).catch((err) => {
+        || (await initializeOrderPaymentPaystackTransaction({
+          orderPayment: myPending,
+          order,
+          customer: actingCustomer,
+          amount: Number(myPending.amount),
+          // Chidera, 2026-09-25: "if payment started in dine in chat,
+          // take customer back to din in chat" -- same real gap Monnify's
+          // own branch just below already got fixed for.
+          callbackUrl: `${process.env.PUBLIC_URL}/wa/${await ensureMenuToken(actingCustomer)}?table=${req.params.qrToken}`,
+        }).catch((err) => {
           console.error('initializeOrderPaymentPaystackTransaction failed:', err.message);
           return null;
         }));
@@ -814,6 +823,11 @@ router.get('/:qrToken/pay', async (req, res) => {
         }));
     }
   }
+  // Chidera, 2026-09-25 (live report): "the dine in payment summary web
+  // page has no back to chat" -- this table's own scoped thread, same
+  // /wa/:token?table=... shape every other dine-in link already uses,
+  // only real when this guest actually has a chat thread to go back to.
+  const webChatPath = guestToken ? `${process.env.PUBLIC_URL}/wa/${guestToken}?table=${req.params.qrToken}` : null;
   res.set('Content-Type', 'text/html').send(
     renderPayPage({
       businessName: table.business_name,
@@ -827,6 +841,7 @@ router.get('/:qrToken/pay', async (req, res) => {
       dynamicExpiresAt,
       dynamicReadyAt,
       paystackUrl,
+      webChatPath,
     })
   );
 });
@@ -882,7 +897,13 @@ router.post('/:qrToken/pay/create', async (req, res) => {
       // Chidera, 2026-09-21: "LET DINE IN SUPPORT PAYSTACK O" -- a real
       // Paystack transaction for THIS payment (a split share or the
       // whole table), keyed to order_payment, not the order as a whole.
-      paystackUrl = await initializeOrderPaymentPaystackTransaction({ orderPayment: payment, order, customer: actingCustomer, amount: Number(payment.amount) }).catch((err) => {
+      paystackUrl = await initializeOrderPaymentPaystackTransaction({
+        orderPayment: payment,
+        order,
+        customer: actingCustomer,
+        amount: Number(payment.amount),
+        callbackUrl: `${process.env.PUBLIC_URL}/wa/${await ensureMenuToken(actingCustomer)}?table=${req.params.qrToken}`,
+      }).catch((err) => {
         console.error('initializeOrderPaymentPaystackTransaction failed:', err.message);
         return null;
       });

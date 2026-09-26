@@ -31,8 +31,12 @@ function emailFor(customer) {
 // with no callback_url at all, a completed (or cancelled) payment left the
 // customer stranded on Paystack's own generic page. `callbackUrl` is
 // optional and additive: a caller with nowhere sensible to send the
-// customer back to (dine-in's own split-payment page, a different
-// surface entirely) can simply omit it and nothing changes for them.
+// customer back to can simply omit it and nothing changes for them.
+// Chidera, 2026-09-25: "if payment started in dine in chat, take customer
+// back to din in chat even with back to chat button, if its online
+// order, take back to online chat" -- dine-in's own split-payment page
+// (routes/dinein-menu.js) now passes its own table-scoped
+// /wa/:token?table=... here too, same as online already did.
 async function callPaystackInitialize({ customer, amount, referencePrefix, callbackUrl }) {
   const secretKey = process.env.PAYMENT_SECRET_KEY;
   if (process.env.PAYMENT_PROVIDER !== 'paystack' || !secretKey) return null; // caller falls back to bank transfer instructions
@@ -102,8 +106,8 @@ export async function initializePaystackTopupTransaction({ topupId, order, custo
 // above, keyed to one specific order_payment row (a split share or the
 // whole table), not the order as a whole -- a table can have more than
 // one payment in flight at once, unlike a regular order.
-export async function initializeOrderPaymentPaystackTransaction({ orderPayment, order, customer, amount }) {
-  const result = await callPaystackInitialize({ customer, amount, referencePrefix: `${order.reference}-DP` });
+export async function initializeOrderPaymentPaystackTransaction({ orderPayment, order, customer, amount, callbackUrl }) {
+  const result = await callPaystackInitialize({ customer, amount, referencePrefix: `${order.reference}-DP`, callbackUrl });
   if (!result) return null;
   await pool.query('update order_payment set payment_reference = $1, payment_link_url = $2 where id = $3', [result.reference, result.authorizationUrl, orderPayment.id]);
   return result.authorizationUrl;
