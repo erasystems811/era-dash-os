@@ -8,7 +8,7 @@ import { classifyIntent, detectWantsHuman, detectDelayComplaint } from './classi
 import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extractOrderItems, extractOrderModifications, extractFulfilmentChange, loadBotFields, describeForExtraction, branchOptions, resolveMenu, getSharingMode } from './fields.js';
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
-import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
+import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia, getWaDisplayNumber } from './whatsapp-send.js';
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
@@ -2864,6 +2864,41 @@ async function sendPosPaymentChoice(customer, order) {
   await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice' });
 }
 
+// Chidera, 2026-09-26: "instagram doesnt need the web chat, after linking
+// monify, the back to merchant site button on instagram is taking customer
+// back to web chat instead of the normal instagram chat" -- Monnify/
+// Paystack's own "back to merchant" redirect was hardcoded to /wa/:token
+// (the real web-chat page) for every channel, copied from the 2026-09-25
+// fix that gave WEBSITE customers a real thread to return to. That's only
+// ever right for the website channel -- WhatsApp/Instagram customers were
+// never in that page to begin with. Same root cause, and same fix, as the
+// 2026-09-21 "after i closed web from instagram it took me on whatsapp"
+// bug already solved for the web menu page (engine/menu-page-template.js):
+// wa.me/<digits> and ig.me/m/<handle> are each platform's own equivalent,
+// intercepted by that app's own in-app browser to jump back into the real
+// chat. Returns null (no redirect) rather than guessing wrong when neither
+// number/handle is configured -- same fallback the menu page already uses.
+export async function resolveBackToChatUrl(customer, menuToken) {
+  if (customer.channel === 'website') {
+    return process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${menuToken}` : null;
+  }
+  if (customer.channel === 'instagram') {
+    const { rows } = await pool.query(
+      `select instagram_handle from branch
+       where instagram_handle is not null and instagram_handle != ''
+       order by (id = $1) desc
+       limit 1`,
+      [customer.branch_id]
+    );
+    const handle = rows[0]?.instagram_handle || null;
+    return handle ? `https://ig.me/m/${handle}` : null;
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  const waNumber = await getWaDisplayNumber(credentials);
+  const digits = String(waNumber || '').replace(/\D/g, '');
+  return digits ? `https://wa.me/${digits}` : null;
+}
+
 async function buildPayLine(order, customer, { amount, amountLabel }) {
   const paymentConfig = await getPaymentConfig();
   // provider === 'pos' -- Settings' own explicit choice, always wins.
@@ -2890,9 +2925,12 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       // sendPaymentInstructions (sendPaymentLinkButton), no special-casing.
       // Chidera, 2026-09-25: "why isnt customer auto taken back to web
       // chat after payment with monify?" -- same callbackUrl fix
-      // Paystack's own branch below already has.
+      // Paystack's own branch below already has. 2026-09-26: that fix was
+      // web-chat-only and got applied to every channel -- resolveBackToChatUrl
+      // (its own comment above) sends WhatsApp/Instagram customers back to
+      // their real app instead.
       const monnifyMenuToken = await ensureMenuToken(customer);
-      const monnifyCallbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${monnifyMenuToken}` : undefined;
+      const monnifyCallbackUrl = (await resolveBackToChatUrl(customer, monnifyMenuToken)) || undefined;
       const url = await initializeMonnifyTransaction({ order, customer, amount, callbackUrl: monnifyCallbackUrl });
       if (url) {
         // Chidera, real live report right after the checkout-link switch:
@@ -2946,9 +2984,12 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       // cant see back to chat." Every customer already has (or gets, right
       // here) a persistent menu_token -- Paystack redirects back to this
       // exact chat page once payment finishes, same "Back to chat" idea
-      // documents.js's invoice page already got.
+      // documents.js's invoice page already got. 2026-09-26: same fix as
+      // Monnify's own branch above -- resolveBackToChatUrl instead of
+      // always /wa/:token, so WhatsApp/Instagram customers land back in
+      // their real app, not the web-chat page they never used.
       const menuToken = await ensureMenuToken(customer);
-      const callbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${menuToken}` : undefined;
+      const callbackUrl = (await resolveBackToChatUrl(customer, menuToken)) || undefined;
       const url = await initializePaystackTransaction({ order, customer, amount, callbackUrl });
       if (url) {
         // Chidera, 2026-09-16: "i actually got a payment link o, but it
@@ -3007,8 +3048,15 @@ export async function sendPaymentInstructions(customer, order) {
     try {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
       if (customer.channel === 'instagram') {
-        await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
-        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
+        // Chidera, 2026-09-26: "on instagram the invoice is taking me to
+        // facebook, it should open in the web app" -- sending the raw PDF
+        // as a file attachment (sendInstagramDocument) made Instagram open
+        // it in its own Facebook-branded document viewer instead. Deliberately
+        // not sending anything here -- invoiceSent stays false (not set below,
+        // unlike the other two branches), so the same invoiceUrl text-link
+        // fallback every OTHER failed-PDF case already falls back to (a few
+        // lines below) fires here too, linking straight to the plain HTML
+        // invoice page instead of a PDF.
       } else if (customer.channel === 'website') {
         // website: link to the plain HTML invoice page (routes/documents.js's
         // GET /invoice/:orderId), not the /pdf route -- the customer's
@@ -3021,11 +3069,12 @@ export async function sendPaymentInstructions(customer, order) {
         // failed the moment a customer tapped it ("the invoice link keeps
         // not opening, an invalid link").
         invoiceWebsiteUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
+        invoiceSent = true;
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `invoice-${order.reference}.pdf`, `Invoice for order ${order.reference}`);
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
+        invoiceSent = true;
       }
-      invoiceSent = true;
     } catch (err) {
       console.error(`Failed to send invoice PDF, falling back to a text link: ${err.message}`);
     }
@@ -3580,8 +3629,10 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
     try {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
       if (customer.channel === 'instagram') {
-        await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
-        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
+        // Same fix as sendPaymentInstructions' own 2026-09-26 comment above --
+        // no PDF file attachment for Instagram (opens via its own Facebook-
+        // branded viewer); invoiceSent stays false so the invoiceUrl
+        // text-link fallback below links to the plain HTML page instead.
       } else if (customer.channel === 'website') {
         // Same fix as sendPaymentInstructions' website branch above -- link
         // to the plain HTML topup invoice page, not /pdf (Gotenberg-backed,
@@ -3589,11 +3640,12 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
         // marked "sent").
         const invoiceHtmlUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice] ${invoiceHtmlUrl}`, trigger: 'topup_invoice_pdf', interactive: { type: 'document', filename: `topup-${order.reference}`, url: invoiceHtmlUrl } });
+        invoiceSent = true;
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `topup-${order.reference}.pdf`, `Top-up invoice for order ${order.reference}`);
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
+        invoiceSent = true;
       }
-      invoiceSent = true;
     } catch (err) {
       console.error(`Failed to send top-up invoice PDF, falling back to a text link: ${err.message}`);
     }
@@ -3616,8 +3668,10 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
   let paymentUrl = null;
   if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
     try {
+      // 2026-09-26: same fix as sendPaymentInstructions' own Paystack/Monnify
+      // branches -- resolveBackToChatUrl instead of always /wa/:token.
       const menuToken = await ensureMenuToken(customer);
-      const callbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${menuToken}` : undefined;
+      const callbackUrl = (await resolveBackToChatUrl(customer, menuToken)) || undefined;
       paymentUrl = await initializePaystackTopupTransaction({ topupId, order, customer, amount: addedValue, callbackUrl });
     } catch (err) {
       console.error(`Paystack initialize failed for topup ${topupId}, falling back to bank details: ${err.message}`);
@@ -4167,16 +4221,21 @@ export async function sendReceiptMessage(customer, order, followUpText = '') {
         // -- link to the plain HTML receipt page, not /pdf (Gotenberg-
         // backed, internal-only).
         receiptWebsiteUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
+        receiptSent = true;
+      } else if (customer.channel === 'instagram') {
+        // Chidera, 2026-09-26: "receipt too is taking me to facebook" --
+        // same root cause and fix as sendPaymentInstructions' own invoice
+        // branch above: sendInstagramDocument opened the PDF through
+        // Instagram's own Facebook-branded document viewer. Deliberately
+        // not sending anything here -- receiptSent stays false, so the
+        // receiptUrl text-link fallback below links to the plain HTML
+        // receipt page instead of a PDF.
       } else {
         const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
-        if (customer.channel === 'instagram') {
-          await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
-        } else {
-          await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
-        }
+        await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
+        receiptSent = true;
       }
-      receiptSent = true;
     } catch (err) {
       console.error(`Failed to send receipt PDF, falling back to a text link: ${err.message}`);
     }
