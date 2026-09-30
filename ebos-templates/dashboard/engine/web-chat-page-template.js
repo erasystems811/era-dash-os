@@ -271,6 +271,18 @@ let lastCursor = HISTORY.length ? HISTORY[HISTORY.length - 1].created_at : null;
 // (see splitFreshTrailingBatch further down) needs this flag too, and runs
 // before poll()'s own declaration is reached.
 let pendingTyping = false;
+// Chidera, 2026-10-01, real live report: "tapped egg under choose for
+// protein upsell, it delivered double message and bot replied twice."
+// Root cause: poll() runs both on its own 3s setInterval AND manually
+// right after a tap/send resolves, with nothing stopping the two from
+// overlapping -- pendingTyping only gets set true well after a poll's own
+// fetch has already resolved (inside the 2s-delayed reveal below), so a
+// second poll() starting while the first one's fetch is still in flight
+// reads the same stale lastCursor, fetches the exact same new row(s), and
+// reveals them a second time. Same tapInFlight guard shape tap() already
+// uses, just for poll() itself -- a second overlapping call now returns
+// immediately instead of double-fetching.
+let pollInFlight = false;
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 function fmtTime(iso) { const d = new Date(iso); return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
@@ -760,12 +772,17 @@ function showBanner(text) {
 // confirmed by Paystack's webhook, "order ready" if that ever lands here,
 // a staff reply. Same lightweight polling idiom the existing dine-in/POS
 // pay pages already use, no websocket infra in this codebase.
-// pendingTyping blocks a second poll tick from firing mid-delay -- since
-// lastCursor only advances once the delayed rows actually land, an
-// overlapping poll would otherwise refetch and re-queue the exact same
-// rows a second time. (declared up top now, see its own comment there)
+// pendingTyping blocks a second poll tick from firing during the reveal
+// delay (lastCursor hasn't advanced yet, so an overlapping poll there would
+// refetch and re-queue the same rows). pollInFlight covers the earlier gap
+// pendingTyping alone didn't: it only turns true once a poll's OWN fetch
+// has already resolved, so two polls starting close together (the 3s
+// interval tick landing right as a manual post-tap poll() fires, say)
+// could both read the same stale lastCursor before either had set
+// pendingTyping. (both declared up top, see their own comments there)
 async function poll() {
-  if (pendingTyping) return;
+  if (pendingTyping || pollInFlight) return;
+  pollInFlight = true;
   try {
     // POLL_PATH may already carry its own ?table=... query (dine-in's own
     // separate chat thread, routes/web-chat.js) -- joiner must be & in
@@ -823,7 +840,18 @@ async function poll() {
       }
       revealNext();
     }, 2000);
-  } catch (err) {}
+  } catch (err) {
+  } finally {
+    // Released here, not after the 2s-delayed reveal above -- the race
+    // this guards against is two overlapping fetches both reading the
+    // same stale lastCursor, and lastCursor is already updated
+    // synchronously above (right after the fetch resolves). The reveal
+    // animation itself is already serialized by pendingTyping, which this
+    // function already checks on entry -- holding pollInFlight through
+    // that whole 2s+ delay too would just make every poll during a reveal
+    // silently return early, for no benefit.
+    pollInFlight = false;
+  }
 }
 setInterval(poll, 3000);
 </script>
