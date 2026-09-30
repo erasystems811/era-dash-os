@@ -8,7 +8,7 @@ import { classifyIntent, detectWantsHuman, detectDelayComplaint } from './classi
 import { missingFieldsForOrder, missingFulfilmentFields, extractAndApply, extractOrderItems, extractOrderModifications, extractFulfilmentChange, loadBotFields, describeForExtraction, branchOptions, resolveMenu, getSharingMode } from './fields.js';
 import { loadStateMachine } from './state-machine.js';
 import { askJson, askText } from './claude.js';
-import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia } from './whatsapp-send.js';
+import { sendWhatsApp, sendWhatsAppDocument, sendWhatsAppButtons, sendWhatsAppCtaUrl, sendWhatsAppTemplate, markTypingIndicator, downloadWhatsAppMedia, getWaDisplayNumber } from './whatsapp-send.js';
 import { sendListMessage, productForRowId } from './menu-message.js';
 import { sendInstagram, sendInstagramDocument, markInstagramTypingIndicator, downloadInstagramMedia } from './instagram-send.js';
 import { createInvoice, createReceipt } from './documents.js';
@@ -628,37 +628,10 @@ async function wasSentFeedbackRequestFor(orderId) {
 // keeps getting a fresh link roughly every 20 minutes until
 // closeStaleOrders' own 24h sweep below eventually cancels the order
 // outright.
-const MONNIFY_LINK_REFRESH_LEAD_MINUTES = 5;
-export async function refreshExpiringPaymentLinks() {
-  const { rows: orders } = await pool.query(
-    `select * from "order"
-     where engine_state = 'confirm_payment'
-       and payment_status not in ('confirmed', 'accepted')
-       and monnify_account_expires_at is not null
-       and monnify_account_expires_at < now() + make_interval(mins => $1)`,
-    [MONNIFY_LINK_REFRESH_LEAD_MINUTES]
-  );
-  for (const order of orders) {
-    try {
-      const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
-      const customer = custRows[0];
-      if (customer) await sendPaymentInstructions(customer, order);
-    } catch (err) {
-      console.error(`Failed to refresh expiring Monnify link for order ${order.id}:`, err.message);
-    }
-  }
-  if (orders.length) console.log(`Refreshed ${orders.length} expiring Monnify payment link(s).`);
-}
-
-const STALE_ORDER_HOURS = 24;
-export async function closeStaleOrders() {
-  const { rowCount } = await pool.query(
-    `update "order" set status = 'cancelled', engine_state = 'cancelled'
-     where engine_state not in ('completed', 'cancelled') and updated_at < now() - make_interval(hours => $1)`,
-    [STALE_ORDER_HOURS]
-  );
-  if (rowCount) console.log(`Closed ${rowCount} order(s) abandoned for over ${STALE_ORDER_HOURS}h.`);
-}
+// Chidera, 2026-09-26: moved to ./sweeps.js along with every other periodic
+// background job (see that file's own header) -- re-exported here so no
+// existing import site (server.js, tests) has to change.
+export { refreshExpiringPaymentLinks, closeStaleOrders } from './sweeps.js';
 
 // branchId is only ever non-null here when the channel itself already told
 // us (a real per-branch WhatsApp number, see webhook-whatsapp.js/branch-
@@ -1837,6 +1810,21 @@ function catalogueOptions(menu, keywords) {
 // the tie breaker for WHICH one when an order is missing both (checked
 // first below); an order missing only side still gets side, same as
 // before.
+// Chidera, 2026-10-01, real live report: "when i tapped egg under choose
+// for protein upsell, it delivered double message" (separate poll-race
+// bug, fixed in web-chat-page-template.js) "and i said that for upsell
+// its either protein and drink or side and drink, now after protein im
+// still seeing side infact make drink first then protein or side...
+// second." Two real fixes below: (1) 'drink' now leads priorityKeys
+// instead of trailing it. (2) the non-drink pick is only EVER computed
+// once per order -- the moment either 'protein' or 'side' shows up in
+// upsell_offered (asked about at all, accepted or declined), the other
+// one is locked out for good. The old code recomputed nonDrinkKey fresh
+// on every call from hasProtein/hasSide (what's actually IN the order),
+// not from what's already been OFFERED -- so accepting the protein
+// upsell flipped hasProtein true, emptied proteinOptions, and the very
+// next call silently fell through to offering side too, exactly the
+// "protein and side both" case this was always supposed to rule out.
 const SIDE_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'side').keywords;
 const PROTEIN_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'protein').keywords;
 
@@ -1854,15 +1842,22 @@ async function nextUpsellGroup(order, orderItems) {
   const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
   const hasProtein = orderedCategories.some((c) => categoryMatchesGroup(c, PROTEIN_KEYWORDS));
   const hasSide = orderedCategories.some((c) => categoryMatchesGroup(c, SIDE_KEYWORDS));
-  // Chidera, 2026-09-25: "protein is more important than side" -- but only
-  // when protein is actually a real, orderable category for this business;
-  // a catalogue with no protein products at all (test-upsell-multiselect-
-  // quantity.mjs's own seed, confirmed) must still fall through to side,
-  // not silently offer nothing.
-  const proteinOptions = !hasProtein ? catalogueOptions(menu, PROTEIN_KEYWORDS) : [];
-  const sideOptions = !hasSide ? catalogueOptions(menu, SIDE_KEYWORDS) : [];
-  const nonDrinkKey = proteinOptions.length ? 'protein' : sideOptions.length ? 'side' : null;
-  const priorityKeys = nonDrinkKey ? [nonDrinkKey, 'drink'] : ['drink'];
+  // protein/side already asked about this order (either tapped in or
+  // declined) -- that's this order's one non-drink slot, decided for good,
+  // never reopened for the other category.
+  let nonDrinkKey = null;
+  if (!offered.includes('protein') && !offered.includes('side')) {
+    // Chidera, 2026-09-25: "protein is more important than side" -- but
+    // only when protein is actually a real, orderable category for this
+    // business; a catalogue with no protein products at all (test-upsell-
+    // multiselect-quantity.mjs's own seed, confirmed) must still fall
+    // through to side, not silently offer nothing.
+    const proteinOptions = !hasProtein ? catalogueOptions(menu, PROTEIN_KEYWORDS) : [];
+    const sideOptions = !hasSide ? catalogueOptions(menu, SIDE_KEYWORDS) : [];
+    nonDrinkKey = proteinOptions.length ? 'protein' : sideOptions.length ? 'side' : null;
+  }
+  // Chidera, 2026-10-01: "make drink first then protein or side second."
+  const priorityKeys = nonDrinkKey ? ['drink', nonDrinkKey] : ['drink'];
   const priorityGroups = priorityKeys.map((key) => UPSELL_GROUPS.find((g) => g.key === key));
   for (const group of priorityGroups) {
     if (offered.includes(group.key)) continue; // already asked about this one this order
@@ -2910,6 +2905,41 @@ async function sendPosPaymentChoice(customer, order) {
   await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[pay link sent: ${url}]`, trigger: 'pos_pay_choice' });
 }
 
+// Chidera, 2026-09-26: "instagram doesnt need the web chat, after linking
+// monify, the back to merchant site button on instagram is taking customer
+// back to web chat instead of the normal instagram chat" -- Monnify/
+// Paystack's own "back to merchant" redirect was hardcoded to /wa/:token
+// (the real web-chat page) for every channel, copied from the 2026-09-25
+// fix that gave WEBSITE customers a real thread to return to. That's only
+// ever right for the website channel -- WhatsApp/Instagram customers were
+// never in that page to begin with. Same root cause, and same fix, as the
+// 2026-09-21 "after i closed web from instagram it took me on whatsapp"
+// bug already solved for the web menu page (engine/menu-page-template.js):
+// wa.me/<digits> and ig.me/m/<handle> are each platform's own equivalent,
+// intercepted by that app's own in-app browser to jump back into the real
+// chat. Returns null (no redirect) rather than guessing wrong when neither
+// number/handle is configured -- same fallback the menu page already uses.
+export async function resolveBackToChatUrl(customer, menuToken) {
+  if (customer.channel === 'website') {
+    return process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${menuToken}` : null;
+  }
+  if (customer.channel === 'instagram') {
+    const { rows } = await pool.query(
+      `select instagram_handle from branch
+       where instagram_handle is not null and instagram_handle != ''
+       order by (id = $1) desc
+       limit 1`,
+      [customer.branch_id]
+    );
+    const handle = rows[0]?.instagram_handle || null;
+    return handle ? `https://ig.me/m/${handle}` : null;
+  }
+  const credentials = await getWhatsAppCredentials(customer.branch_id);
+  const waNumber = await getWaDisplayNumber(credentials);
+  const digits = String(waNumber || '').replace(/\D/g, '');
+  return digits ? `https://wa.me/${digits}` : null;
+}
+
 async function buildPayLine(order, customer, { amount, amountLabel }) {
   const paymentConfig = await getPaymentConfig();
   // provider === 'pos' -- Settings' own explicit choice, always wins.
@@ -2936,9 +2966,12 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       // sendPaymentInstructions (sendPaymentLinkButton), no special-casing.
       // Chidera, 2026-09-25: "why isnt customer auto taken back to web
       // chat after payment with monify?" -- same callbackUrl fix
-      // Paystack's own branch below already has.
+      // Paystack's own branch below already has. 2026-09-26: that fix was
+      // web-chat-only and got applied to every channel -- resolveBackToChatUrl
+      // (its own comment above) sends WhatsApp/Instagram customers back to
+      // their real app instead.
       const monnifyMenuToken = await ensureMenuToken(customer);
-      const monnifyCallbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${monnifyMenuToken}` : undefined;
+      const monnifyCallbackUrl = (await resolveBackToChatUrl(customer, monnifyMenuToken)) || undefined;
       const url = await initializeMonnifyTransaction({ order, customer, amount, callbackUrl: monnifyCallbackUrl });
       if (url) {
         // Chidera, real live report right after the checkout-link switch:
@@ -2992,9 +3025,12 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
       // cant see back to chat." Every customer already has (or gets, right
       // here) a persistent menu_token -- Paystack redirects back to this
       // exact chat page once payment finishes, same "Back to chat" idea
-      // documents.js's invoice page already got.
+      // documents.js's invoice page already got. 2026-09-26: same fix as
+      // Monnify's own branch above -- resolveBackToChatUrl instead of
+      // always /wa/:token, so WhatsApp/Instagram customers land back in
+      // their real app, not the web-chat page they never used.
       const menuToken = await ensureMenuToken(customer);
-      const callbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${menuToken}` : undefined;
+      const callbackUrl = (await resolveBackToChatUrl(customer, menuToken)) || undefined;
       const url = await initializePaystackTransaction({ order, customer, amount, callbackUrl });
       if (url) {
         // Chidera, 2026-09-16: "i actually got a payment link o, but it
@@ -3053,8 +3089,15 @@ export async function sendPaymentInstructions(customer, order) {
     try {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
       if (customer.channel === 'instagram') {
-        await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
-        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
+        // Chidera, 2026-09-26: "on instagram the invoice is taking me to
+        // facebook, it should open in the web app" -- sending the raw PDF
+        // as a file attachment (sendInstagramDocument) made Instagram open
+        // it in its own Facebook-branded document viewer instead. Deliberately
+        // not sending anything here -- invoiceSent stays false (not set below,
+        // unlike the other two branches), so the same invoiceUrl text-link
+        // fallback every OTHER failed-PDF case already falls back to (a few
+        // lines below) fires here too, linking straight to the plain HTML
+        // invoice page instead of a PDF.
       } else if (customer.channel === 'website') {
         // website: link to the plain HTML invoice page (routes/documents.js's
         // GET /invoice/:orderId), not the /pdf route -- the customer's
@@ -3067,11 +3110,12 @@ export async function sendPaymentInstructions(customer, order) {
         // failed the moment a customer tapped it ("the invoice link keeps
         // not opening, an invalid link").
         invoiceWebsiteUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
+        invoiceSent = true;
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `invoice-${order.reference}.pdf`, `Invoice for order ${order.reference}`);
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[invoice PDF] ${invoicePdfUrl}`, trigger: 'invoice_pdf' });
+        invoiceSent = true;
       }
-      invoiceSent = true;
     } catch (err) {
       console.error(`Failed to send invoice PDF, falling back to a text link: ${err.message}`);
     }
@@ -3376,7 +3420,7 @@ async function handleWaitingOnPayment(customer, order, text) {
 // already filters to payment_reminder_sent_at is null, so it's never
 // re-checked here -- one source of truth for "has this order's ONE
 // reminder already gone out," never two competing guards.
-async function sendPaymentReminder(customer, order) {
+export async function sendPaymentReminder(customer, order) {
   await pool.query(`update "order" set payment_reminder_sent_at = now() where id = $1`, [order.id]);
 
   // Same buildPayLine as sendPaymentInstructions -- this is the same
@@ -3411,33 +3455,9 @@ async function sendPaymentReminder(customer, order) {
 // in ('whatsapp','instagram') only) -- a table still physically at the
 // restaurant isn't "abandoned" the same way, and dine-in's own payment flow
 // is staff-mediated, not this reminder's concern.
-const PAYMENT_NUDGE_MINUTES = 20;
-const WEB_CHAT_ACTIVE_WINDOW_MINUTES = 30;
-
-export async function sweepAbandonedWebChatOrders() {
-  const { rows: candidates } = await pool.query(
-    `select o.* from "order" o
-     join customers c on c.id = o.customer_id
-     where o.engine_state = 'confirm_payment'
-       and o.payment_status = 'pending'
-       and o.payment_reminder_sent_at is null
-       and o.channel in ('whatsapp', 'instagram')
-       and o.updated_at < now() - make_interval(mins => $1)
-       and (c.web_chat_active_at is null or c.web_chat_active_at < now() - make_interval(mins => $2))`,
-    [PAYMENT_NUDGE_MINUTES, WEB_CHAT_ACTIVE_WINDOW_MINUTES]
-  );
-  for (const order of candidates) {
-    const { rows: customerRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
-    const customer = customerRows[0];
-    if (!customer) continue;
-    try {
-      await sendPaymentReminder(customer, order);
-    } catch (err) {
-      console.error(`Abandonment nudge failed for order ${order.id}:`, err);
-    }
-  }
-  if (candidates.length) console.log(`Sent ${candidates.length} abandonment nudge(s).`);
-}
+// Chidera, 2026-09-26: moved to ./sweeps.js, re-exported here, same as
+// refreshExpiringPaymentLinks/closeStaleOrders above.
+export { sweepAbandonedWebChatOrders } from './sweeps.js';
 
 // Chidera, 2026-09-25: "when a customer text and abandon a menu maybe they
 // text bare chat and they dont open web menu or they open webmenu but dont
@@ -3463,53 +3483,9 @@ export async function sweepAbandonedWebChatOrders() {
 // delay this to ~30 minutes instead of the requested 10 for anyone in the
 // 10-30 minute band, since a page LOAD alone (no message) touches
 // web_chat_active_at without ever advancing last_message_at.
-const ORDER_ABANDONMENT_NUDGE_MINUTES = 10;
-
-export async function sweepAbandonedChatCustomers() {
-  const { rows: candidates } = await pool.query(
-    `select c.* from customers c
-     where c.last_message_at is not null
-       and c.last_message_at < now() - make_interval(mins => $1)
-       and c.channel in ('whatsapp', 'instagram')
-       and (c.web_chat_active_at is null or c.web_chat_active_at < now() - make_interval(mins => $1))
-       -- Chidera, 2026-09-25, real live incident: two customers whose
-       -- 24h WhatsApp session window was closed got the same nudge
-       -- resent every ~2 minutes, chat_redirect_count climbing forever.
-       -- Root cause: logMessage touches last_message_at for EVERY
-       -- message, including the system's OWN outbound sends -- when a
-       -- send failed and engine/flow.js's retryFailedSendAsTemplate
-       -- retried it (webhook-whatsapp.js's status handler, error 131047),
-       -- THAT retry's own logMessage call pushed last_message_at past
-       -- chat_redirect_sent_at, which this guard misread as "the
-       -- customer engaged again" -- rearming itself using a signal the
-       -- system's own retry had just touched, not anything the customer
-       -- did. web_chat_active_at is the only signal here that's NEVER
-       -- touched by an outbound send (only a genuine page visit) --
-       -- needsChatRedirect's own, already-correct guard only ever used
-       -- this one signal too, never last_message_at.
-       and (c.chat_redirect_sent_at is null or c.web_chat_active_at > c.chat_redirect_sent_at)
-       and not exists (
-         select 1 from "order" o where o.customer_id = c.id and o.engine_state in ('confirm_payment', 'fulfilment', 'completed')
-       )
-       and not exists (
-         select 1 from table_session ts where ts.closed_at is null
-           and (ts.customer_id = c.id or exists (select 1 from table_session_guest g where g.session_id = ts.id and g.customer_id = c.id))
-       )`,
-    [ORDER_ABANDONMENT_NUDGE_MINUTES]
-  );
-  for (const customer of candidates) {
-    try {
-      await sendChatRedirectPing(
-        customer,
-        "Hey, we noticed you didn't go on with your order. Tap below to continue with your order.",
-        { trigger: 'order_abandonment_nudge' }
-      );
-    } catch (err) {
-      console.error(`Order abandonment nudge failed for customer ${customer.id}:`, err);
-    }
-  }
-  if (candidates.length) console.log(`Sent ${candidates.length} order abandonment nudge(s).`);
-}
+// Chidera, 2026-09-26: moved to ./sweeps.js, re-exported here, same as
+// the other sweeps above.
+export { sweepAbandonedChatCustomers } from './sweeps.js';
 
 // Reviewing an order isn't a one-shot thing -- "add a chapman" or "remove
 // the suya wrap" can come at any point before payment, and recalculates the
@@ -3626,8 +3602,10 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
     try {
       const invoicePdfUrl = `${process.env.PUBLIC_URL}${invoicePath}/pdf`;
       if (customer.channel === 'instagram') {
-        await sendInstagramDocument(recipientFor(customer), invoicePdfUrl);
-        await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
+        // Same fix as sendPaymentInstructions' own 2026-09-26 comment above --
+        // no PDF file attachment for Instagram (opens via its own Facebook-
+        // branded viewer); invoiceSent stays false so the invoiceUrl
+        // text-link fallback below links to the plain HTML page instead.
       } else if (customer.channel === 'website') {
         // Same fix as sendPaymentInstructions' website branch above -- link
         // to the plain HTML topup invoice page, not /pdf (Gotenberg-backed,
@@ -3635,11 +3613,12 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
         // marked "sent").
         const invoiceHtmlUrl = `${process.env.PUBLIC_URL}${invoicePath}`;
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice] ${invoiceHtmlUrl}`, trigger: 'topup_invoice_pdf', interactive: { type: 'document', filename: `topup-${order.reference}`, url: invoiceHtmlUrl } });
+        invoiceSent = true;
       } else {
         await sendWhatsAppDocument(recipientFor(customer), invoicePdfUrl, `topup-${order.reference}.pdf`, `Top-up invoice for order ${order.reference}`);
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[topup invoice PDF] ${invoicePdfUrl}`, trigger: 'topup_invoice_pdf' });
+        invoiceSent = true;
       }
-      invoiceSent = true;
     } catch (err) {
       console.error(`Failed to send top-up invoice PDF, falling back to a text link: ${err.message}`);
     }
@@ -3662,8 +3641,10 @@ async function sendTopupInvoice(customer, order, addedItems, addedValue) {
   let paymentUrl = null;
   if (process.env.PAYMENT_PROVIDER === 'paystack' && process.env.PAYMENT_SECRET_KEY) {
     try {
+      // 2026-09-26: same fix as sendPaymentInstructions' own Paystack/Monnify
+      // branches -- resolveBackToChatUrl instead of always /wa/:token.
       const menuToken = await ensureMenuToken(customer);
-      const callbackUrl = process.env.PUBLIC_URL ? `${process.env.PUBLIC_URL}/wa/${menuToken}` : undefined;
+      const callbackUrl = (await resolveBackToChatUrl(customer, menuToken)) || undefined;
       paymentUrl = await initializePaystackTopupTransaction({ topupId, order, customer, amount: addedValue, callbackUrl });
     } catch (err) {
       console.error(`Paystack initialize failed for topup ${topupId}, falling back to bank details: ${err.message}`);
@@ -4213,16 +4194,21 @@ export async function sendReceiptMessage(customer, order, followUpText = '') {
         // -- link to the plain HTML receipt page, not /pdf (Gotenberg-
         // backed, internal-only).
         receiptWebsiteUrl = `${process.env.PUBLIC_URL}${receiptPath}`;
+        receiptSent = true;
+      } else if (customer.channel === 'instagram') {
+        // Chidera, 2026-09-26: "receipt too is taking me to facebook" --
+        // same root cause and fix as sendPaymentInstructions' own invoice
+        // branch above: sendInstagramDocument opened the PDF through
+        // Instagram's own Facebook-branded document viewer. Deliberately
+        // not sending anything here -- receiptSent stays false, so the
+        // receiptUrl text-link fallback below links to the plain HTML
+        // receipt page instead of a PDF.
       } else {
         const receiptPdfUrl = `${process.env.PUBLIC_URL}${receiptPath}/pdf`;
-        if (customer.channel === 'instagram') {
-          await sendInstagramDocument(recipientFor(customer), receiptPdfUrl);
-        } else {
-          await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
-        }
+        await sendWhatsAppDocument(recipientFor(customer), receiptPdfUrl, `receipt-${order.reference}.pdf`, `Receipt for order ${order.reference}`);
         await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: customer.channel, sender: 'bot', body: `[receipt PDF] ${receiptPdfUrl}`, trigger: 'receipt_pdf' });
+        receiptSent = true;
       }
-      receiptSent = true;
     } catch (err) {
       console.error(`Failed to send receipt PDF, falling back to a text link: ${err.message}`);
     }
@@ -6165,34 +6151,9 @@ async function handleClosedHoursMessage(customer, opensAt, branchId) {
   );
 }
 
-// Run on an interval from server.js, same "cheap when nothing's waiting,
-// genuinely inert for a business that's never set opening_hours" shape as
-// every other sweep in this codebase. Per branch (not globally) since two
-// branches can keep different hours -- only a branch that's actually open
-// right now, with rows actually waiting, does any work.
-export async function sweepOpeningNotifications() {
-  const { rows: branches } = await pool.query(
-    `select distinct b.id, b.opening_hours from branch b
-     join hours_notify_request r on r.branch_id = b.id and r.notified_at is null
-     where b.opening_hours is not null`
-  );
-  for (const branch of branches) {
-    const { open } = checkOperatingHours(branch.opening_hours);
-    if (!open) continue;
-    const { rows: pending } = await pool.query(`select * from hours_notify_request where branch_id = $1 and notified_at is null`, [branch.id]);
-    for (const request of pending) {
-      const { rows: customerRows } = await pool.query('select * from customers where id = $1', [request.customer_id]);
-      const customer = customerRows[0];
-      await pool.query('update hours_notify_request set notified_at = now() where id = $1', [request.id]);
-      if (!customer) continue;
-      try {
-        await reply(customer, `We're open now! Reply to place an order.`, 'opening_notify');
-      } catch (err) {
-        console.error(`Failed to send opening notification to customer ${customer.id}:`, err);
-      }
-    }
-  }
-}
+// Chidera, 2026-09-26: moved to ./sweeps.js, re-exported here, same as
+// the other sweeps above.
+export { sweepOpeningNotifications } from './sweeps.js';
 
 // Chidera, 2026-09-24, real report: "if on bare chat we already set that
 // bot wont respond, why is it still showing the typing sign like it
