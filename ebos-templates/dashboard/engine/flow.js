@@ -1810,6 +1810,21 @@ function catalogueOptions(menu, keywords) {
 // the tie breaker for WHICH one when an order is missing both (checked
 // first below); an order missing only side still gets side, same as
 // before.
+// Chidera, 2026-10-01, real live report: "when i tapped egg under choose
+// for protein upsell, it delivered double message" (separate poll-race
+// bug, fixed in web-chat-page-template.js) "and i said that for upsell
+// its either protein and drink or side and drink, now after protein im
+// still seeing side infact make drink first then protein or side...
+// second." Two real fixes below: (1) 'drink' now leads priorityKeys
+// instead of trailing it. (2) the non-drink pick is only EVER computed
+// once per order -- the moment either 'protein' or 'side' shows up in
+// upsell_offered (asked about at all, accepted or declined), the other
+// one is locked out for good. The old code recomputed nonDrinkKey fresh
+// on every call from hasProtein/hasSide (what's actually IN the order),
+// not from what's already been OFFERED -- so accepting the protein
+// upsell flipped hasProtein true, emptied proteinOptions, and the very
+// next call silently fell through to offering side too, exactly the
+// "protein and side both" case this was always supposed to rule out.
 const SIDE_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'side').keywords;
 const PROTEIN_KEYWORDS = UPSELL_GROUPS.find((g) => g.key === 'protein').keywords;
 
@@ -1827,15 +1842,22 @@ async function nextUpsellGroup(order, orderItems) {
   const orderedCategories = orderItems.map((oi) => menu.find((p) => p.id === oi.product_id)?.category).filter(Boolean);
   const hasProtein = orderedCategories.some((c) => categoryMatchesGroup(c, PROTEIN_KEYWORDS));
   const hasSide = orderedCategories.some((c) => categoryMatchesGroup(c, SIDE_KEYWORDS));
-  // Chidera, 2026-09-25: "protein is more important than side" -- but only
-  // when protein is actually a real, orderable category for this business;
-  // a catalogue with no protein products at all (test-upsell-multiselect-
-  // quantity.mjs's own seed, confirmed) must still fall through to side,
-  // not silently offer nothing.
-  const proteinOptions = !hasProtein ? catalogueOptions(menu, PROTEIN_KEYWORDS) : [];
-  const sideOptions = !hasSide ? catalogueOptions(menu, SIDE_KEYWORDS) : [];
-  const nonDrinkKey = proteinOptions.length ? 'protein' : sideOptions.length ? 'side' : null;
-  const priorityKeys = nonDrinkKey ? [nonDrinkKey, 'drink'] : ['drink'];
+  // protein/side already asked about this order (either tapped in or
+  // declined) -- that's this order's one non-drink slot, decided for good,
+  // never reopened for the other category.
+  let nonDrinkKey = null;
+  if (!offered.includes('protein') && !offered.includes('side')) {
+    // Chidera, 2026-09-25: "protein is more important than side" -- but
+    // only when protein is actually a real, orderable category for this
+    // business; a catalogue with no protein products at all (test-upsell-
+    // multiselect-quantity.mjs's own seed, confirmed) must still fall
+    // through to side, not silently offer nothing.
+    const proteinOptions = !hasProtein ? catalogueOptions(menu, PROTEIN_KEYWORDS) : [];
+    const sideOptions = !hasSide ? catalogueOptions(menu, SIDE_KEYWORDS) : [];
+    nonDrinkKey = proteinOptions.length ? 'protein' : sideOptions.length ? 'side' : null;
+  }
+  // Chidera, 2026-10-01: "make drink first then protein or side second."
+  const priorityKeys = nonDrinkKey ? ['drink', nonDrinkKey] : ['drink'];
   const priorityGroups = priorityKeys.map((key) => UPSELL_GROUPS.find((g) => g.key === key));
   for (const group of priorityGroups) {
     if (offered.includes(group.key)) continue; // already asked about this one this order
