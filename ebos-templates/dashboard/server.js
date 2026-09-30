@@ -28,6 +28,9 @@ import { router as paystackWebhook } from './engine/webhook-paystack.js';
 import { router as moniepointWebhook } from './engine/webhook-moniepoint.js';
 import { router as monnifyWebhook } from './engine/webhook-monnify.js';
 import { router as opayWebhook } from './engine/webhook-opay.js';
+import { router as voiceWebhook } from './routes/voice-webhook.js';
+import { WebSocketServer } from 'ws';
+import { handleVoiceStreamConnection } from './engine/voice-stream-bridge.js';
 import { recoverPendingMessages, closeStaleOrders, sweepOpeningNotifications, refreshExpiringPaymentLinks, sweepAbandonedWebChatOrders, sweepAbandonedChatCustomers } from './engine/flow.js';
 import { sweepOfferEscalation } from './engine/delivery-dispatch.js';
 
@@ -72,6 +75,13 @@ app.use('/webhook/instagram', instagramWebhook);
 // webhook-opay.js's own comment), not a header over the raw body like the
 // others above -- this one genuinely belongs below express.json().
 app.use('/webhook/opay', opayWebhook);
+// Twilio's inbound-call webhook (Voice add-on, spec A2) -- same public,
+// provider-signature-verified trust boundary as every webhook above.
+// express.urlencoded() above has already parsed Twilio's form body by the
+// time this runs, which is what Twilio's own signature algorithm signs
+// (the parsed key/value pairs, not raw bytes) -- see twilio-voice.js's
+// verifyTwilioSignature for the exact algorithm.
+app.use('/webhook/voice', voiceWebhook);
 // Public documents -- the invoice/receipt link sent to a customer over
 // WhatsApp has to open without a dashboard login.
 app.use('/documents', documentRoutes);
@@ -191,7 +201,7 @@ if (process.env.EBOS_TEST_PGLITE === '1') {
   console.log('Seeded sample restaurant for local testing.');
 }
 
-app.listen(port, () => {
+const httpServer = app.listen(port, () => {
   console.log(`EBOS dashboard listening on ${port}`);
   recoverPendingMessages().catch((err) => console.error('Startup recovery failed:', err));
   // Checked hourly, not on every message -- a 24h threshold doesn't need
@@ -245,4 +255,23 @@ app.listen(port, () => {
   setInterval(() => {
     sweepAbandonedChatCustomers().catch((err) => console.error('sweepAbandonedChatCustomers failed:', err));
   }, 2 * 60_000);
+});
+
+// Twilio Media Streams' own WebSocket (Voice add-on, Stage 6) -- attached
+// directly to the http.Server app.listen() returns, not a separate port,
+// so this works unchanged behind the same Caddy reverse proxy as every
+// other route. noServer + a manual 'upgrade' listener (rather than letting
+// WebSocketServer bind its own listener) so only /voice/stream is ever
+// treated as a WebSocket upgrade -- any other path falls through
+// untouched, matching how every other route here is scoped by path.
+const voiceStreamWss = new WebSocketServer({ noServer: true });
+httpServer.on('upgrade', (req, socket, head) => {
+  const { pathname, searchParams } = new URL(req.url, 'http://localhost');
+  if (pathname !== '/voice/stream') {
+    socket.destroy();
+    return;
+  }
+  voiceStreamWss.handleUpgrade(req, socket, head, (ws) => {
+    handleVoiceStreamConnection(ws, { callId: searchParams.get('callId') });
+  });
 });
