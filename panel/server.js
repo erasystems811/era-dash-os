@@ -1116,6 +1116,17 @@ function renderManageMonitoring(name) {
     // threading a sandbox flag through this status object too, since a
     // blank field here is a no-op push exactly like before this existed.
     + ' <input type="text" id="mgmtPushBranch" placeholder="branch (sandbox only, optional)" style="margin-top:8px;width:220px;" title="Only takes effect for a sandbox client -- pushes that branch to it for testing, then always restores the control server\\'s own checkout to main afterward.">'
+    // Chidera, 2026-10-01, real report: "i am trying to push to the
+    // business from dash and it says failed." Root cause: push-update.mjs's
+    // own checkBranchOverwrite refuses a plain push the moment a client's
+    // registry shows its last push was a non-main branch (era-demo's own
+    // case, left over from a peer's earlier web-chat-sandbox-test push) --
+    // the server route already accepted overrideBranch in the request body,
+    // but nothing in this panel ever sent it, so there was no self-service
+    // way to clear this short of a raw CLI flag on the control server
+    // itself. This checkbox is that missing self-service control.
+    + ' <label style="margin-top:8px;display:inline-block;" title="Only needed if the push fails with \\'last push was branch X, not main\\' -- check this to acknowledge overwriting that branch with main.">'
+    + '<input type="checkbox" id="mgmtPushOverrideBranch"> force past a stuck non-main branch</label>'
     + ' <button type="button" id="mgmtOffboardBtn" style="margin-top:8px;" title="Exports all of this business\\'s data and marks it offboarded. Never deletes the server or database -- that stays a separate, later, deliberate step.">Begin offboarding (exports data, never deletes anything)</button>'
     + '<details style="margin-top:8px;"><summary style="cursor:pointer;">Offboarding steps (SOP)</summary><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fff;padding:10px;border-radius:4px;margin-top:6px;">' + escClient(OFFBOARDING_SOP_TEXT) + '</pre></details>'
     + '<div id="waCatalogBlock" style="margin-top:10px;padding-top:10px;border-top:1px solid #ddd;">Loading WhatsApp Catalogue status...</div>';
@@ -1387,11 +1398,15 @@ async function pushUpdate(name, allEbos) {
   // a non-sandbox target regardless of what this sends.
   const branchInput = !allEbos ? document.getElementById('mgmtPushBranch') : null;
   const branch = branchInput ? branchInput.value.trim() : '';
+  const overrideInput = !allEbos ? document.getElementById('mgmtPushOverrideBranch') : null;
+  const overrideBranch = overrideInput ? overrideInput.checked : false;
   const confirmMsg = branch
     ? 'Push branch "' + branch + '" to ' + label + '? This is for testing in-progress work on a sandbox client only -- the control server\\'s own checkout always ends back on main afterward, whatever happens.'
+    : overrideBranch
+    ? 'Push the current code to ' + label + ', overriding its stuck non-main branch with main? Only do this if you genuinely mean to put main back.'
     : 'Push the current code to ' + label + '? This rebuilds the dashboard container -- secrets are reused as-is, nothing is regenerated.';
   if (!confirm(confirmMsg)) return;
-  const body = allEbos ? { allEbos: true } : branch ? { client: name, branch: branch } : { client: name };
+  const body = allEbos ? { allEbos: true } : branch ? { client: name, branch: branch } : { client: name, overrideBranch };
   const res = await fetch('/api/push-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) { alert(data.error || 'Failed'); return; }
