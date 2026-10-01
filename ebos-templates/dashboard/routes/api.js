@@ -2674,6 +2674,26 @@ router.delete('/customers/:id', requireEditorApi, async (req, res) => {
     await client.query(`delete from delivery_assignment where order_id in (select id from "order" where customer_id = $1)`, [id]);
     await client.query(`delete from delivery_offer where order_id in (select id from "order" where customer_id = $1)`, [id]);
     await client.query(`delete from booking where customer_id = $1`, [id]);
+    // Chidera, 2026-10-01, real report: still not deleting even after the
+    // 2026-09-20/09-25 fixes above. Same bug class, three more gaps this
+    // block never covered -- none of them are THIS customer's own orders
+    // (those still just go straight to the delete below), they're this
+    // customer showing up as a GUEST on someone ELSE's order: joint
+    // dine-in lets any guest at a table add items or pay toward the
+    // shared bill (order_item.added_by_customer_id, order_payment.
+    // paid_by_customer_id), and complaint.customer_id has never been
+    // touched by this route at all. All three reference customers with no
+    // cascade. complaint is this customer's own and safe to delete
+    // outright; the other two are cleared (set null), not deleted --
+    // nulling added_by/paid_by only drops the attribution on someone
+    // ELSE's real item/payment, the exact same "falls back to 'a guest'"
+    // null already means elsewhere in this codebase (see
+    // engine/dinein.js's own labelFor comment) -- deleting those rows
+    // outright would destroy a different customer's real order history
+    // just because this one unrelated guest is being removed.
+    await client.query(`update order_item set added_by_customer_id = null where added_by_customer_id = $1`, [id]);
+    await client.query(`update order_payment set paid_by_customer_id = null where paid_by_customer_id = $1`, [id]);
+    await client.query(`delete from complaint where customer_id = $1`, [id]);
     await client.query(`delete from "order" where customer_id = $1`, [id]);
     // Chidera, 2026-09-25, real report: "im trying to delete a
     // conversation on dashboard why isnt it deleting?" Same exact bug

@@ -70,6 +70,60 @@ async function main() {
   assert(messageAfter.length === 0, 'the message row is genuinely gone too');
   assert(sessionAfter.length === 0, 'and the table_session row is genuinely gone too -- nothing left orphaned');
 
+  // Chidera, 2026-10-01, real report: "i cant even delete a conversation in
+  // era demo" -- still not deleting after the 2026-09-20/09-25 fixes above.
+  // Three more gaps, none of them this customer's own orders this time --
+  // a GUEST showing up on someone ELSE's shared table order (joint
+  // dine-in lets any guest add items or pay toward the bill), plus a
+  // complaint this route never touched at all.
+  const owner = await flow.findOrCreateCustomer({ phoneNumber: '2348013380071', channel: 'whatsapp' });
+  const guest = await flow.findOrCreateCustomer({ phoneNumber: '2348013380072', channel: 'whatsapp' });
+  const { rows: guestTableRows } = await pool.query(`insert into restaurant_table (branch_id, label, qr_token) values ($1, '62', 'qrdel62') returning id`, [branchId]);
+  const guestTable = guestTableRows[0];
+  const { rows: guestSessionRows } = await pool.query(
+    `insert into table_session (table_id, branch_id, customer_id) values ($1, $2, $3) returning *`,
+    [guestTable.id, branchId, owner.id]
+  );
+  const guestSession = guestSessionRows[0];
+  await pool.query(`insert into table_session_guest (session_id, customer_id) values ($1, $2)`, [guestSession.id, guest.id]);
+  const { rows: productRows } = await pool.query(`select id, price from product limit 1`);
+  const product = productRows[0];
+  const { rows: ownerOrderRows } = await pool.query(
+    `insert into "order" (customer_id, reference, branch_id, channel, table_id, session_id, fulfilment_type, payment_mode, engine_state, status)
+     values ($1, $2, $3, 'dinein', $4, $5, 'table', 'at_table', 'collect_info', 'new') returning *`,
+    [owner.id, 'DELFK-' + Date.now(), branchId, guestTable.id, guestSession.id]
+  );
+  const ownerOrder = ownerOrderRows[0];
+  // The guest added an item to the OWNER's shared order -- added_by_customer_id
+  // is the guest, order_id belongs to the owner, so deleting the owner's
+  // orders (this route's own first pass) never touches this row at all.
+  await pool.query(
+    `insert into order_item (order_id, product_id, quantity, price, added_by_customer_id) values ($1, $2, 1, $3, $4)`,
+    [ownerOrder.id, product.id, product.price, guest.id]
+  );
+  // Same shape for a split/joint payment -- the guest paid, the order is
+  // the owner's.
+  await pool.query(
+    `insert into order_payment (order_id, reference, amount, paid_by_customer_id) values ($1, $2, $3, $4)`,
+    [ownerOrder.id, 'DELFKPAY-' + Date.now(), product.price, guest.id]
+  );
+  await pool.query(`insert into complaint (customer_id, message) values ($1, $2)`, [guest.id, 'Test complaint for delete-guest coverage']);
+
+  const delGuestRes = await authed(`${BASE}/api/customers/${guest.id}`, { method: 'DELETE' });
+  const delGuestBody = await delGuestRes.json();
+  assert(delGuestRes.status === 200 && delGuestBody.ok === true, `deleting a GUEST who added items/paid on someone else's order also succeeds, not a 500 (got ${delGuestRes.status}: ${JSON.stringify(delGuestBody)})`);
+
+  const { rows: guestAfter } = await pool.query(`select 1 from customers where id = $1`, [guest.id]);
+  assert(guestAfter.length === 0, 'the guest row is genuinely gone');
+  const { rows: complaintAfter } = await pool.query(`select 1 from complaint where customer_id = $1`, [guest.id]);
+  assert(complaintAfter.length === 0, "the guest's own complaint is gone too");
+  const { rows: ownerOrderAfter } = await pool.query(`select 1 from "order" where id = $1`, [ownerOrder.id]);
+  assert(ownerOrderAfter.length === 1, "the OWNER's order survives -- deleting the guest never touches someone else's real order");
+  const { rows: itemAfter } = await pool.query(`select added_by_customer_id from order_item where order_id = $1`, [ownerOrder.id]);
+  assert(itemAfter.length === 1 && itemAfter[0].added_by_customer_id === null, "the owner's order_item survives too, just with the guest's attribution cleared (not deleted)");
+  const { rows: paymentAfter } = await pool.query(`select paid_by_customer_id from order_payment where order_id = $1`, [ownerOrder.id]);
+  assert(paymentAfter.length === 1 && paymentAfter[0].paid_by_customer_id === null, "the owner's order_payment survives too, same attribution-cleared-not-deleted treatment");
+
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);
 }

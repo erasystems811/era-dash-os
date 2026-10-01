@@ -853,7 +853,52 @@ async function poll() {
     pollInFlight = false;
   }
 }
-setInterval(poll, 3000);
+// Chidera, 2026-10-01, real live reports: "era demo and pomodoro are not
+// answering" (silence on real WhatsApp after a customer who'd merely
+// LOADED this page once went back to texting normally) and "after i took
+// over from bot it sent me one we are trying to reach out to you, upon
+// handing back to bot why did it send another... it ended up sending 3
+// times, i said its once per take over." Same root cause for both: the
+// server's own web_chat_active_at freshness check (engine/flow.js's
+// needsChatRedirect/needsStaffChatRedirect, "are they actively on this
+// page right now") was being kept artificially fresh forever by THIS
+// poll's own 3-second interval -- a tab a customer opened once and simply
+// left open in the background (never closed, never looked at again) kept
+// silently re-touching that timestamp every 3 seconds, with no actual
+// person watching, so the server kept believing "they're on the page
+// right now, stay quiet on WhatsApp" indefinitely -- and, for the
+// take-over case, kept reading as "they revisited the page since the last
+// ping" on every poll tick, re-arming a fresh staff ping each time.
+// Pausing the poll entirely while the tab isn't actually visible (the
+// browser's own, real signal for this, not a guess) means a merely-open
+// background tab stops refreshing that timestamp at all -- it ages out
+// and genuinely expires, same as if the tab had been closed. Polling
+// resumes (and catches up immediately, not waiting out the full 3s) the
+// moment the tab is actually looked at again.
+let pollTimer = null;
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(poll, 3000);
+}
+function stopPolling() {
+  if (!pollTimer) return;
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+if (document.hidden) {
+  // Started hidden (opened in a background tab) -- never begin touching
+  // web_chat_active_at until it's actually looked at at least once.
+} else {
+  startPolling();
+}
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) {
+    stopPolling();
+  } else {
+    startPolling();
+    poll();
+  }
+});
 </script>
 </body></html>`;
 }
