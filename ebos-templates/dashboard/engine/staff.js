@@ -50,13 +50,23 @@ import {
 async function sendStaffReplyRedirect(customer, text, staffId) {
   await logMessage({ customerId: customer.id, tableSessionId: customer.tableSessionId, direction: 'outbound', channel: 'website', sender: 'staff', body: text, trigger: 'staff_reply' });
 
+  // handover_at is established BEFORE the ping check below (not after, as
+  // this used to do) -- needsStaffChatRedirect now compares a ping's own
+  // timestamp against handover_at to tell "already pinged this session"
+  // from "a stale ping from a prior one," so handover_at has to already
+  // be fixed at this point: on a brand-new session's very first ping,
+  // setting it afterward would make that ping's own created_at land
+  // BEFORE handover_at, reading as if it predated this session and wrongly
+  // allowing a second ping on the very next reply.
+  const { rows: updated } = await pool.query(
+    `update customers set handled_by = 'staff', handled_by_staff_id = coalesce($1, handled_by_staff_id), handover_at = coalesce(handover_at, now()) where id = $2 returning handover_at`,
+    [staffId || null, customer.id]
+  );
+  customer.handover_at = updated[0].handover_at;
+
   if (await needsStaffChatRedirect(customer)) {
     await sendChatRedirectPing(customer, `We're trying to reach out to you.`, { trigger: 'staff_reply_ping', sender: 'staff' });
   }
-  await pool.query(
-    `update customers set handled_by = 'staff', handled_by_staff_id = coalesce($1, handled_by_staff_id), handover_at = coalesce(handover_at, now()) where id = $2`,
-    [staffId || null, customer.id]
-  );
 }
 
 export async function sendStaffReply(customerId, text, staffId) {

@@ -90,20 +90,27 @@ async function main() {
   assert(bubbles.length === 6, 'all six messages log as free bubbles');
   assert(pings.length === 1, `only the first staff message gets a real ping -- everything after stays on web chat (got ${pings.length})`);
 
-  // A genuine chat visit since that one ping earns exactly one fresh ping
-  // next time staff reaches out, not a free-for-all again.
+  // Chidera, 2026-10-01, real live report: "after i took over from bot it
+  // sent me one we are trying to reach out to you, upon handing back to
+  // bot why did it send another... it ended up sending 3 times, i said
+  // its once per take over." A chat visit since the one ping used to earn
+  // a fresh one (this block originally asserted exactly that) -- but
+  // tapping the ping's own link IS a chat visit, so the ping doing its
+  // job was re-arming itself. A visit (genuine or not) no longer earns
+  // anything more this takeover -- only a brand-new one (resumeBotControl,
+  // then escalated again) does, see test-staff-reply-never-capped.mjs for
+  // that coverage.
   await pool.query('update customers set web_chat_active_at = now() where id = $1', [customer.id]);
   await flow.sendStaffReply(customer.id, 'One more update for you.', null);
   rows = await outboundRows(pool, customer.id);
   const pingsAfterVisit = rows.filter((r) => r.trigger === 'staff_reply_ping');
-  assert(pingsAfterVisit.length === 2, `a genuine chat visit since the last ping earns exactly one fresh ping, not unlimited ones (got ${pingsAfterVisit.length})`);
+  assert(pingsAfterVisit.length === 1, `a chat visit since the last ping earns nothing more this takeover -- still exactly one ping total (got ${pingsAfterVisit.length})`);
 
-  // And right after that fresh ping, still no visit since -- back to
-  // staying quiet, same as the very first stretch.
+  // Further updates, still no re-ping -- same "once per takeover" fact.
   await flow.sendStaffReply(customer.id, 'Another update.', null);
   rows = await outboundRows(pool, customer.id);
   const pingsAfterVisit2 = rows.filter((r) => r.trigger === 'staff_reply_ping');
-  assert(pingsAfterVisit2.length === 2, `and it goes right back to staying quiet after that one fresh ping (got ${pingsAfterVisit2.length})`);
+  assert(pingsAfterVisit2.length === 1, `and still no re-ping after that either -- once per takeover really is once (got ${pingsAfterVisit2.length})`);
 
   // === PART B: a customer texting real ("bare") WhatsApp instead of the
   // web chat, while an order is genuinely in progress. ===

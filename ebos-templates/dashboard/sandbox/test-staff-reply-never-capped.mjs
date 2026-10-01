@@ -6,13 +6,21 @@
 // silenced it. Then, same day, a third correction after both of those
 // were fixed: "its not every single text that you send we are trying to
 // reach out to you, only the first staff reach out text, everything else
-// is expected to go on in web chat." All three taught the same lesson:
-// staff pings can't share needsChatRedirect's own chat_redirect_sent_at/
-// chat_redirect_count columns with the bot's automated redirect -- see
-// needsStaffChatRedirect's own comment in engine/flow.js for the full
-// story. This file verifies the FINAL, independently-tracked behavior:
-// staff always gets through the bot's own exhausted cap, but only ever
-// gets ONE ping per customer until a real visit or 24h passes.
+// is expected to go on in web chat." A fourth correction, 2026-10-01:
+// "after i took over from bot it sent me one we are trying to reach out
+// to you, upon handing back to bot why did it send another... it ended
+// up sending 3 times, i said its once per take over" -- the "real visit"
+// re-arm from the third correction turned out to be the same bug in a
+// new shape (tapping the ping's own link IS a visit), so that's gone now
+// too. All four taught the same lesson: staff pings can't share
+// needsChatRedirect's own chat_redirect_sent_at/chat_redirect_count
+// columns with the bot's automated redirect -- see needsStaffChatRedirect's
+// own comment in engine/flow.js for the full story. This file verifies
+// the FINAL, session-scoped behavior: staff always gets through the
+// bot's own exhausted cap, but only ever gets exactly ONE ping per
+// takeover (handover_at), full stop -- not per visit, not per 24h, only
+// a genuinely new takeover (resumeBotControl, then escalated again)
+// earns another.
 process.env.EBOS_TEST_PGLITE = '1';
 process.env.EBOS_SANDBOX = '1';
 process.env.PORT = '3954';
@@ -89,13 +97,34 @@ async function main() {
   const pingsC2b = rowsC2b.filter((r) => r.trigger === 'staff_reply_ping');
   assert(pingsC2b.length === 1, `still exactly one ping total for this customer too (got ${pingsC2b.length})`);
 
-  // === 4. A genuine web-chat visit AFTER the one staff ping -- worth a
-  // fresh nudge next time they drift back to bare WhatsApp. ===
+  // === 4. Chidera, 2026-10-01, real live report: "after i took over from
+  // bot it sent me one we are trying to reach out to you, upon handing
+  // back to bot why did it send another... it ended up sending 3 times, i
+  // said its once per take over." A web-chat visit AFTER the one staff
+  // ping used to earn a fresh nudge (the old #4 here) -- but a visit is
+  // exactly what tapping the ping's own link looks like, so the ping
+  // doing its job was re-arming itself. "Once per takeover" now means
+  // exactly that: a visit, even a real one, earns nothing more this
+  // session. ===
   await pool.query(`update customers set web_chat_active_at = now() where id = $1`, [customer2.id]);
   await flow.sendStaffReply(customer2.id, 'Following up again.', null);
   const rowsC2c = await outboundRows(pool, customer2.id);
   const pingsC2c = rowsC2c.filter((r) => r.trigger === 'staff_reply_ping');
-  assert(pingsC2c.length === 2, `a genuine visit since the last ping earns a fresh one (got ${pingsC2c.length})`);
+  assert(pingsC2c.length === 1, `a visit since the last ping no longer earns a fresh one -- still exactly one ping this takeover (got ${pingsC2c.length})`);
+
+  // === 5. A genuinely NEW takeover (resumeBotControl, then escalated
+  // again) is a different session -- gets its own fresh ping. ===
+  await flow.resumeBotControl(customer2.id);
+  const afterResume = await pool.query('select handover_at from customers where id = $1', [customer2.id]);
+  assert(afterResume.rows[0].handover_at === null, 'sanity check: resumeBotControl genuinely cleared handover_at');
+  await flow.sendStaffReply(customer2.id, 'Taking this over again.', null);
+  const rowsC2d = await outboundRows(pool, customer2.id);
+  const pingsC2d = rowsC2d.filter((r) => r.trigger === 'staff_reply_ping');
+  assert(pingsC2d.length === 2, `a genuinely new takeover after resumeBotControl earns its own one ping (got ${pingsC2d.length})`);
+  await flow.sendStaffReply(customer2.id, 'Still following up.', null);
+  const rowsC2e = await outboundRows(pool, customer2.id);
+  const pingsC2e = rowsC2e.filter((r) => r.trigger === 'staff_reply_ping');
+  assert(pingsC2e.length === 2, `and still no re-ping within THIS new takeover either (got ${pingsC2e.length})`);
 
   console.log(process.exitCode === 1 ? '\n=== SOME CHECKS FAILED ===' : '\n=== ALL CHECKS PASSED ===');
   process.exit(process.exitCode === 1 ? 1 : 0);

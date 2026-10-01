@@ -799,6 +799,26 @@ export async function needsChatRedirect(customer) {
 // and has this customer visited or gone 24h quiet since) can only be
 // answered correctly by looking at staff's own pings specifically --
 // message's own staff_reply_ping rows, untangled from the bot's count.
+// Chidera, 2026-10-01, real live report: "after i took over from bot it
+// sent me one we are trying to reach out to you, upon handing back to bot
+// why did it send another... it ended up sending 3 times, i said its once
+// per take over." Root cause, confirmed against era-demo's real message
+// log: the "visited since last ping" re-arm below (added for the
+// 2026-09-25 fix documented in this function's own comment above) treated
+// ANY touch of web_chat_active_at as a genuine re-engagement worth
+// pinging again for -- but web_chat_active_at gets touched by a bare page
+// LOAD too (routes/web-chat.js's own GET /:token), not just real
+// activity, and a customer tapping the SAME ping's own link to go see
+// what staff said is exactly that: a page load. So the ping doing its job
+// (getting them to open the page) was itself being read as "they need
+// another ping," re-arming on the very next staff reply -- backwards.
+// "Once per takeover" (her own words) is a session-scoped fact, not a
+// time/visit-based cooldown -- handover_at IS that session's start (set
+// once at the original handover, cleared back to null by
+// resumeBotControl): a ping already sent since THIS handover_at means
+// this takeover already got its one ping, full stop, regardless of
+// anything the customer does with the page in the meantime; a fresh
+// handover_at (a brand new takeover) naturally allows exactly one more.
 export async function needsStaffChatRedirect(customer) {
   const { rows } = await pool.query(
     `select created_at from message where customer_id = $1 and trigger = 'staff_reply_ping' order by created_at desc limit 1`,
@@ -806,9 +826,13 @@ export async function needsStaffChatRedirect(customer) {
   );
   const lastStaffPing = rows[0]?.created_at;
   if (!lastStaffPing) return true; // staff has never pinged this customer before
-  const visitedSinceLastPing = customer.web_chat_active_at && new Date(customer.web_chat_active_at) > new Date(lastStaffPing);
-  if (visitedSinceLastPing) return true;
-  return new Date(lastStaffPing) < new Date(Date.now() - 24 * 60 * 60 * 1000);
+  if (customer.handover_at && new Date(lastStaffPing) >= new Date(customer.handover_at)) {
+    return false; // already pinged once during this exact takeover
+  }
+  // The last ping predates this takeover (a stale ping from a PRIOR,
+  // already-ended session) -- this is genuinely the first ping of a new
+  // one, same as never having pinged at all.
+  return true;
 }
 export async function markChatRedirectSent(customer) {
   // A genuine visit since the last ping, 24h+ of real silence since the
