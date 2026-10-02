@@ -43,6 +43,7 @@ import { getWhatsAppCredentials } from './branch-channel.js';
 import { getDeliveryConfig, resolveZoneForAddress } from './delivery-zones.js';
 import { estimateDeliveryFee } from './delivery.js';
 import { sendPaymentLinkButton } from './payment-flow.js';
+import { getMadeToOrderConfig, splitOrderItemsByType, isAtConcurrentJobCap } from './made-to-order.js';
 import {
   reply,
   logMessage,
@@ -1053,6 +1054,25 @@ export async function handleConfirmOrder(customer, order, text) {
     }
     await reply(customer, 'No problem, just let me know what you would like to change, or reply yes to confirm as is.');
     return;
+  }
+
+  // Chidera, 2026-10-02: made-to-order's own max_concurrent_jobs ("not all
+  // do deposit or cutoff time all those are options" -- a cap is its own
+  // independent setting too). Checked right here, at the genuine yes, not
+  // on every item added -- an order someone's still building shouldn't be
+  // declined over a cap that might clear by the time they actually
+  // confirm. A business with this disabled (the default) or no cap set
+  // never reaches the query inside isAtConcurrentJobCap at all.
+  const madeToOrderConfig = await getMadeToOrderConfig();
+  if (madeToOrderConfig.enabled && madeToOrderConfig.max_concurrent_jobs) {
+    const { hasMadeToOrderItems } = await splitOrderItemsByType(order.id);
+    if (hasMadeToOrderItems) {
+      const { atCap } = await isAtConcurrentJobCap(madeToOrderConfig);
+      if (atCap) {
+        await reply(customer, `We're at full capacity on made-to-order pieces right now -- I'll let you know the moment a slot opens up, or you're welcome to go ahead with just the ready-made items in your order instead.`);
+        return;
+      }
+    }
   }
 
   await markOrderConfirmed(customer, order);

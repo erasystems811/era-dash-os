@@ -38,6 +38,7 @@ import {
   answerOrThenShowMenu,
   confirmOrderPayment,
 } from './flow.js';
+import { getMadeToOrderConfig, splitOrderItemsByType, computeDepositSplit, isPastSameDayCutoff } from './made-to-order.js';
 
 // Shared by sendPaymentInstructions and its repeat-reminder counterpart --
 // same real send, same reasoning (see buildPayLine's own comment on why
@@ -100,6 +101,14 @@ export async function sendPaymentLinkButton(customer, paymentUrl, bodyText) {
 // same mechanism for a single online order instead of a table's split/
 // joint one (covers_item_ids always null here -- one customer, one
 // payment, the whole order).
+// Chidera, 2026-10-02: known gap, not fixed here -- this always charges
+// order.total, never the made-to-order deposit amount sendPaymentInstructions
+// computes for every other provider. A business on the POS provider with
+// made-to-order deposits enabled would have a customer's Transfer/Card page
+// show the full total instead. Narrow enough (one provider choice, among
+// Monnify/OPay/Paystack/bank-details which are all deposit-aware) to leave
+// as a documented gap rather than touch this shared dine-in/single-order
+// payment path without its own dedicated review.
 async function createSingleOrderPayment(order, customerId) {
   const { rows: existing } = await pool.query(
     `select * from order_payment where order_id = $1 and status = 'pending' and covers_item_ids is null`,
@@ -332,6 +341,43 @@ async function buildPayLine(order, customer, { amount, amountLabel }) {
 
 export async function sendPaymentInstructions(customer, order) {
   const { total, deliveryFee } = await summariseOrder(order);
+  // Chidera, 2026-10-02: made-to-order deposit. A mixed cart's ready_made
+  // items are always charged in full now -- only a made_to_order item ever
+  // gets split into a deposit charged here + a balance collected later
+  // (see completePayment and sendDepositBalanceLink below). Computed fresh
+  // on every call (not just the first) so a later edit to the cart -- more
+  // items added, a made_to_order item removed -- always re-derives the
+  // right split instead of charging a stale one.
+  const madeToOrderConfig = await getMadeToOrderConfig();
+  let depositSplit = null;
+  let pastCutoff = false;
+  if (madeToOrderConfig.enabled) {
+    const { madeToOrderSubtotal, hasMadeToOrderItems } = await splitOrderItemsByType(order.id);
+    if (madeToOrderConfig.deposit_percent) {
+      depositSplit = computeDepositSplit({ total, madeToOrderSubtotal, deliveryFee, depositPercent: madeToOrderConfig.deposit_percent });
+    }
+    // Chidera, 2026-10-02: "not all do deposit or cutoff time all those are
+    // options" -- same_day_cutoff_time checked independently of deposit,
+    // purely informational (there's no "expected ready date" column to set
+    // here, just a plain heads-up so same-day never gets silently implied
+    // when it's no longer realistic).
+    if (hasMadeToOrderItems && isPastSameDayCutoff(madeToOrderConfig.same_day_cutoff_time)) {
+      pastCutoff = true;
+    }
+  }
+  if (depositSplit) {
+    await pool.query(`update "order" set deposit_amount = $1, balance_due = $2 where id = $3`, [depositSplit.depositAmount, depositSplit.balanceDue, order.id]);
+    order.deposit_amount = depositSplit.depositAmount;
+    order.balance_due = depositSplit.balanceDue;
+  } else if (order.deposit_amount != null) {
+    // The cart changed since an earlier deposit was computed (e.g. the
+    // made_to_order item was removed) -- clear the stale split rather than
+    // charging a deposit for an order that no longer needs one.
+    await pool.query(`update "order" set deposit_amount = null, balance_due = null where id = $1`, [order.id]);
+    order.deposit_amount = null;
+    order.balance_due = null;
+  }
+  const chargeAmount = depositSplit ? depositSplit.depositAmount : total;
   const invoicePath = await createInvoice(order);
   // PUBLIC_URL is this deployment's own https://<subdomain> -- without it
   // there's no real public URL to send at all (a bare relative path means
@@ -416,7 +462,18 @@ export async function sendPaymentInstructions(customer, order) {
   // exactly the kind of thing that's easy to misread or fat-finger
   // copying out -- each on its own line reads the way a real transfer
   // slip would.
-  const { payLine, needsHandover, paymentUrl, posChoice } = await buildPayLine(order, customer, { amount: total, amountLabel: `${total}${deliveryFeeLine}` });
+  // A deposit charges less than the invoice's own total -- said plainly
+  // here so that difference never reads as a mistake (buildPayLine's own
+  // amountLabel is the only number actually charged right now).
+  const cutoffLine = pastCutoff ? ` It's past today's cutoff for made-to-order pieces, so this won't be ready same-day.` : '';
+  const depositLine = (depositSplit ? ` This is a deposit of NGN ${depositSplit.depositAmount} to get started -- the remaining NGN ${depositSplit.balanceDue} is due before it's ready.` : '') + cutoffLine;
+  const { payLine: payLineRaw, needsHandover, paymentUrl, posChoice } = await buildPayLine(order, customer, { amount: chargeAmount, amountLabel: `${chargeAmount}${depositSplit ? '' : deliveryFeeLine}` });
+  // posChoice's own payLine is always null (buildPayLine returns before
+  // computing one for that provider) -- sendPosPaymentChoice's own page
+  // doesn't yet know about deposit_amount either, see createSingleOrderPayment's
+  // comment above for that gap, left for the online-link/bank-transfer
+  // providers fixed here, not POS.
+  const payLine = payLineRaw ? `${payLineRaw}${depositLine}` : payLineRaw;
   if (customer.channel === 'website' && invoiceWebsiteUrl) {
     // Chidera, 2026-09-25: "when i said invoice and pay now in same chat i
     // meant itll have 2 buttons not just the pay now in the invoice" --
@@ -468,9 +525,13 @@ export async function sendPaymentInstructions(customer, order) {
 // other payment link in this file goes through, so whichever provider
 // this business has configured (Monnify/OPay/Paystack/bank-details/POS)
 // just works here too, automatically.
-export async function sendOutstandingBalanceLink(customer, order, amount) {
+//
+// customIntro (added 2026-10-02 for the made-to-order balance, see
+// completePayment's own comment) overrides the cash-shortfall wording
+// below -- the underlying link-building is identical either reason.
+export async function sendOutstandingBalanceLink(customer, order, amount, customIntro = null) {
   const { payLine, needsHandover, paymentUrl, posChoice } = await buildPayLine(order, customer, { amount, amountLabel: `${amount}` });
-  const intro = `You paid NGN ${Number(order.cash_collected || 0).toLocaleString()} in cash for order ${order.reference} -- there's still NGN ${amount} left to pay.`;
+  const intro = customIntro || `You paid NGN ${Number(order.cash_collected || 0).toLocaleString()} in cash for order ${order.reference} -- there's still NGN ${amount} left to pay.`;
   if (posChoice) {
     await reply(customer, intro);
     await sendPosPaymentChoice(customer, order);
@@ -731,6 +792,22 @@ export async function completePayment(orderId) {
   // through completePayment at all -- dine-in settles in person, its own
   // payment_status never reaches 'confirmed'/'accepted') can send the
   // exact same real receipt too.
+  // Chidera, 2026-10-02: made-to-order deposit -- a payment landing here
+  // with balance_due still set is the DEPOSIT clearing, not the whole
+  // order. Production starts the same as any other confirmed payment
+  // (that's the point of a deposit, see made_to_order_config's own
+  // comment), but the receipt must say so plainly, and the customer gets
+  // a real link for the remainder right away rather than finding out
+  // later. Deliberately NOT re-entering this function for the balance
+  // payment -- its own guard (engine_state === 'confirm_payment') is a
+  // one-shot gate already past by the time the balance is paid, same
+  // reasoning order_topup has its own separate confirm path instead of
+  // re-running completePayment (see that route's own comment in
+  // routes/api.js). Staff's own /orders/:id/balance/confirm clears
+  // balance_due directly; /orders/stats/today and /finance/summary's
+  // revenue sums already read balance_due to never overcount a deposit
+  // as the full total collected.
+  const depositLine = order.balance_due > 0 ? ` This covers your deposit of NGN ${order.deposit_amount} -- the remaining NGN ${order.balance_due} is due before it's ready.` : '';
   if (order.fulfilment_type === 'delivery') {
     const delivery = await createDelivery(order, customer);
     const riderLine = delivery.riderName ? ` Your rider is ${delivery.riderName}.` : '';
@@ -746,7 +823,7 @@ export async function completePayment(orderId) {
     // own poll() can recognise THIS specific message and show a banner,
     // not just a bubble easy to miss while they're still tabbed over to
     // Paystack's own checkout.
-    await sendReceiptMessage(customer, order, ` Your order is being prepared for delivery.${riderLine}${trackingLine}`);
+    await sendReceiptMessage(customer, order, ` Your order is being prepared for delivery.${riderLine}${trackingLine}${depositLine}`);
   } else {
     const { rows: bizRows } = await pool.query('select address, phone_number from business limit 1');
     const biz = bizRows[0] || {};
@@ -755,8 +832,11 @@ export async function completePayment(orderId) {
     await sendReceiptMessage(
       customer,
       order,
-      ` I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.`
+      ` I'll let you know when to pick up your order. You'll pick up at ${b.address || biz.address || 'our location'} and call ${b.phone_number || biz.phone_number || 'us'} when you arrive.${depositLine}`
     );
+  }
+  if (order.balance_due > 0) {
+    await sendOutstandingBalanceLink(customer, order, order.balance_due, `Here's a link for the remaining NGN ${order.balance_due} on order ${order.reference} whenever you're ready.`);
   }
 
   // Deliberately NOT transitioning to 'completed' here -- payment clearing

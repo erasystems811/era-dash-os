@@ -405,7 +405,17 @@ create table if not exists product (
   -- so any client created since 0045 shipped had no position column at
   -- all until someone happened to run a manual migration backfill.
   position integer,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  -- migrations/0068_made_to_order.sql. 'ready_made' (the default) is
+  -- already in stock -- every existing product keeps meaning exactly
+  -- that. 'made_to_order' is produced after the order comes in -- see
+  -- made_to_order_config below for the per-business settings that apply
+  -- to it (deposit/cap/cutoff), each independently optional. Chidera,
+  -- 2026-10-02: "not all product business do ready made or made to
+  -- order, some do just ready made simply" -- this column existing on
+  -- every product costs nothing for a business that never sets it to
+  -- anything but the default.
+  order_type text not null default 'ready_made' check (order_type in ('ready_made', 'made_to_order'))
 );
 
 -- What a combo (product.is_combo = true) actually contains -- purely
@@ -423,6 +433,32 @@ create table if not exists product_combo_item (
   quantity integer not null default 1
 );
 create index if not exists product_combo_item_product_idx on product_combo_item (product_id);
+
+-- migrations/0068_made_to_order.sql. Same "ERA switches these, not the
+-- client" whole-deployment-toggle shape as delivery_config/voice_config/
+-- dinein_config above -- off by default, so this never affects a business
+-- until ERA actually turns it on for a genuine made-to-order product
+-- business. Governs product.order_type = 'made_to_order' items only;
+-- ready_made items are never affected by anything in this table. Chidera,
+-- 2026-10-02: "not all do deposit or cutoff time all those are options" --
+-- each of the three settings below is independently nullable and never
+-- bundled with the others.
+create table if not exists made_to_order_config (
+  business_id uuid primary key references business(id),
+  enabled boolean not null default false,
+  -- Null = no deposit required, made-to-order items are paid for in full
+  -- up front like any ready_made item. Otherwise the percentage of the
+  -- made-to-order portion of the cart charged now, see engine/
+  -- made-to-order.js's computeDepositSplit for the exact math (a mixed
+  -- cart's ready_made items are always charged in full regardless).
+  deposit_percent numeric(5, 2),
+  -- Null = no cap on how many made-to-order jobs can be in flight (status
+  -- in 'confirmation'/'preparation') at once.
+  max_concurrent_jobs integer,
+  -- Null = no same-day cutoff enforced. Otherwise, a made-to-order item
+  -- added after this local time of day can't realistically be ready today.
+  same_day_cutoff_time time
+);
 
 -- The business's own menu photo(s), forwarded to customers as-is instead of
 -- a text list -- once a catalogue is a few hundred items, "We have: X, Y,
@@ -580,7 +616,17 @@ create table if not exists "order" (
   -- recentlyCompletedOrder.
   completed_at timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  -- migrations/0068_made_to_order.sql. Null on every order that never
+  -- involved a made-to-order item (the overwhelming majority) --
+  -- sendPaymentInstructions (engine/payment-flow.js) only ever sets these
+  -- when the cart has a made_to_order item AND the business has
+  -- made_to_order_config.enabled with deposit_percent set. The fact these
+  -- carry: a payment confirming deposit_amount is NOT the same fact as
+  -- this order being fully paid for -- completePayment checks balance_due
+  -- before ever treating a payment as having settled the whole order.
+  deposit_amount numeric(12, 2),
+  balance_due numeric(12, 2)
 );
 
 create table if not exists order_item (

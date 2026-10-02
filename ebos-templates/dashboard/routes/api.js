@@ -24,7 +24,7 @@ import {
   magicLinkAuthTypeHint,
 } from '../lib/auth.js';
 import { parseMenuText, parseMenuImages, reconcileMenu } from '../engine/parse-menu.js';
-import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, sendOutstandingBalanceLink, sendReceiptMessage, UPSELL_GROUPS, categoryMatchesGroup, notifyComplaintReply } from '../engine/flow.js';
+import { sendStaffReply, completePayment, notifyReadyForPickup, resumeBotControl, takeOverConversation, findOrCreateCustomer, newReference, startConversation, sendFeedbackRequest, closeTableSessionIfSettled, sendOutstandingBalanceLink, sendReceiptMessage, UPSELL_GROUPS, categoryMatchesGroup, notifyComplaintReply, reply } from '../engine/flow.js';
 import { getDeliveryConfig } from '../engine/delivery-zones.js';
 import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
@@ -1237,9 +1237,15 @@ router.get('/orders/stats/today', async (req, res) => {
     // order's full value as still-owed forever, since a cancelled order's
     // own total should be excluded from what's actually still expected --
     // see the where clause below).
+    // Chidera, 2026-10-02: made-to-order deposit -- a confirmed order with
+    // balance_due still outstanding hasn't actually had its full total
+    // collected yet, only total - balance_due has (see
+    // engine/payment-flow.js's completePayment comment). balance_due is
+    // null/0 on every order that was never a partial-deposit order, so
+    // this is a no-op for every order it's always been correct for.
     pool.query(
       `select count(*) as orders,
-              coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as collected,
+              coalesce(sum(total - coalesce(balance_due, 0)) filter (where payment_status in ('confirmed', 'accepted')), 0) as collected,
               coalesce(sum(total) filter (where status != 'cancelled'), 0) as total_value
        from "order" where created_at >= date_trunc('day', now()) and ($1::uuid is null or branch_id = $1)
          and ($2::text is null or ($2 = 'online' and channel != 'dinein') or ($2 = 'in_house' and channel = 'dinein'))`,
@@ -1614,6 +1620,31 @@ router.post('/orders/:id/confirm-payment', requireStaffApi, async (req, res) => 
   } catch (err) {
     res.status(502).json({ error: `Payment marked confirmed, but finishing the order failed: ${err.message}` });
   }
+});
+
+// Chidera, 2026-10-02: made-to-order's own second payment (the balance
+// left after a deposit, see engine/payment-flow.js's completePayment and
+// made_to_order_config's own schema comment). Deliberately its own tiny
+// route, not a second call into completePayment above -- that function's
+// whole design is a one-shot gate on engine_state (already moved past
+// 'confirm_payment' by the time a balance is paid), same reasoning
+// order_topup's own confirm route (just below) stays separate from it too.
+router.post('/orders/:id/balance/confirm', requireStaffApi, async (req, res) => {
+  const { rows: existing } = await pool.query('select * from "order" where id = $1', [req.params.id]);
+  const order = existing[0];
+  if (!order) return res.status(404).json({ error: 'Not found.' });
+  if (!order.balance_due || Number(order.balance_due) <= 0) {
+    return res.status(409).json({ error: 'This order has no outstanding balance.' });
+  }
+  await pool.query(`update "order" set balance_due = 0 where id = $1`, [req.params.id]);
+  await logActivity(req, 'order_balance_confirmed', { entityType: 'order', entityId: req.params.id, detail: { amount: order.balance_due } });
+  const { rows: custRows } = await pool.query('select * from customers where id = $1', [order.customer_id]);
+  if (custRows[0]) {
+    reply(custRows[0], `Thanks, your balance on order ${order.reference} is now settled in full.`, 'balance_confirmed').catch((err) =>
+      console.error(`Failed to send balance-confirmed message for order ${order.id}:`, err.message)
+    );
+  }
+  res.json({ ok: true });
 });
 
 // A top-up (engine/flow.js's sendTopupInvoice, for items added to an
@@ -2790,8 +2821,10 @@ router.get('/finance/summary', requireFullAccessApi, async (req, res) => {
   const params = month ? [`${month}-01`] : [];
 
   const [{ rows: totals }, { rows: cashRows }, { rows: topSellers }] = await Promise.all([
+    // Chidera, 2026-10-02: same made-to-order-deposit fix as
+    // /orders/stats/today's own "collected" -- see that route's comment.
     pool.query(
-      `select coalesce(sum(total) filter (where payment_status in ('confirmed', 'accepted')), 0) as revenue,
+      `select coalesce(sum(total - coalesce(balance_due, 0)) filter (where payment_status in ('confirmed', 'accepted')), 0) as revenue,
               coalesce(sum(total) filter (where status != 'cancelled'), 0) as total_value
        from "order" o where 1 = 1 ${dateFilter}`,
       params
