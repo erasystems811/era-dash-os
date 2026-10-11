@@ -950,6 +950,10 @@ function page(clients, ebosClients) {
     <button type="button" onclick="generateConnectLink()">Generate connect link</button>
     <div id="connectLinkResult" style="margin-top:10px;"></div>
 
+    <h4>Disconnect WhatsApp</h4>
+    <p class="muted">Clears this business's WhatsApp env vars and restarts their container, and removes them from the shared router so their current number no longer reaches them. Use this before moving the same number to a different client. Does not touch anything in Meta Business Manager.</p>
+    <button type="button" class="danger" onclick="disconnectWhatsapp()">Disconnect WhatsApp</button>
+
     <h4>Add / update Instagram</h4>
     <form id="instagramForm">
       <label>Instagram user ID</label><input name="userId" required>
@@ -1813,6 +1817,11 @@ async function generateConnectLink() {
   const data = await res.json();
   if (!res.ok) { el.textContent = 'Error: ' + (data.error || 'failed'); return; }
   el.innerHTML = '<input readonly style="width:100%;font-family:monospace;font-size:12px;" value="' + data.url + '" onclick="this.select()"> <div class="muted" style="margin-top:4px;">Expires in 24 hours. Send this to the business owner -- they open it, sign in, and pick Connect your existing WhatsApp Business App.</div>';
+}
+
+function disconnectWhatsapp() {
+  if (!confirm('Disconnect ' + currentClient + ' from their current WhatsApp number? This clears their WhatsApp env vars and restarts their container, and stops the shared router from forwarding that number to them. It does not touch Meta Business Manager.')) return;
+  submitJson('/api/disconnect-whatsapp', { client: currentClient });
 }
 
 async function loadMigrationFiles() {
@@ -2978,6 +2987,15 @@ app.post('/api/resubscribe-whatsapp', (req, res) => {
   const { client } = req.body;
   if (!client) return res.status(400).json({ error: 'client is required' });
   const jobId = startJob('resubscribe-whatsapp.mjs', [`--client=${client}`]);
+  res.json({ jobId });
+});
+
+// Reverses add-whatsapp.mjs -- see that script's own comment for exactly
+// what this clears (env vars + container restart + registry routing).
+app.post('/api/disconnect-whatsapp', (req, res) => {
+  const { client } = req.body;
+  if (!client) return res.status(400).json({ error: 'client is required' });
+  const jobId = startJob('disconnect-whatsapp.mjs', [`--client=${client}`]);
   res.json({ jobId });
 });
 
