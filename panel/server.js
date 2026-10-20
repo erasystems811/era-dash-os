@@ -589,6 +589,22 @@ function getEbosClients(registry) {
   return registry.clients.filter((c) => c.isEbos);
 }
 
+// Chidera, 2026-10-20: "disconnect era sandbox from ebos" -- era-sandbox
+// (sandbox: true, create-client.mjs's own --sandbox flag) is already kept
+// out of a bulk push/migrate (push-update.mjs/migrate.mjs both filter
+// `isEbos && !sandbox`), but every monitoring/analytics route below built
+// its business list straight off getEbosClients() with no such exclusion
+// -- a throwaway test client's up/down noise, fake revenue/upsell
+// numbers, and conversation feed were all getting mixed into real
+// business health checks and combined stats. Same existing sandbox check,
+// just applied here too. Deliberately NOT changing getEbosClients() itself
+// -- the main dashboard page (the `/` route, just below) still needs the
+// full list including sandbox so era-sandbox stays manageable/pushable
+// from the panel UI.
+function getRealEbosClients(registry) {
+  return getEbosClients(registry).filter((c) => !c.sandbox);
+}
+
 // One business's live status: is its site actually reachable right now,
 // and what has it spent on real Claude calls this month (self-reported by
 // its own dashboard, via engine/claude.js's ai_usage log -- Anthropic's own
@@ -2362,7 +2378,7 @@ setInterval(loadBusinessIntelligence, 30000);
 }
 
 app.get('/monitoring', (req, res) => {
-  const ebosClients = getEbosClients(loadRegistry());
+  const ebosClients = getRealEbosClients(loadRegistry());
   res.send(monitoringPage(ebosClients));
 });
 
@@ -2392,7 +2408,7 @@ app.get('/api/ebos/deep-health', async (req, res) => {
 });
 
 app.get('/api/ebos/status', async (req, res) => {
-  const ebosClients = getEbosClients(loadRegistry());
+  const ebosClients = getRealEbosClients(loadRegistry());
   const statuses = await Promise.all(ebosClients.map((c) => ebosBusinessStatus(c)));
   res.json(statuses);
 });
@@ -2406,7 +2422,7 @@ app.get('/api/ebos/status', async (req, res) => {
 // panel itself runs. Sorted worst-exposure-first so the businesses that
 // actually need attention aren't buried below ones that don't.
 app.get('/api/ebos/messaging-cost', async (req, res) => {
-  const ebosClients = getEbosClients(loadRegistry());
+  const ebosClients = getRealEbosClients(loadRegistry());
   const results = await Promise.all(
     ebosClients.map(async (c) => {
       try {
@@ -2441,7 +2457,7 @@ app.get('/api/ebos/business-intelligence', async (req, res) => {
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : null;
   const days = !month && req.query.days ? Number(req.query.days) : null;
   const qs = month ? `?month=${month}` : days ? `?days=${days}` : '';
-  const ebosClients = getEbosClients(loadRegistry());
+  const ebosClients = getRealEbosClients(loadRegistry());
   const results = await Promise.all(
     ebosClients.map(async (c) => {
       try {
@@ -2488,7 +2504,7 @@ app.get('/api/ebos/business-intelligence', async (req, res) => {
 // so summing by array index is safe without re-matching on the month string.
 app.get('/api/ebos/business-intelligence-history', async (req, res) => {
   const months = Math.min(Number(req.query.months) || 12, 24);
-  const ebosClients = getEbosClients(loadRegistry());
+  const ebosClients = getRealEbosClients(loadRegistry());
   const perBusiness = await Promise.all(
     ebosClients.map(async (c) => {
       try {
@@ -2530,7 +2546,7 @@ app.get('/api/ebos/business-intelligence-history', async (req, res) => {
 // readable no matter how many businesses are live.
 app.get('/api/ebos/monitor-feed', async (req, res) => {
   const hours = Math.min(Number(req.query.hours) || 3, 24);
-  let ebosClients = getEbosClients(loadRegistry());
+  let ebosClients = getRealEbosClients(loadRegistry());
   // Optional single-business filter -- the /monitoring page's real answer
   // to "20 restaurants x 200 messages gets excessive": narrow to one
   // business instead of always fetching and merging every business's feed.
