@@ -67,6 +67,25 @@ export async function markCatalogConnected() {
   await pool.query('update business set whatsapp_catalog_connected = true where id = (select id from business limit 1)');
 }
 
+// Deletes the catalogue itself (not an item in it) via the Graph API, then
+// clears the stored id so the next enable/resync creates a brand-new one.
+// Built because the catalogue is owned by ERA_BUSINESS_MANAGER_ID, not this
+// business -- a client logged into their own Meta account can see it as a
+// shared asset but has no Delete button for it (only an admin of the owning
+// business gets that), so the API, with the same token that created it, is
+// the only way this business can actually get rid of it. Irreversible on
+// Meta's side: every item in the catalogue goes with it, and if it's wired
+// to this number's "View menu" button, that breaks until a new catalogue is
+// created and reconnected (the usual manual Connect Catalog step).
+export async function deleteCatalog() {
+  const { accessToken } = creds();
+  const status = await getCatalogStatus();
+  if (!status.catalogId) return { deleted: false, reason: 'no catalogue set up' };
+  await graphFetch(status.catalogId, accessToken, { method: 'DELETE' });
+  await pool.query('update business set whatsapp_catalog_id = null, whatsapp_catalog_connected = false where id = (select id from business limit 1)');
+  return { deleted: true, catalogId: status.catalogId };
+}
+
 function toBatchItem(product, businessName) {
   return {
     method: 'UPDATE', // paired with allow_upsert below -- covers create and update in one path, no need to track existence

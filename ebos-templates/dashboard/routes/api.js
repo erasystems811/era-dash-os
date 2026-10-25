@@ -30,7 +30,7 @@ import { getWalletStatus, creditWallet } from '../engine/wallet.js';
 import { createDelivery } from '../engine/delivery.js';
 import { costForTokens, INTRO, STANDARD, INTRO_ENDS } from '../lib/ai-pricing.js';
 import { getWhatsappBusinessProfile, updateWhatsappBusinessProfile } from '../engine/whatsapp-profile.js';
-import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort, deleteBestEffort } from '../engine/whatsapp-catalog.js';
+import { getCatalogStatus, markCatalogConnected, syncAllProducts, syncBestEffort, deleteBestEffort, deleteCatalog } from '../engine/whatsapp-catalog.js';
 import { router as deliveryRoutes } from './delivery.js';
 import { router as voiceRoutes } from './voice.js';
 import { router as dineinRoutes } from './dinein.js';
@@ -562,6 +562,14 @@ router.post('/whatsapp-catalog/resync', requireEraAdmin, async (req, res) => {
 router.post('/whatsapp-catalog/confirm-connected', requireEraAdmin, async (req, res) => {
   await markCatalogConnected();
   res.json({ ok: true });
+});
+
+router.post('/whatsapp-catalog/delete', requireEraAdmin, async (req, res) => {
+  try {
+    res.json(await deleteCatalog());
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
 });
 
 // Delivery add-on config (own_riders/relay/none). Two legitimate callers,

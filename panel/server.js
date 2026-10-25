@@ -1191,6 +1191,9 @@ function renderWaCatalogBlock(name, s) {
     el.innerHTML = '<strong>WhatsApp Catalogue:</strong> <span class="badge active">Connected</span>'
       + ' <button type="button" style="margin-left:8px;" onclick="waCatalogResync(' + n + ')">Resync now</button>';
   }
+  if (s.catalogId) {
+    el.innerHTML += ' <button type="button" class="danger" style="margin-left:8px;" onclick="waCatalogDelete(' + n + ')">Delete catalogue</button>';
+  }
 }
 
 async function waCatalogEnable(name) {
@@ -1217,6 +1220,17 @@ async function waCatalogConfirm(name) {
   const res = await fetch('/api/ebos/whatsapp-catalog-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name }) });
   const s = await res.json();
   if (!res.ok) { alert(s.error || 'Failed'); return; }
+  loadWaCatalogStatus(name);
+}
+
+async function waCatalogDelete(name) {
+  if (!confirm('Permanently delete ' + name + '\\'s WhatsApp Catalogue on Meta? Every item in it goes with it, and if it\\'s wired to their "View menu" button, that breaks until a new catalogue is created and reconnected. This cannot be undone.')) return;
+  const el = document.getElementById('waCatalogBlock');
+  el.innerHTML = 'Deleting...';
+  const res = await fetch('/api/ebos/whatsapp-catalog-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client: name }) });
+  const s = await res.json();
+  if (!res.ok) { alert(s.error || 'Failed'); }
+  else alert('Catalogue deleted.');
   loadWaCatalogStatus(name);
 }
 
@@ -2617,6 +2631,15 @@ app.post('/api/ebos/whatsapp-catalog-confirm', async (req, res) => {
   try {
     const client = ebosClientOrThrow(req.body.client);
     res.json(await callBusinessApi(client, '/api/whatsapp-catalog/confirm-connected', 'POST'));
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+app.post('/api/ebos/whatsapp-catalog-delete', async (req, res) => {
+  try {
+    const client = ebosClientOrThrow(req.body.client);
+    res.json(await callBusinessApi(client, '/api/whatsapp-catalog/delete', 'POST'));
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message });
   }
